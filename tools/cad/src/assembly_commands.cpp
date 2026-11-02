@@ -57,7 +57,10 @@ AsmFn reported(AsmFn fn) {
         std::string loose;
         for (const auto& c : doc.freeComponents) loose += (loose.empty() ? "" : ",") + c;
         r.message += doc.dof == 0 ? " (fully defined)" : " (" + std::to_string(doc.dof) + (doc.dof == 1 ? " degree" : " degrees") + " of freedom left: " + loose + ")";
-        r.with("doc", stringParam(p, "doc")).with("dof", static_cast<std::int64_t>(doc.dof)).with("free", loose);
+        std::string hit;
+        for (const auto& m : doc.limitsHit) hit += (hit.empty() ? "" : ",") + m;
+        if (!hit.empty()) r.message += ", at the limit of " + hit;
+        r.with("doc", stringParam(p, "doc")).with("dof", static_cast<std::int64_t>(doc.dof)).with("free", loose).with("limits_hit", hit);
         return mesh::maybePreview(r, doc, p);
     };
 }
@@ -178,9 +181,14 @@ void registerAssemblyCommands(Session& session) {
              "feature of the part (datum plane or axis, sketch plane, hole or cylinder axis; hole1#2 = the second hole of "
              "a pattern). coincident: faces meet (facing each other; flip for the same way), axes line up, points meet. "
              "concentric: two axes line up. distance: planes face each other value apart (also points, axes). angle "
-             "between planes or axes; parallel; perpendicular; fastened locks b to a where it is now.",
+             "between planes or axes; parallel; perpendicular; fastened locks b to a where it is now. distance and angle "
+             "take min/max limits instead of a value (a slot's travel, a hinge's stop): the mate only holds at a limit. gear: "
+             "two axes turn together, b turning value turns per turn of a (teeth of a / teeth of b), opposite ways unless "
+             "flip; rack: a's turning slides b along its axis or plane, value per radian (the pinion's pitch radius). Gears "
+             "and racks only link the turning: mate each axis to its shaft too.",
              withDoc({{"type", ParamType::String, "kind of mate", true, mateTypes(), {}}, str("a", "first reference, e.g. base1/top", true),
-                      str("b", "second reference, e.g. peg1/bottom", true), str("value", "distance or angle (degrees): number or expression"),
+                      str("b", "second reference, e.g. peg1/bottom", true), str("value", "distance or angle (degrees), gear ratio or rack radius: number or expression"),
+                      str("min", "distance / angle: lower limit (instead of a value)"), str("max", "distance / angle: upper limit"),
                       boolean("flip", "planes face the same way (or the other angle branch)", false), str("name", "mate name (default mate1, ...)")}),
              true},
             asmCommand(session, reported([](AssemblyDoc& doc, const Params& p) {
@@ -189,7 +197,12 @@ void registerAssemblyCommands(Session& session) {
                 m.a = stringParam(p, "a");
                 m.b = stringParam(p, "b");
                 m.value = cmd::text(p, "value");
+                m.min = cmd::text(p, "min");
+                m.max = cmd::text(p, "max");
                 m.flip = boolParam(p, "flip", false);
+                if ((m.type == "distance" || m.type == "angle") && m.value.empty() && m.min.empty() && m.max.empty())
+                    return Result::failure(m.type + " needs a value, or min/max limits");
+                if (!m.min.empty() && !m.max.empty() && doc.eval(m.min) > doc.eval(m.max)) return Result::failure("min is bigger than max");
                 m.name = has(p, "name") ? stringParam(p, "name") : doc.newName("mate");
                 if (doc.findMate(m.name)) return Result::failure("there is already a mate called '" + m.name + "'");
                 if (m.type == "fastened") {
@@ -203,12 +216,15 @@ void registerAssemblyCommands(Session& session) {
                 return Result::success(m.type + " mate " + m.name + " (" + m.a + ", " + m.b + ")", m.name).with("mate", m.name);
             })));
 
-    reg.add({"cad.mate_set", "Edit Mate", "Change a mate's value (distance or angle) or flip it.",
-             withDoc({str("mate", "mate name", true), str("value", "new value or expression"), {"flip", ParamType::Bool, "flip it", false, {}, {}}}), true},
+    reg.add({"cad.mate_set", "Edit Mate", "Change a mate's value (distance, angle, gear ratio), its min/max limits, or flip it. An empty value clears it.",
+             withDoc({str("mate", "mate name", true), str("value", "new value or expression"), str("min", "lower limit"), str("max", "upper limit"),
+                      {"flip", ParamType::Bool, "flip it", false, {}, {}}}), true},
             asmCommand(session, reported([](AssemblyDoc& doc, const Params& p) {
                 Mate* m = doc.findMate(stringParam(p, "mate"));
                 if (!m) return Result::failure("no mate called '" + stringParam(p, "mate") + "'");
                 if (has(p, "value")) m->value = cmd::text(p, "value");
+                if (has(p, "min")) m->min = cmd::text(p, "min");
+                if (has(p, "max")) m->max = cmd::text(p, "max");
                 if (has(p, "flip")) m->flip = boolParam(p, "flip", false);
                 return Result::success("changed " + m->name, m->name);
             })));
@@ -223,9 +239,12 @@ void registerAssemblyCommands(Session& session) {
 
     reg.add({"cad.assembly_move", "Move Component",
              "Place a component (x y z rx ry rz; absolute, or relative=true to move it from where it is). Mates still "
-             "hold: it ends up as close as they allow. fixed=true/false pins or frees it.",
+             "hold: it ends up as close as they allow. drag=true holds it where you put it and moves the rest to suit, like "
+             "dragging it in a CAD app (with relative=true it turns about its own origin): turn a gear and the other gears turn, swing a link and the linkage follows, up to its "
+             "limits. fixed=true/false pins or frees it.",
              withDoc([] {
                  std::vector<ParamSpec> s{str("component", "component name", true), boolean("relative", "move from where it is", false),
+                                          boolean("drag", "hold it where it's put and move the rest (falls back to as close as the mates allow)", false),
                                           {"fixed", ParamType::Bool, "pin it in place (or free it)", false, {}, {}}};
                  for (auto& q : placementParams()) s.push_back(q);
                  return s;
@@ -236,8 +255,32 @@ void registerAssemblyCommands(Session& session) {
                 if (!c) return Result::failure("no component called '" + stringParam(p, "component") + "'");
                 bool any = false;
                 for (const auto* k : {"x", "y", "z", "rx", "ry", "rz"}) any = any || has(p, k);
-                if (any) c->pose = poseFrom(doc, p, c->pose, !boolParam(p, "relative", false));
+                const bool drag = boolParam(p, "drag", false);
+                if (any && drag && boolParam(p, "relative", false)) {
+                    // dragging turns it about its own origin (a gear or wheel is modelled round it), as a mouse drag would
+                    auto v = [&](const std::string& k) { return has(p, k) ? doc.eval(cmd::text(p, k)) : 0.0; };
+                    const mesh::Vec3 centre = c->pose.point({0, 0, 0});
+                    c->pose = Mat4::translate(mesh::Vec3{v("x"), v("y"), v("z")} + centre) * Mat4::rotate({v("rx"), v("ry"), v("rz")}) *
+                              Mat4::translate(centre * -1) * c->pose;
+                } else if (any) {
+                    c->pose = poseFrom(doc, p, c->pose, !boolParam(p, "relative", false));
+                }
                 if (has(p, "fixed")) c->fixed = boolParam(p, "fixed", false);
+                if (any && drag) {
+                    // try holding it; when the mates can't take it there, fall back to the closest fit
+                    const auto poses = [&] {
+                        std::vector<Mat4> v;
+                        for (const auto& o : doc.components) v.push_back(o.pose);
+                        return v;
+                    }();
+                    doc.hold = c->name;
+                    try {
+                        doc.solve();
+                        return Result::success("dragged " + c->name, c->name);
+                    } catch (const std::exception&) {
+                        for (std::size_t i = 0; i < doc.components.size(); ++i) doc.components[i].pose = poses[i];
+                    }
+                }
                 return Result::success("moved " + c->name, c->name);
             })));
 

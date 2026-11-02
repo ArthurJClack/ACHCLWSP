@@ -13,6 +13,8 @@
 
 #include "wetwaresuite/blueprint/blueprint.hpp"
 #include "wetwaresuite/cad/assembly.hpp"
+#include "wetwaresuite/mesh/csg.hpp"
+#include "wetwaresuite/mesh/primitives.hpp"
 #include "wetwaresuite/mesh/topology.hpp"
 #include "cmdutil.hpp"
 
@@ -208,7 +210,89 @@ struct Placed {
     std::vector<Seg> segs;
     blueprint::Box box;  // view coordinates
     P2 at;               // where the box's lower-left corner goes on the drawing
+    std::vector<Seg> hatch;  // section views: the cut faces' hatching
+    std::string label;       // instead of the view's name
 };
+
+// The loops where a plane cuts the mesh (n.p = offset), in 3D.
+std::vector<std::vector<Vec3>> planeLoops(const Mesh& m, const Vec3& n, double offset) {
+    std::vector<std::pair<Vec3, Vec3>> segs;
+    for (std::size_t t = 0; t < m.triangleCount(); ++t) {
+        Vec3 pts[3] = {m.corner(t, 0), m.corner(t, 1), m.corner(t, 2)};
+        double d[3];
+        for (int k = 0; k < 3; ++k) d[k] = mesh::dot(pts[k], n) - offset;
+        std::vector<Vec3> cut;
+        for (int k = 0; k < 3; ++k) {
+            const int j = (k + 1) % 3;
+            if ((d[k] > 0) != (d[j] > 0)) cut.push_back(mesh::lerp(pts[k], pts[j], d[k] / (d[k] - d[j])));
+        }
+        if (cut.size() == 2) segs.push_back({cut[0], cut[1]});
+    }
+    std::vector<std::vector<Vec3>> loops;
+    const double tol = 1e-7 * (mesh::bounds(m).diagonal() + 1);
+    std::vector<char> used(segs.size(), 0);
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        if (used[i]) continue;
+        used[i] = 1;
+        std::vector<Vec3> loop{segs[i].first, segs[i].second};
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (std::size_t j = 0; j < segs.size(); ++j) {
+                if (used[j]) continue;
+                if (mesh::length(segs[j].first - loop.back()) < tol) loop.push_back(segs[j].second);
+                else if (mesh::length(segs[j].second - loop.back()) < tol) loop.push_back(segs[j].first);
+                else continue;
+                used[j] = 1;
+                grew = true;
+            }
+        }
+        if (loop.size() >= 4) loops.push_back(std::move(loop));
+    }
+    return loops;
+}
+
+// 45 degree hatching inside the loops (even-odd, so holes stay clear), `spacing` apart.
+std::vector<Seg> hatchLoops(const std::vector<std::vector<P2>>& loops, double spacing) {
+    std::vector<Seg> out;
+    if (loops.empty() || !(spacing > 0)) return out;
+    // in coordinates turned 45 degrees: u along the hatch lines, w across them
+    auto toUW = [](const P2& p) { return P2{(p.x + p.y) * 0.70710678, (p.y - p.x) * 0.70710678}; };
+    auto fromUW = [](const P2& q) { return P2{(q.x - q.y) * 0.70710678, (q.x + q.y) * 0.70710678}; };
+    double w0 = 1e300, w1 = -1e300;
+    for (const auto& l : loops)
+        for (const auto& p : l) {
+            const double w = toUW(p).y;
+            w0 = std::min(w0, w), w1 = std::max(w1, w);
+        }
+    if ((w1 - w0) / spacing > 4000) spacing = (w1 - w0) / 4000;
+    for (double w = std::ceil(w0 / spacing) * spacing; w <= w1; w += spacing) {
+        std::vector<double> xs;
+        for (const auto& l : loops)
+            for (std::size_t i = 0; i < l.size(); ++i) {
+                const P2 a = toUW(l[i]), b = toUW(l[(i + 1) % l.size()]);
+                if ((a.y > w) != (b.y > w)) xs.push_back(a.x + (b.x - a.x) * (w - a.y) / (b.y - a.y));
+            }
+        std::sort(xs.begin(), xs.end());
+        for (std::size_t i = 0; i + 1 < xs.size(); i += 2) out.push_back({fromUW({xs[i], w}), fromUW({xs[i + 1], w}), false});
+    }
+    return out;
+}
+
+// The part of segment ab inside the circle (c, r), if any.
+bool clipToCircle(P2& a, P2& b, const P2& c, double r) {
+    const P2 d = b - a, f = a - c;
+    const double A = blueprint::dot(d, d), B = 2 * blueprint::dot(f, d), C = blueprint::dot(f, f) - r * r;
+    if (A < 1e-30) return C <= 0;
+    const double disc = B * B - 4 * A * C;
+    if (disc < 0) return false;
+    const double sq = std::sqrt(disc);
+    const double t0 = std::max(0.0, (-B - sq) / (2 * A)), t1 = std::min(1.0, (-B + sq) / (2 * A));
+    if (t0 >= t1) return false;
+    const P2 a0 = a;
+    a = a0 + d * t0;
+    b = a0 + d * t1;
+    return true;
+}
 
 std::string today() {
     const std::time_t t = std::time(nullptr);
@@ -226,7 +310,8 @@ void registerDrawingCommands(Session& session) {
          "right,iso; also left, back, bottom) with hidden lines dashed, laid out in third-angle (US) or first-angle "
          "(ISO) projection, overall dimensions, hole and circle diameters with centre marks, thread callouts, a parts "
          "list for assemblies and a title block, on a sheet at a standard scale. It opens as a blueprint drawing (edit "
-         "it with blueprint.*) and path= exports .pdf, .svg, .dxf or .png.",
+         "it with blueprint.*) and path= exports .pdf, .svg, .dxf or .png. section= adds a hatched section view (with its "
+         "cutting line on another view) and detail= an enlarged detail circle.",
          {{"doc", ParamType::String, "id of an open part (cad1) or assembly (asm1)", true},
           cmd::str("path", "export to this file: .pdf, .svg, .dxf or .png (optional)"),
           cmd::str("views", "comma-separated views", false, "front,top,right,iso"),
@@ -234,7 +319,10 @@ void registerDrawingCommands(Session& session) {
           cmd::str("scale", "drawing scale like 1:2, or auto to fit the sheet", false, "auto"),
           cmd::str("paper", "sheet size: A4, A3, A2, A1, A0, letter, tabloid", false, "A3"), cmd::str("title", "title block title"),
           cmd::str("author", "drawn by"), cmd::boolean("hidden", "draw hidden lines (dashed)", true),
-          cmd::boolean("dims", "add dimensions, centre marks and callouts", true)},
+          cmd::boolean("dims", "add dimensions, centre marks and callouts", true),
+          cmd::str("section", "add a section view cut by a plane: x=20, y=0 or z=5 (model coordinates), hatched where it cuts"),
+          cmd::str("detail", "add an enlarged detail of a view: view:a,b,radius, e.g. front:20,5,8 (a, b along the view's right and up)"),
+          {"detail_scale", ParamType::Number, "how much the detail is enlarged", false, {}, 2.0}},
          false},
         [&session](const Params& p) -> std::unique_ptr<Action> {
             return std::make_unique<FunctionAction>([&session, p] {
@@ -279,6 +367,77 @@ void registerDrawingCommands(Session& session) {
                             pv.box.add(s.a);
                             pv.box.add(s.b);
                         }
+                        views.push_back(std::move(pv));
+                    }
+                    // a section: the part behind the plane, seen square on, with the cut faces hatched
+                    std::string sectionAxis;
+                    double sectionAt = 0;
+                    if (cmd::has(p, "section")) {
+                        const std::string sec = stringParam(p, "section");
+                        const auto eq = sec.find('=');
+                        if (eq != 1 || (sec[0] != 'x' && sec[0] != 'y' && sec[0] != 'z'))
+                            return Result::failure("section is a plane like x=20, y=0 or z=5");
+                        sectionAxis = sec.substr(0, 1);
+                        sectionAt = cad ? cad->eval(sec.substr(2)) : std::stod(sec.substr(2));
+                        ViewDef v;
+                        viewByName(sectionAxis == "y" ? "front" : sectionAxis == "x" ? "right" : "top", v);
+                        const Vec3 n = sectionAxis == "x" ? Vec3{1, 0, 0} : sectionAxis == "y" ? Vec3{0, 1, 0} : Vec3{0, 0, 1};
+                        const mesh::Bounds bb = mesh::bounds(doc->mesh);
+                        const double pad = bb.diagonal() + 1;
+                        // take away what's between the viewer and the plane
+                        Vec3 lo = bb.min - Vec3{pad, pad, pad}, hi = bb.max + Vec3{pad, pad, pad};
+                        const bool viewerLow = mesh::dot(v.d, n) > 0;  // looking along +n: the viewer is on the low side
+                        if (viewerLow) hi = hi - n * mesh::dot(hi, n) + n * sectionAt;
+                        else lo = lo - n * mesh::dot(lo, n) + n * sectionAt;
+                        Mesh cutter = mesh::box(hi - lo, false);
+                        for (auto& q : cutter.positions) q = q + lo;
+                        const Mesh half = mesh::booleanDifference(doc->mesh, cutter);
+                        if (half.empty()) return Result::failure("the section plane " + sec + " misses the part");
+                        Placed pv{v, projectEdges(half, v, true), {}, {}, {}, "SECTION A-A"};
+                        pv.segs.erase(std::remove_if(pv.segs.begin(), pv.segs.end(), [](const Seg& q) { return q.hidden; }), pv.segs.end());
+                        std::vector<std::vector<P2>> loops2;
+                        for (const auto& loop : planeLoops(doc->mesh, n, sectionAt)) {
+                            std::vector<P2> l2;
+                            for (const auto& q : loop) l2.push_back({mesh::dot(q, v.r), mesh::dot(q, v.u)});
+                            loops2.push_back(std::move(l2));
+                        }
+                        pv.hatch = hatchLoops(loops2, bb.diagonal() / 60);
+                        for (const auto& q : pv.segs) pv.box.add(q.a), pv.box.add(q.b);
+                        pv.view.name = "section";
+                        views.push_back(std::move(pv));
+                    }
+                    // a detail: a circle of another view, enlarged
+                    std::string detailOf;
+                    P2 detailC{0, 0};
+                    double detailR = 0;
+                    if (cmd::has(p, "detail")) {
+                        const std::string det = stringParam(p, "detail");
+                        const auto colon = det.find(':');
+                        detailOf = colon == std::string::npos ? "front" : det.substr(0, colon);
+                        const auto nums = splitList(colon == std::string::npos ? det : det.substr(colon + 1));
+                        if (nums.size() != 3) return Result::failure("detail is view:a,b,radius, e.g. front:20,5,8");
+                        auto value = [&](const std::string& t) { return cad ? cad->eval(t) : std::stod(t); };
+                        detailC = {value(nums[0]), value(nums[1])};
+                        detailR = value(nums[2]);
+                        if (!(detailR > 0)) return Result::failure("the detail's radius must be positive");
+                        const double k = numberParam(p, "detail_scale", 2);
+                        if (!(k > 0)) return Result::failure("detail_scale must be positive");
+                        ViewDef v;
+                        if (!viewByName(detailOf, v) || detailOf == "iso") return Result::failure("detail: unknown view '" + detailOf + "' (front, top, right, ...)");
+                        Placed pv{v, {}, {}, {}, {}, ""};
+                        char label[64];
+                        std::snprintf(label, sizeof label, "DETAIL B (%g:1)", k);
+                        pv.label = label;
+                        for (auto q : projectEdges(doc->mesh, v, hidden)) {
+                            if (!clipToCircle(q.a, q.b, detailC, detailR)) continue;
+                            pv.segs.push_back({detailC + (q.a - detailC) * k, detailC + (q.b - detailC) * k, q.hidden});
+                        }
+                        for (int i = 0; i < 72; ++i) {  // the detail's own circle
+                            const double a0 = i * 2 * 3.14159265358979323846 / 72, a1 = (i + 1) * 2 * 3.14159265358979323846 / 72;
+                            pv.segs.push_back({detailC + P2{std::cos(a0), std::sin(a0)} * (detailR * k), detailC + P2{std::cos(a1), std::sin(a1)} * (detailR * k), false});
+                        }
+                        for (const auto& q : pv.segs) pv.box.add(q.a), pv.box.add(q.b);
+                        pv.view.name = "detail";
                         views.push_back(std::move(pv));
                     }
                     if (views.empty()) return Result::failure("no views asked for");
@@ -339,6 +498,10 @@ void registerDrawingCommands(Session& session) {
                     const P2 mid{(layout.x0 + layout.x1) / 2, (layout.y0 + layout.y1) / 2};
                     d->origin = mid - P2{d->paperWidth() / 2, 10 + 45 + ph / 2} / d->k();
                     int lines = 0, hiddenLines = 0, dimCount = 0;
+                    bool sectionDrawn = false;
+                    auto& sect = d->ensureLayer("SECTION");
+                    sect.weight = 0.13;
+                    sect.color = {70, 70, 70, 255};
                     auto add = [&](blueprint::Entity e) {
                         d->add(std::move(e));
                     };
@@ -352,15 +515,69 @@ void registerDrawingCommands(Session& session) {
                             add(e);
                             (s.hidden ? hiddenLines : lines) += 1;
                         }
+                        for (const auto& hs : v.hatch) {
+                            blueprint::Entity e;
+                            e.type = blueprint::EntityType::Line;
+                            e.layer = "SECTION";
+                            e.pts = {hs.a + shift, hs.b + shift};
+                            add(e);
+                        }
+                        // where the section cuts, on the first view that sees the plane edge on; the detail's circle on its view
+                        if (!sectionAxis.empty() && v.view.name != "section" && v.view.name != "detail" && v.view.name != "iso" && !sectionDrawn) {
+                            const Vec3 n = sectionAxis == "x" ? Vec3{1, 0, 0} : sectionAxis == "y" ? Vec3{0, 1, 0} : Vec3{0, 0, 1};
+                            if (std::fabs(mesh::dot(n, v.view.d)) < 1e-9) {
+                                sectionDrawn = true;
+                                const double alongR = mesh::dot(n, v.view.r), alongU = mesh::dot(n, v.view.u);
+                                const double ext = gap * 0.25;
+                                P2 a, b;
+                                if (std::fabs(alongR) > 0.5) {
+                                    const double x = sectionAt * alongR;
+                                    a = P2{x, v.box.y0 - ext}, b = P2{x, v.box.y1 + ext};
+                                } else {
+                                    const double y = sectionAt * alongU;
+                                    a = P2{v.box.x0 - ext, y}, b = P2{v.box.x1 + ext, y};
+                                }
+                                blueprint::Entity cut;
+                                cut.type = blueprint::EntityType::Line;
+                                cut.layer = "CENTER";
+                                cut.pts = {a + shift, b + shift};
+                                add(cut);
+                                for (const P2& end : {a, b}) {
+                                    blueprint::Entity t;
+                                    t.type = blueprint::EntityType::Text;
+                                    t.layer = "DIMS";
+                                    t.text = "A";
+                                    t.height = 3.5 / d->k();
+                                    t.halign = blueprint::HAlign::Center;
+                                    t.c = end + shift + P2{0, 1.5 / d->k()};
+                                    add(t);
+                                }
+                            }
+                        }
+                        if (!detailOf.empty() && v.view.name == detailOf) {
+                            blueprint::Entity ring;
+                            ring.type = blueprint::EntityType::Circle;
+                            ring.layer = "DIMS";
+                            ring.c = detailC + shift;
+                            ring.r = detailR;
+                            add(ring);
+                            blueprint::Entity t;
+                            t.type = blueprint::EntityType::Text;
+                            t.layer = "DIMS";
+                            t.text = "B";
+                            t.height = 3.5 / d->k();
+                            t.c = detailC + shift + P2{detailR * 0.75, detailR * 0.75};
+                            add(t);
+                        }
                         blueprint::Entity label;
                         label.type = blueprint::EntityType::Text;
                         label.layer = "DIMS";
-                        label.text = v.view.name == "iso" ? "ISOMETRIC" : v.view.name == "top" ? "TOP" : v.view.name == "front" ? "FRONT" : v.view.name == "right" ? "RIGHT" : v.view.name == "left" ? "LEFT" : v.view.name == "back" ? "BACK" : "BOTTOM";
+                        label.text = !v.label.empty() ? v.label : v.view.name == "iso" ? "ISOMETRIC" : v.view.name == "top" ? "TOP" : v.view.name == "front" ? "FRONT" : v.view.name == "right" ? "RIGHT" : v.view.name == "left" ? "LEFT" : v.view.name == "back" ? "BACK" : "BOTTOM";
                         label.height = 3.5 / d->k();
                         label.halign = blueprint::HAlign::Center;
                         label.c = P2{v.at.x + v.box.width() / 2, v.at.y - gap * 0.55};
                         add(label);
-                        if (!dims || v.view.name == "iso") continue;
+                        if (!dims || v.view.name == "iso" || v.view.name == "section" || v.view.name == "detail") continue;
                         const double off = gap * 0.3;
                         blueprint::Entity w;
                         w.type = blueprint::EntityType::Dimension;

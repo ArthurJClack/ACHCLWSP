@@ -740,7 +740,9 @@ void registerSketchEditCommands(Session& session) {
     reg.add({"cad.sketch_geometry", "Sketch Geometry",
              "A sketch's solved geometry as numbers, for drawing it in a window: lines = x1,y1,x2,y2,... segments (arcs and "
              "circles as short segments), construction = the same for construction geometry, points = x,y of every point, "
-             "free = points that can still move, profiles = each closed region as a count then x,y pairs, origin/u/v/n = its plane in the part, used = a later feature is built from it. Without sketch= it "
+             "free = points that can still move, profiles = each closed region as a count then x,y pairs, origin/u/v/n = its plane in the part, used = a later feature is built from it; "
+             "point_ids/point_xy/point_free, entities (id:kind) with entity_outlines (count then x,y), and dims (id:type) "
+             "with dim_values (one per line), dim_at (where to write each), dim_lines and dim_measured, for picking. Without sketch= it "
              "uses the last sketch; sketches lists them all.",
              {docParam(), {"sketch", ParamType::String, "name of a sketch feature (default: the last one)", false}}, false, true},
             cadCommand(session, [](CadDoc& doc, const Params& p) {
@@ -778,9 +780,78 @@ void registerSketchEditCommands(Session& session) {
                 bool used = false;
                 for (std::size_t i = static_cast<std::size_t>(doc.featureIndex(name)) + 1; i < doc.features.size() && !used; ++i)
                     for (const auto& [field, value] : doc.features[i].values) used = used || mentions(value);
+                // for picking and dragging in a window: every point by id, every entity's outline, and each
+                // dimension with where its value is written and what it measures
+                std::string pointIds, entityIds, dimIds, dimValues;
+                NumberList pointXy, pointFree, entityOutlines, dimAt, dimMeasured, dimLines;
+                for (const auto& [id, q] : s.points) {
+                    pointIds += (pointIds.empty() ? "" : ",") + id;
+                    pointXy.insert(pointXy.end(), {q.x, q.y});
+                    pointFree.push_back(std::find(s.underDefined.begin(), s.underDefined.end(), id) != s.underDefined.end() ? 1 : 0);
+                }
+                for (const auto& e : f->sketch.entities) {
+                    entityIds += (entityIds.empty() ? "" : ",") + e.id + ":" + e.kind;
+                    const auto pts = detail::entityOutline(e, s, 64);
+                    entityOutlines.push_back(static_cast<double>(pts.size()));
+                    for (const auto& q : pts) entityOutlines.insert(entityOutlines.end(), {q.x, q.y});
+                }
+                auto at2 = [&](const std::string& ref, mesh::Vec2& out) {
+                    if (ref == "origin") return out = {0, 0}, true;
+                    try {
+                        const std::string id = pointId(f->sketch, ref);
+                        auto it = s.points.find(id);
+                        if (it == s.points.end()) return false;
+                        out = it->second;
+                        return true;
+                    } catch (const std::invalid_argument&) {
+                        return false;
+                    }
+                };
+                for (const auto& c : f->sketch.constraints) {
+                    if (std::find(dimensionalConstraints().begin(), dimensionalConstraints().end(), c.type) == dimensionalConstraints().end()) continue;
+                    mesh::Vec2 a{}, b{};
+                    std::vector<mesh::Vec2> ends;
+                    for (const auto& ref : c.refs) {
+                        mesh::Vec2 q;
+                        if (at2(ref, q)) {
+                            ends.push_back(q);
+                            continue;
+                        }
+                        const SketchEntity* e = f->sketch.entity(ref);
+                        if (!e) continue;
+                        if (e->kind == "line" && e->points.size() == 2 && s.points.count(e->points[0]) && s.points.count(e->points[1])) {
+                            ends.push_back(s.points.at(e->points[0]));
+                            ends.push_back(s.points.at(e->points[1]));
+                        } else if ((e->kind == "circle" || e->kind == "arc") && s.points.count(e->points[0])) {
+                            const mesh::Vec2 ctr = s.points.at(e->points[0]);
+                            const double r = s.radii.count(e->id) ? s.radii.at(e->id) : e->radius;
+                            ends.push_back(ctr);
+                            ends.push_back({ctr.x + r * 0.7071, ctr.y + r * 0.7071});
+                        }
+                    }
+                    if (ends.empty()) continue;
+                    a = ends.front();
+                    b = ends.size() > 1 ? ends[1] : ends.front();
+                    if (c.type == "angle") b = a;  // written at the first line's start
+                    dimIds += (dimIds.empty() ? "" : ",") + c.id + ":" + c.type;
+                    dimValues += (dimValues.empty() ? "" : "\n") + c.value;
+                    dimAt.insert(dimAt.end(), {(a.x + b.x) / 2, (a.y + b.y) / 2});
+                    dimLines.insert(dimLines.end(), {a.x, a.y, b.x, b.y});
+                    dimMeasured.push_back(s.measured.count(c.id) ? s.measured.at(c.id) : 0);
+                }
                 Result r = Result::success(name + ": " + s.status(), name);
                 r.with("doc", stringParam(p, "doc"))
                     .with("sketch", name)
+                    .with("point_ids", pointIds)
+                    .with("point_xy", pointXy)
+                    .with("point_free", pointFree)
+                    .with("entities", entityIds)
+                    .with("entity_outlines", entityOutlines)
+                    .with("dims", dimIds)
+                    .with("dim_values", dimValues)
+                    .with("dim_at", dimAt)
+                    .with("dim_lines", dimLines)
+                    .with("dim_measured", dimMeasured)
                     .with("used", used)
                     .with("sketches", sketches)
                     .with("status", s.status())

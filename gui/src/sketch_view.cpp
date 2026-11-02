@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <tuple>
 
 #include "shell.hpp"
 
@@ -38,9 +41,39 @@ struct SketchToolDef {
     const char* tip;
 };
 const SketchToolDef kSketchTools[] = {
+    {"Select", SketchEdit::Tool::Select, ImGuiKey_S, "S", "Drag a point to move it: the sketch follows its relations and dimensions. Double-click a dimension to change it"},
     {"Line", SketchEdit::Tool::Line, ImGuiKey_L, "L", "Click, click, click... to draw joined lines. Click the first point again, right-click or Esc to stop"},
     {"Rectangle", SketchEdit::Tool::Rect, ImGuiKey_R, "R", "Drag from one corner to the other (or click both corners)"},
-    {"Circle", SketchEdit::Tool::Circle, ImGuiKey_C, "C", "Drag from the centre out to the size (or click the centre, then the edge)"}};
+    {"Circle", SketchEdit::Tool::Circle, ImGuiKey_C, "C", "Drag from the centre out to the size (or click the centre, then the edge)"},
+    {"Dimension", SketchEdit::Tool::Dimension, ImGuiKey_D, "D", "Click a line for its length, a circle for its diameter, or two points for the distance between them, then type the value"}};
+
+std::vector<std::string> splitOn(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    std::string item;
+    for (char c : s) {
+        if (c == sep) {
+            out.push_back(item);
+            item.clear();
+        } else {
+            item += c;
+        }
+    }
+    if (!s.empty()) out.push_back(item);
+    return out;
+}
+
+float segDist(ImVec2 p, ImVec2 a, ImVec2 b) {
+    const float dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+    const float t = l2 > 0 ? std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / l2, 0.0f, 1.0f) : 0.0f;
+    const float ex = a.x + dx * t - p.x, ey = a.y + dy * t - p.y;
+    return std::sqrt(ex * ex + ey * ey);
+}
+
+bool plainNumber(const std::string& s) {
+    char* end = nullptr;
+    std::strtod(s.c_str(), &end);
+    return !s.empty() && end && *end == 0;
+}
 
 }  // namespace
 
@@ -80,6 +113,40 @@ void Shell::refreshSketch() {
     k.points = listField(r, "points");
     k.free = listField(r, "free");
     k.profiles = listField(r, "profiles");
+    k.pointIds = splitOn(textOf(r, "point_ids"), ',');
+    k.pointXy = listField(r, "point_xy");
+    k.entities.clear();
+    for (const auto& e : splitOn(textOf(r, "entities"), ',')) {
+        const auto colon = e.find(':');
+        k.entities.emplace_back(e.substr(0, colon), colon == std::string::npos ? std::string() : e.substr(colon + 1));
+    }
+    k.outlines.clear();
+    {
+        const NumberList o = listField(r, "entity_outlines");
+        for (std::size_t i = 0; i < o.size();) {
+            const std::size_t n = static_cast<std::size_t>(o[i++]);
+            NumberList pts;
+            for (std::size_t j = 0; j < n && i + 1 < o.size(); ++j, i += 2) pts.insert(pts.end(), {o[i], o[i + 1]});
+            k.outlines.push_back(std::move(pts));
+        }
+    }
+    k.dims.clear();
+    {
+        const auto ids = splitOn(textOf(r, "dims"), ',');
+        const auto values = splitOn(textOf(r, "dim_values"), '\n');
+        const NumberList at = listField(r, "dim_at"), lines = listField(r, "dim_lines"), measured = listField(r, "dim_measured");
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            SketchEdit::Dim d;
+            const auto colon = ids[i].find(':');
+            d.id = ids[i].substr(0, colon);
+            d.type = colon == std::string::npos ? std::string() : ids[i].substr(colon + 1);
+            d.value = i < values.size() ? values[i] : std::string();
+            if (2 * i + 1 < at.size()) d.x = at[2 * i], d.y = at[2 * i + 1];
+            for (int j = 0; j < 4 && 4 * i + 3 < lines.size(); ++j) d.line[j] = lines[4 * i + static_cast<std::size_t>(j)];
+            if (i < measured.size()) d.measured = measured[i];
+            k.dims.push_back(std::move(d));
+        }
+    }
     const NumberList o = listField(r, "origin"), u = listField(r, "u"), v = listField(r, "v"), n = listField(r, "n");
     if (o.size() == 3 && u.size() == 3 && v.size() == 3 && n.size() == 3) {
         for (int i = 0; i < 3; ++i) k.origin[i] = o[i], k.u[i] = u[i], k.v[i] = v[i], k.n[i] = n[i];
@@ -319,6 +386,186 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
         result_ = std::move(r);
     };
     auto base = [&]() { return Params{{"doc", k.doc}, {"sketch", k.sketch}}; };
+    const bool shapeTool = k.tool == SketchEdit::Tool::Line || k.tool == SketchEdit::Tool::Rect || k.tool == SketchEdit::Tool::Circle;
+    const double now = static_cast<double>(SDL_GetTicks()) / 1000.0;
+
+    // the dimensions, written on the sketch: double-click one (or click it with Select) to change it
+    int hotDim = -1;
+    for (std::size_t i = 0; i < k.dims.size(); ++i) {
+        SketchEdit::Dim& d = k.dims[i];
+        const ImVec2 a = toScreen(d.line[0], d.line[1]), b = toScreen(d.line[2], d.line[3]);
+        float nx = -(b.y - a.y), ny = b.x - a.x;
+        const float nl = std::sqrt(nx * nx + ny * ny);
+        if (nl > 1e-3f) nx /= nl, ny /= nl;
+        else nx = 0.7f, ny = -0.7f;
+        const ImVec2 at{toScreen(d.x, d.y).x + nx * 16, toScreen(d.x, d.y).y + ny * 16};
+        std::string label = d.value;
+        if (!plainNumber(d.value)) label += " = " + num(std::round(d.measured * 1000) / 1000);
+        if (d.type == "diameter") label = "\xC3\x98" + label;  // the diameter sign
+        else if (d.type == "radius") label = "R" + label;
+        else if (d.type == "angle") label += "\xC2\xB0";
+        const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+        d.boxMin = {at.x - ts.x / 2 - 5, at.y - ts.y / 2 - 2};
+        d.boxMax = {at.x + ts.x / 2 + 5, at.y + ts.y / 2 + 2};
+        const bool over = hovered && io.MousePos.x >= d.boxMin.x && io.MousePos.x <= d.boxMax.x && io.MousePos.y >= d.boxMin.y && io.MousePos.y <= d.boxMax.y;
+        if (over) hotDim = static_cast<int>(i);
+        if (d.type != "radius" && d.type != "diameter" && d.type != "angle") {  // witness: the measured span, offset to the label
+            const ImU32 wit = IM_COL32(60, 120, 230, 160);
+            dl->AddLine({a.x + nx * 16, a.y + ny * 16}, {b.x + nx * 16, b.y + ny * 16}, wit, 1.0f);
+            dl->AddLine(a, {a.x + nx * 20, a.y + ny * 20}, wit, 1.0f);
+            dl->AddLine(b, {b.x + nx * 20, b.y + ny * 20}, wit, 1.0f);
+        }
+        dl->AddRectFilled(d.boxMin, d.boxMax, over ? ImGui::ColorConvertFloat4ToU32(c) : (dark ? IM_COL32(40, 60, 100, 235) : IM_COL32(225, 235, 252, 240)), 4.0f);
+        dl->AddText({d.boxMin.x + 5, d.boxMin.y + 2}, over ? ImGui::ColorConvertFloat4ToU32(accentText_) : (dark ? IM_COL32(220, 230, 255, 255) : IM_COL32(30, 70, 160, 255)),
+                    label.c_str());
+    }
+    auto openEdit = [&](const std::string& id, const std::string& type, const std::string& refs, const std::string& value) {
+        k.editId = id, k.editType = type, k.editRefs = refs;
+        std::snprintf(k.editBuf, sizeof k.editBuf, "%s", value.c_str());
+        k.editOpen = true;
+        k.drawing = false;
+        ImGui::OpenPopup("##sketchdim");
+    };
+    if (hotDim >= 0 && !k.drawing &&
+        (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || (k.tool == SketchEdit::Tool::Select && ImGui::IsMouseClicked(ImGuiMouseButton_Left)))) {
+        const auto& d = k.dims[static_cast<std::size_t>(hotDim)];
+        openEdit(d.id, d.type, "", d.value);
+        k.fit = false;  // not the double-click that fits the view
+    }
+    if (hotDim >= 0 && !k.editOpen) ImGui::SetTooltip("%s", "Double-click to change this dimension (a number, or a formula like width/2)");
+
+    // the point under the mouse (Select drags it, Dimension measures from it)
+    int hotPoint = -1;
+    if (hovered && hotDim < 0) {
+        float best = 64;
+        for (std::size_t i = 0; i < k.pointIds.size() && 2 * i + 1 < k.pointXy.size(); ++i) {
+            const ImVec2 s2 = toScreen(k.pointXy[2 * i], k.pointXy[2 * i + 1]);
+            const float dx = s2.x - io.MousePos.x, dy = s2.y - io.MousePos.y;
+            if (dx * dx + dy * dy < best) best = dx * dx + dy * dy, hotPoint = static_cast<int>(i);
+        }
+    }
+    const bool click = hovered && hotDim < 0 && !k.editOpen && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+
+    if (k.tool == SketchEdit::Tool::Select) {
+        if (k.dragPoint.empty()) {
+            if (hotPoint >= 0) {
+                dl->AddCircle(toScreen(k.pointXy[2 * static_cast<std::size_t>(hotPoint)], k.pointXy[2 * static_cast<std::size_t>(hotPoint) + 1]), 7.0f,
+                              ImGui::ColorConvertFloat4ToU32(c), 0, 2.5f);
+                if (click) {
+                    k.dragPoint = k.pointIds[static_cast<std::size_t>(hotPoint)];
+                    k.dragX = mx, k.dragY = my;
+                    k.triedX = k.triedY = 1e300;
+                    k.movedAt = now;
+                }
+            }
+        } else {
+            if (mx != k.dragX || my != k.dragY) k.dragX = mx, k.dragY = my, k.movedAt = now;
+            Params p = base();
+            p["point"] = k.dragPoint, p["x"] = num(k.dragX), p["y"] = num(k.dragY);
+            // resting: try it on the sketch, so it and the part follow as you go
+            if (now - k.movedAt > 0.1 && (k.dragX != k.triedX || k.dragY != k.triedY)) {
+                tryRun("cad.sketch_move", p);
+                k.triedX = k.dragX, k.triedY = k.dragY;
+            }
+            dl->AddCircleFilled(toScreen(k.dragX, k.dragY), 5.0f, ImGui::ColorConvertFloat4ToU32(c));
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                dropTrial();
+                k.dragPoint.clear();
+            } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                resultFor_ = "Move point";
+                if (keepTrial("cad.sketch_move", p)) {
+                    Result r = trial_.result;
+                    r.message = sentence(r.message);
+                    result_ = std::move(r);
+                } else {
+                    report(run("cad.sketch_move", p), "Move point");
+                }
+                k.dragPoint.clear();
+            }
+        }
+    } else if (k.tool == SketchEdit::Tool::Dimension && click) {
+        auto pointAt = [&](int i) { return std::make_pair(k.pointXy[2 * static_cast<std::size_t>(i)], k.pointXy[2 * static_cast<std::size_t>(i) + 1]); };
+        if (hotPoint >= 0) {
+            const std::string id = k.pointIds[static_cast<std::size_t>(hotPoint)];
+            if (k.dimFirst.empty() || k.dimFirst == id) {
+                k.dimFirst = id;
+            } else {
+                double ax = 0, ay = 0;
+                for (std::size_t i = 0; i < k.pointIds.size(); ++i)
+                    if (k.pointIds[i] == k.dimFirst) std::tie(ax, ay) = pointAt(static_cast<int>(i));
+                const auto [bx, by] = pointAt(hotPoint);
+                openEdit("", "distance", k.dimFirst + "," + id, num(std::round(std::hypot(bx - ax, by - ay) * 1000) / 1000));
+                k.dimFirst.clear();
+            }
+        } else {
+            // the line, circle or arc under the mouse
+            float best = 7;
+            int hit = -1;
+            for (std::size_t i = 0; i < k.outlines.size() && i < k.entities.size(); ++i) {
+                const NumberList& o = k.outlines[i];
+                for (std::size_t j = 0; j + 3 < o.size(); j += 2) {
+                    const float dd = segDist(io.MousePos, toScreen(o[j], o[j + 1]), toScreen(o[j + 2], o[j + 3]));
+                    if (dd < best) best = dd, hit = static_cast<int>(i);
+                }
+            }
+            k.dimFirst.clear();
+            if (hit >= 0) {
+                const auto& [id, kind] = k.entities[static_cast<std::size_t>(hit)];
+                const NumberList& o = k.outlines[static_cast<std::size_t>(hit)];
+                if (kind == "line" && o.size() >= 4) {
+                    openEdit("", "length", id, num(std::round(std::hypot(o[o.size() - 2] - o[0], o[o.size() - 1] - o[1]) * 1000) / 1000));
+                } else if ((kind == "circle" || kind == "arc") && o.size() >= 6) {
+                    // the circle through the first, middle and last points of its outline
+                    const std::size_t m = (o.size() / 2 / 2) * 2, l = o.size() - 2;
+                    const double ax = o[0], ay = o[1], bx = o[m], by = o[m + 1], cx = o[l], cy = o[l + 1];
+                    double r = 0;
+                    const double d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+                    if (std::fabs(d) > 1e-12) {
+                        const double ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+                        const double uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+                        r = std::hypot(ax - ux, ay - uy);
+                    }
+                    if (kind == "circle") openEdit("", "diameter", id, num(std::round(2 * r * 1000) / 1000));
+                    else openEdit("", "radius", id, num(std::round(r * 1000) / 1000));
+                }
+            }
+        }
+    }
+    if (k.tool == SketchEdit::Tool::Dimension) {
+        if (!k.dimFirst.empty())
+            for (std::size_t i = 0; i < k.pointIds.size() && 2 * i + 1 < k.pointXy.size(); ++i)
+                if (k.pointIds[i] == k.dimFirst) dl->AddCircle(toScreen(k.pointXy[2 * i], k.pointXy[2 * i + 1]), 8.0f, ImGui::ColorConvertFloat4ToU32(c), 0, 3.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) k.dimFirst.clear();
+    }
+
+    // typing a dimension's value
+    if (ImGui::BeginPopup("##sketchdim")) {
+        ImGui::TextUnformatted(k.editId.empty() ? ("New " + k.editType + " (a number or a formula):").c_str() : ("Change " + k.editId + " (" + k.editType + "):").c_str());
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(200);
+        const bool enter = ImGui::InputText("##dimvalue", k.editBuf, sizeof k.editBuf, ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if (enter || ImGui::Button("OK")) {
+            Params p = base();
+            const char* what = k.editId.empty() ? "Dimension" : "Change dimension";
+            if (k.editId.empty()) {
+                p["type"] = k.editType, p["refs"] = k.editRefs, p["value"] = std::string(k.editBuf);
+                report(run("cad.sketch_dimension", p), what);
+            } else {
+                p["constraint"] = k.editId, p["value"] = std::string(k.editBuf);
+                report(run("cad.sketch_set", p), what);
+            }
+            k.editOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            k.editOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    } else {
+        k.editOpen = false;
+    }
     auto finishShape = [&](double bx, double by) {
         if (k.tool == SketchEdit::Tool::Line) {
             if (std::fabs(bx - k.ax) < 1e-9 && std::fabs(by - k.ay) < 1e-9) return;
@@ -349,7 +596,7 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
         }
     };
 
-    const bool press = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+    const bool press = shapeTool && click;
     if (press) {
         if (!k.drawing) {
             k.drawing = true;
@@ -361,7 +608,7 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
         k.pressAt = io.MousePos;
     }
     // a drag (rather than two clicks) makes a shape in one go; a dragged line keeps going from its end
-    if (k.drawing && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    if (shapeTool && k.drawing && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         const float dx = io.MousePos.x - k.pressAt.x, dy = io.MousePos.y - k.pressAt.y;
         if (dx * dx + dy * dy > 64) finishShape(mx, my);
     }
@@ -384,13 +631,15 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
             label = "diameter " + num(std::round(2 * r * 1000) / 1000) + " " + k.units;
         }
         dl->AddText({b.x + 12, b.y + 10}, ink, label.c_str());
-    } else if (hovered) {
+    } else if (hovered && shapeTool) {
         const std::string at = num(std::round(mx * 1000) / 1000) + ", " + num(std::round(my * 1000) / 1000);
         dl->AddText({io.MousePos.x + 12, io.MousePos.y + 10}, IM_COL32(128, 128, 128, 255), at.c_str());
     }
-    const char* hint = k.tool == SketchEdit::Tool::Line   ? "Line: click to start, click for each corner; click the first point, right-click or Esc to stop"
-                       : k.tool == SketchEdit::Tool::Rect ? "Rectangle: drag corner to corner"
-                                                         : "Circle: drag from the centre";
+    const char* hint = k.tool == SketchEdit::Tool::Line        ? "Line: click to start, click for each corner; click the first point, right-click or Esc to stop"
+                       : k.tool == SketchEdit::Tool::Rect      ? "Rectangle: drag corner to corner"
+                       : k.tool == SketchEdit::Tool::Circle    ? "Circle: drag from the centre"
+                       : k.tool == SketchEdit::Tool::Select    ? "Select: drag a point to move it; double-click a dimension to change it"
+                                                               : "Dimension: click a line, a circle, or two points, then type the value";
     dl->AddText({v0.x + 10, v0.y + size.y - ImGui::GetFontSize() - 8}, IM_COL32(128, 128, 128, 255), hint);
 }
 

@@ -15,6 +15,7 @@
 #include "wetwaresuite/mesh/primitives.hpp"
 #include "blend.hpp"
 #include "build.hpp"
+#include "sheetmetal.hpp"
 #include "repair.hpp"
 
 namespace wetwaresuite::cad {
@@ -288,12 +289,33 @@ std::vector<FeatureType> buildTypes() {
                  {ref("target", "feature to bevel"), num("distance", "chamfer size along each face", {}, true), words("edges", "which edges: all, outer, inner, top, bottom, vertical, horizontal, x, y, z (comma-separated, combined)", "all"),
                   words("near", "instead of edges: points x,y,z,x,y,z,... picking the edge closest to each (cad.edges lists them)", ""),
                   num("angle", "only edges whose faces meet at this many degrees or more", "30")}});
+    t.push_back({"offset_face", "Offset Face",
+                 "Move one face of a feature along its own normals by distance: out (positive) adds material, in "
+                 "(negative) cuts it. Works on curved faces too (a hole's wall, a boss's side, a fillet), which push/pull "
+                 "can't. face is a point x,y,z on the face (cad.pick gives one).",
+                 {ref("target", "feature whose face moves"), words("face", "a point x,y,z on the face", ""),
+                  num("distance", "how far: positive out, negative in", {}, true)}});
     t.push_back({"shell", "Shell",
                  "Hollow a feature out, leaving walls of thickness. open removes the outermost faces facing those ways "
                  "(top, bottom, front, back, left, right or +x -x +y -y +z -z; comma-separated), e.g. open=top makes a box "
                  "into a tray.",
                  {ref("target", "feature to hollow"), num("thickness", "wall thickness", {}, true),
                   words("open", "faces to remove: top, bottom, front, back, left, right, +x, -x, ...", "")}});
+    t.push_back({"sheet_base", "Sheet Metal Base",
+                 "A flat plate of sheet metal: width x depth from the origin (or an outline of points), thickness thick. "
+                 "Flanges bend off its edges; cad.sheet_flat unfolds the part for a laser cutter.",
+                 {num("width", "plate width (x)", "100"), num("depth", "plate depth (y)", "60"),
+                  points("points", "instead of width/depth: the outline x,y,x,y,... (a straight-edged shape)", false),
+                  num("thickness", "sheet thickness", "1.5"), num("radius", "default inside bend radius (default: the thickness)", ""),
+                  num("k_factor", "where the neutral line sits in a bend, 0 (inside) to 1 (outside); 0.44 suits most steel", "0.44")}});
+    t.push_back({"sheet_flange", "Sheet Metal Flange",
+                 "Bend a flange off a straight edge of the sheet's base plate: up or down by angle, through an inside "
+                 "radius, then straight on for length. target is the base or another flange of the same part.",
+                 {ref("target", "the sheet_base (or a flange of it)"),
+                  words("edge", "which edge: front, back, left, right, or a point x,y near it", "front"),
+                  num("length", "flange length past the bend", "20"), num("angle", "bend angle in degrees (90 = square)", "90"),
+                  choice("direction", "bend up or down", {"up", "down"}, "up"),
+                  num("radius", "inside bend radius (default: the base's)", "")}});
     addSketchTypes(t);
     return t;
 }
@@ -1064,6 +1086,24 @@ Built buildOperation(const Ctx& c, const std::map<std::string, CadDoc::Cached>& 
             c.fail(what);
         }
     }
+    if (type == "offset_face") {
+        if (!target.mesh) return {};
+        const auto items = splitList(c.text("face"));
+        if (items.size() != 3) c.fail("face is a point x,y,z on the face");
+        Vec3 at;
+        try {
+            at = {c.doc.eval(items[0]), c.doc.eval(items[1]), c.doc.eval(items[2])};
+        } catch (const ExprError& e) {
+            c.fail(std::string("face: ") + e.what());
+        }
+        try {
+            return {share(detail::offsetFace(*target.mesh, at, c.number("distance"), csg)), {}};
+        } catch (const std::runtime_error& e) {
+            const std::string what = e.what();
+            if (what.rfind("feature ", 0) == 0) throw;
+            c.fail(what);
+        }
+    }
     if (type == "shell") {
         if (!target.mesh) return {};
         std::vector<Vec3> open;
@@ -1149,6 +1189,8 @@ void CadDoc::regenerate() {
             Built b;
             if (detail::isAdvanced(f.type)) {
                 b = detail::buildAdvanced(c, done);
+            } else if (detail::isSheetMetal(f.type)) {
+                b = detail::buildSheetMetal(c, done);
             } else {
                 bool isOp = false;
                 for (const auto& field : t->fields) isOp = isOp || field.kind == FieldKind::Ref;
@@ -1195,7 +1237,7 @@ void CadDoc::regenerate() {
 // ---- undo ---------------------------------------------------------------------
 
 Result CadEdit::apply() {
-    before_ = {doc_->units, doc_->params, doc_->features, doc_->counters};
+    before_ = {doc_->units, doc_->params, doc_->features, doc_->counters, doc_->configs, doc_->activeConfig};
     Result r;
     try {
         r = fn_(*doc_);
@@ -1212,6 +1254,8 @@ void CadEdit::revert() {
     doc_->params = before_.params;
     doc_->features = before_.features;
     doc_->counters = before_.counters;
+    doc_->configs = before_.configs;
+    doc_->activeConfig = before_.activeConfig;
     try {
         doc_->regenerate();
     } catch (const std::exception&) {
@@ -1290,6 +1334,16 @@ std::string toJson(const CadDoc& doc) {
     json params = json::array();
     for (const auto& p : doc.params) params.push_back({{"name", p.name}, {"value", p.expr}});
     j["params"] = params;
+    if (!doc.configs.empty()) {
+        json configs = json::array();
+        for (const auto& c : doc.configs) {
+            json values = json::array();
+            for (const auto& v : c.values) values.push_back({{"name", v.name}, {"value", v.expr}});
+            configs.push_back({{"name", c.name}, {"values", values}});
+        }
+        j["configurations"] = configs;
+        if (!doc.activeConfig.empty()) j["active_configuration"] = doc.activeConfig;
+    }
     json features = json::array();
     for (const auto& f : doc.features) {
         json jf = {{"name", f.name}, {"type", f.type}, {"values", f.values}};
@@ -1321,6 +1375,12 @@ std::shared_ptr<CadDoc> fromJson(const std::string& text) {
             if (!validParamName(name)) throw std::runtime_error("bad parameter name '" + name + "'");
             doc->params.push_back({name, p.at("value").get<std::string>()});
         }
+        for (const auto& c : j.value("configurations", json::array())) {
+            Configuration conf{c.at("name").get<std::string>(), {}};
+            for (const auto& v : c.value("values", json::array())) conf.values.push_back({v.at("name").get<std::string>(), v.at("value").get<std::string>()});
+            doc->configs.push_back(std::move(conf));
+        }
+        doc->activeConfig = j.value("active_configuration", "");
         for (const auto& jf : j.value("features", json::array())) {
             Feature f;
             f.name = jf.at("name").get<std::string>();

@@ -558,6 +558,69 @@ void testBlends() {
     std::filesystem::remove(step);
 }
 
+
+// edge picking, offset face, configurations and sheet metal
+void testGapClosers() {
+    Session s;
+    registerCommands(s);
+    run(s, "cad.new");
+    run(s, "cad.box doc=cad1 name=block width=40 depth=30 height=20");
+    // a ray at the top-right edge (x=40, z=20, running along y)
+    Result e = run(s, "cad.pick_edge doc=cad1 ray=60,15,40,-1,0,-1");
+    CHECK(e.ok && e.field("hit") && toText(*e.field("hit")) == "true");
+    CHECK(near(num(e, "length"), 30, 1e-6) && near(num(e, "edges"), 1));
+    CHECK(e.field("outer") && toText(*e.field("outer")) == "true");
+    const std::string mid = toText(*e.field("near"));
+    CHECK(run(s, "cad.fillet doc=cad1 name=round target=block radius=3 near=" + mid).ok);
+    CHECK(volumeOf(s) < 40 * 30 * 20 && volumeOf(s) > 40 * 30 * 20 - 30 * 9);
+    // nothing there
+    CHECK(run(s, "cad.pick_edge doc=cad1 ray=200,200,200,1,0,0").ok);
+
+    // offset a curved face: a 10 mm boss grown to 12
+    run(s, "cad.new");
+    run(s, "cad.cylinder doc=cad2 name=boss diameter=10 height=20 segments=48");
+    const double before = volumeOf(s, "cad2");
+    CHECK(run(s, "cad.offset_face doc=cad2 name=grow target=boss face=5,0,10 distance=1").ok);
+    CHECK(within(volumeOf(s, "cad2"), before * 1.44, 0.03));
+    CHECK(!run(s, "cad.offset_face doc=cad2 target=boss face=500,0,0 distance=1").ok);
+
+    // configurations: one tree, every size
+    run(s, "cad.new");
+    run(s, "cad.param_set doc=cad3 name=len value=30");
+    run(s, "cad.box doc=cad3 name=bar width=len depth=10 height=10");
+    CHECK(run(s, "cad.config_add doc=cad3 name=short values=\"len=10\"").ok);
+    CHECK(run(s, "cad.config_add doc=cad3 name=long values=\"len=50; w=3\" use=true").ok);
+    CHECK(near(volumeOf(s, "cad3"), 5000, 1e-6));
+    CHECK(run(s, "cad.config_use doc=cad3 name=short").ok && near(volumeOf(s, "cad3"), 1000, 1e-6));
+    CHECK(run(s, "undo").ok && near(volumeOf(s, "cad3"), 5000, 1e-6));
+    Result list = run(s, "cad.config_list doc=cad3");
+    CHECK(toText(*list.field("names")) == "short,long" && toText(*list.field("active")) == "long");
+    const auto dir = std::filesystem::temp_directory_path() / "wetwaresuite_cad_config_test";
+    std::filesystem::create_directories(dir);
+    Result ex = run(s, "cad.config_export doc=cad3 path=\"" + (dir / "bar-{name}.stl").string() + "\"");
+    CHECK(ex.ok && num(ex, "count") == 2);
+    CHECK(std::filesystem::exists(dir / "bar-short.stl") && std::filesystem::exists(dir / "bar-long.stl"));
+    CHECK(near(volumeOf(s, "cad3"), 5000, 1e-6));  // put back
+    const auto saved = dir / "bar.wwcad";
+    CHECK(run(s, "cad.save doc=cad3 path=\"" + saved.string() + "\"").ok);
+    Result reopened = run(s, "cad.open path=\"" + saved.string() + "\"");
+    CHECK(toText(*run(s, "cad.config_list doc=" + toText(*reopened.field("doc"))).field("names")) == "short,long");
+    CHECK(!run(s, "cad.config_add doc=cad3 name=bad values=\"len\"").ok);
+    CHECK(!run(s, "cad.config_use doc=cad3 name=nope").ok);
+
+    // sheet metal: a 100 x 60 plate, 2 thick, a 20 mm flange bent up off the front
+    const std::string sm = toText(*run(s, "cad.new").field("doc"));
+    CHECK(run(s, "cad.sheet_base doc=" + sm + " name=plate width=100 depth=60 thickness=2 radius=2 k_factor=0.5").ok);
+    CHECK(run(s, "cad.sheet_flange doc=" + sm + " name=lip target=plate edge=front length=20 angle=90").ok);
+    const double bend = kPi / 4 * (16 - 4) * 100;
+    CHECK(within(volumeOf(s, sm), 12000 + bend + 4000, 0.01));
+    Result flat = run(s, "cad.sheet_flat doc=" + sm + " path=\"" + (dir / "flat.dxf").string() + "\"");
+    CHECK(flat.ok && num(flat, "bends") == 1);
+    CHECK(near(num(flat, "width"), 100, 1e-6) && near(num(flat, "height"), 60 + kPi / 2 * (2 + 0.5 * 2) + 20, 1e-6));
+    CHECK(std::filesystem::exists(dir / "flat.dxf"));
+    CHECK(!run(s, "cad.sheet_flat doc=cad1").ok);  // no sheet metal there
+}
+
 int main() {
     testExpressions();
     testParamsAndVolumes();
@@ -569,5 +632,6 @@ int main() {
     testUndoRedo();
     testFiles();
     testMcp();
+    testGapClosers();
     return check::summary("cad");
 }

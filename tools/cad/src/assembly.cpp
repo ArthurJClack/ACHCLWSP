@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -21,7 +22,7 @@ using mesh::Vec3;
 using json = nlohmann::json;
 
 const std::vector<std::string>& mateTypes() {
-    static const std::vector<std::string> t = {"coincident", "concentric", "distance", "angle", "parallel", "perpendicular", "fastened"};
+    static const std::vector<std::string> t = {"coincident", "concentric", "distance", "angle", "parallel", "perpendicular", "fastened", "gear", "rack"};
     return t;
 }
 
@@ -161,6 +162,17 @@ struct Placed {
     }
 };
 
+// How far (radians) pose `now` has turned about `axis` since pose `then`: a vector square to the axis,
+// turned by the change in rotation, measured around the axis.
+double turnedAbout(const Mat4& now, const Mat4& then, const Vec3& axis) {
+    const Mat4 rel = now * then.inverse();
+    Vec3 v = std::fabs(axis.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    v = mesh::normalize(v - axis * mesh::dot(v, axis));
+    Vec3 w = rel.direction(v);
+    w = w - axis * mesh::dot(w, axis);
+    return std::atan2(mesh::dot(mesh::cross(v, w), axis), mesh::dot(v, w));
+}
+
 std::vector<int> both(const Placed& a, const Placed& b) {
     auto v = a.vars();
     auto w = b.vars();
@@ -245,13 +257,14 @@ void AssemblyDoc::solve() {
             all.merge(mesh::bounds(m));
             placed[i].pivot = mesh::bounds(m).center();
         }
-        if (!c.fixed) {
+        if (!c.fixed && c.name != hold) {
             placed[i].var = nvars;
             nvars += 6;
         }
     }
-    std::vector<detail::Equation> eqs;
-    for (std::size_t mi = 0; mi < mates.size(); ++mi) {
+    hold.clear();
+    // forced: the value a limit mate is held at (its bound); NaN = the mate's own value
+    auto buildMate = [&](std::size_t mi, double forced, std::vector<detail::Equation>& eqs) {
         const Mate& mate = mates[mi];
         auto split = [&](const std::string& ref, std::size_t& ci, Geo& g) {
             const auto slash = ref.find('/');
@@ -299,9 +312,13 @@ void AssemblyDoc::solve() {
         const std::string& t = mate.type;
         const double s = mate.flip ? -1 : 1;
         double value = 0;
-        if (t == "distance" || t == "angle") {
-            if (mate.value.empty()) throw std::invalid_argument("mate " + mate.name + ": " + t + " needs a value");
+        if (!std::isnan(forced)) {
+            value = forced;
+        } else if (t == "distance" || t == "angle") {
+            if (mate.value.empty()) throw std::invalid_argument("mate " + mate.name + ": " + t + " needs a value (or min/max limits)");
             value = eval(mate.value);
+        } else if (t == "gear" || t == "rack") {
+            value = mate.value.empty() ? 1.0 : eval(mate.value);
         }
         const auto ka = ga.kind, kb = gb.kind;
         auto expects = [&](const std::string& what) {
@@ -370,13 +387,70 @@ void AssemblyDoc::solve() {
                                },
                                owner});
             }
+        } else if (t == "gear" || t == "rack") {
+            if (ka != Geo::Axis) expects(t == "gear" ? "two axes (each gear's hole or cylinder)" : "an axis (the pinion's) and an axis or plane along the rack");
+            if (t == "gear" && kb != Geo::Axis) expects("two axes (each gear's hole or cylinder)");
+            if (t == "rack" && kb == Geo::Point) expects("an axis (the pinion's) and an axis or plane along the rack");
+            const std::vector<double> lock = mate.lock.size() == 32 ? mate.lock : std::vector<double>{};
+            Mat4 la = pa.base, lb = pb.base;
+            if (!lock.empty()) {
+                std::copy(lock.begin(), lock.begin() + 16, la.m);
+                std::copy(lock.begin() + 16, lock.end(), lb.m);
+            }
+            const bool gear = t == "gear";
+            eqs.push_back({vars, [pa, pb, ga, gb, la, lb, value, s, gear](const std::vector<double>& x) {
+                               const Mat4 ma = pa.at(x), mb = pb.at(x);
+                               const double turnA = turnedAbout(ma, la, mesh::normalize(ma.direction(ga.d)));
+                               if (gear) return value * turnA + s * turnedAbout(mb, lb, mesh::normalize(mb.direction(gb.d)));
+                               const Vec3 slid = mb.point(gb.p) - lb.point(gb.p);
+                               return value * turnA - s * mesh::dot(slid, mesh::normalize(mb.direction(gb.d)));
+                           },
+                           owner});
         } else {
             throw std::invalid_argument("mate " + mate.name + ": unknown type '" + t + "'");
         }
+    };
+    // a limit mate's measured value: build it at a reference value and read its last residual back
+    auto measure = [&](std::size_t mi, const std::vector<double>& x) {
+        std::vector<detail::Equation> probe;
+        const bool angle = mates[mi].type == "angle";
+        buildMate(mi, angle ? 90.0 : 0.0, probe);
+        const double r = probe.back().f(x);
+        return angle ? std::acos(std::clamp(r, -1.0, 1.0)) * 180 / kPi : r;
+    };
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    std::vector<detail::Equation> eqs;
+    std::vector<std::size_t> limited;
+    for (std::size_t mi = 0; mi < mates.size(); ++mi) {
+        const Mate& m = mates[mi];
+        const bool limits = (m.type == "distance" || m.type == "angle") && (!m.min.empty() || !m.max.empty());
+        if (limits) limited.push_back(mi);
+        if (!limits || !m.value.empty()) buildMate(mi, nan, eqs);
     }
     std::vector<double> x(static_cast<std::size_t>(nvars), 0.0);
     const double scale = std::max(1.0, all.empty() ? 1.0 : all.diagonal());
     auto rep = detail::solve(x, {}, eqs, 1e-9 * scale, 300);
+    // limits: anything past a bound is held at that bound and solved again (a few rounds, as one may push another)
+    limitsHit.clear();
+    for (int round = 0; round < 4 && rep.converged && !limited.empty(); ++round) {
+        bool added = false;
+        for (std::size_t& mi : limited) {
+            if (mi == static_cast<std::size_t>(-1)) continue;
+            const Mate& m = mates[mi];
+            const double v = measure(mi, x);
+            const double tol = m.type == "angle" ? 1e-6 : 1e-7 * scale;
+            double bound = nan;
+            if (!m.min.empty() && v < eval(m.min) - tol) bound = eval(m.min);
+            if (!m.max.empty() && v > eval(m.max) + tol) bound = eval(m.max);
+            if (std::isnan(bound)) continue;
+            buildMate(mi, bound, eqs);
+            limitsHit.push_back(m.name);
+            mi = static_cast<std::size_t>(-1);
+            added = true;
+        }
+        if (!added) break;
+        rep = detail::solve(x, {}, eqs, 1e-9 * scale, 300);
+    }
     if (!rep.converged) {
         std::string names;
         for (int o : rep.failing) {
@@ -395,6 +469,15 @@ void AssemblyDoc::solve() {
             for (int v : placed[i].vars()) free = free || rep.movable[static_cast<std::size_t>(v)];
             if (free) freeComponents.push_back(components[i].name);
         }
+    }
+    // gears and racks count turns from here next time
+    for (auto& m : mates) {
+        if (m.type != "gear" && m.type != "rack") continue;
+        const Component* ca = findComponent(m.a.substr(0, m.a.find('/')));
+        const Component* cb = findComponent(m.b.substr(0, m.b.find('/')));
+        if (!ca || !cb) continue;
+        m.lock.assign(ca->pose.m, ca->pose.m + 16);
+        m.lock.insert(m.lock.end(), cb->pose.m, cb->pose.m + 16);
     }
     rebuildMesh();
 }
@@ -443,6 +526,8 @@ std::string assemblyToJson(const AssemblyDoc& doc) {
     for (const auto& m : doc.mates) {
         json jm = {{"name", m.name}, {"type", m.type}, {"a", m.a}, {"b", m.b}};
         if (!m.value.empty()) jm["value"] = m.value;
+        if (!m.min.empty()) jm["min"] = m.min;
+        if (!m.max.empty()) jm["max"] = m.max;
         if (m.flip) jm["flip"] = true;
         if (!m.lock.empty()) jm["lock"] = m.lock;
         mates.push_back(jm);
@@ -489,6 +574,8 @@ std::shared_ptr<AssemblyDoc> assemblyFromJson(const std::string& text) {
             m.a = jm.at("a").get<std::string>();
             m.b = jm.at("b").get<std::string>();
             m.value = jm.value("value", "");
+            m.min = jm.value("min", "");
+            m.max = jm.value("max", "");
             m.flip = jm.value("flip", false);
             m.lock = jm.value("lock", std::vector<double>{});
             doc->mates.push_back(std::move(m));

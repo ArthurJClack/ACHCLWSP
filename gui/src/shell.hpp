@@ -97,7 +97,7 @@ struct GameCanvas {
 // A cad sketch open for drawing with the mouse (sketch_view.cpp). Geometry comes from
 // cad.sketch_geometry in sketch units; the view is a centre and pixels per unit.
 struct SketchEdit {
-    enum class Tool { Line, Rect, Circle };
+    enum class Tool { Line, Rect, Circle, Select, Dimension };
     std::string doc, sketch;
     bool active = false;
     std::uint64_t seen = ~0ull;
@@ -119,6 +119,26 @@ struct SketchEdit {
     NumberList faceEdges;
     std::vector<double> face3d;  // the same outline in the part, x,y,z per point, count first per loop
     std::string onBody;          // the body whose face it is on: what its extrude joins or cuts
+    // for picking: points by id, entities and their outlines, and the dimensions written on the sketch
+    std::vector<std::string> pointIds;
+    NumberList pointXy;
+    std::vector<std::pair<std::string, std::string>> entities;  // id, kind
+    std::vector<NumberList> outlines;                           // x,y pairs per entity
+    struct Dim {
+        std::string id, type, value;
+        double x = 0, y = 0, measured = 0;
+        double line[4] = {0, 0, 0, 0};
+        ImVec2 boxMin{0, 0}, boxMax{0, 0};  // where its label was drawn, for clicks
+    };
+    std::vector<Dim> dims;
+    // Select: dragging a point (cad.sketch_move tried on the sketch as it goes)
+    std::string dragPoint;
+    double dragX = 0, dragY = 0, triedX = 1e300, triedY = 1e300, movedAt = 0;
+    // Dimension: the first point clicked, and the dimension being typed (a new one, or an edit)
+    std::string dimFirst;
+    std::string editId, editType, editRefs;
+    char editBuf[128] = {0};
+    bool editOpen = false;
 };
 
 // A point or direction in a 3D view (handles.cpp).
@@ -131,7 +151,7 @@ struct P3 {
 
 // An arrow drawn on the 3D view: drag it to slide something along dir (handles.cpp).
 struct Handle {
-    enum class Kind { PushPull, Move, Field } kind = Kind::PushPull;
+    enum class Kind { PushPull, Move, Field, Blend } kind = Kind::PushPull;  // Blend: fillet/chamfer size on picked edges
     P3 base, dir;           // world: where it starts, which way it points (unit length)
     ImU32 colour = 0;
     std::string axis;       // Move: x, y or z
@@ -158,6 +178,16 @@ struct View3d {
         std::vector<std::vector<P3>> loops;
     };
     Face hover, picked;
+    // cad: a sharp edge under the mouse (with the edges carrying on from it), and the ones clicked
+    struct Edge {
+        bool hit = false, outer = true;
+        std::string body, near;     // near: x,y,z of each piece's middle, for cad.fillet near=
+        std::vector<P3> segments;   // pairs of ends
+        P3 mid, out;                // out: away from the part, between the two faces
+    };
+    Edge hoverEdge;
+    std::vector<Edge> edges;
+    bool chamfer = false;  // the picked edges' arrow bevels instead of rounding
     ImVec2 hoverAt{-1e9f, -1e9f};
     std::uint64_t hoverSeen = ~0ull;
     bool moveMode = false;  // the clicked face's arrows move its body instead of pushing/pulling the face
@@ -850,6 +880,8 @@ private:
     void formHandles();
     View3d::Face cadPickAt(ImVec2 local);  // the face under a point of the view
     View3d::Face cadPickRay(const P3& from, const P3& dir);
+    View3d::Edge cadEdgeAt(ImVec2 local);  // the sharp edge near a point of the view (cad.pick_edge)
+    void edgeToolbar();
     void handleRelease();
     bool handleTrial(bool final);  // runs the dragged arrow's edit: as a trial, or for good
     void keepView(const ViewCamera& before);  // the part changed size: keep showing what was shown

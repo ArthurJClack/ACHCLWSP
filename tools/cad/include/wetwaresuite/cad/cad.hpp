@@ -57,6 +57,13 @@ struct Parameter {
     std::string expr;
 };
 
+// A named set of parameter values (a design table row, SolidWorks' configurations): using it
+// sets those parameters, so one part makes an M3, M4 and M5 version of itself.
+struct Configuration {
+    std::string name;
+    std::vector<Parameter> values;
+};
+
 struct Feature {
     std::string name;
     std::string type;  // box, cylinder, ..., boolean, hole, pattern_linear, ...
@@ -82,6 +89,8 @@ public:
     std::vector<Parameter> params;
     std::vector<Feature> features;
     std::map<std::string, int> counters;  // per type, for automatic names
+    std::vector<Configuration> configs;
+    std::string activeConfig;  // the configuration last used ("" = none)
 
     std::string kind() const override { return "cad"; }
     std::string summary() const override;
@@ -166,6 +175,8 @@ private:
         std::vector<Parameter> params;
         std::vector<Feature> features;
         std::map<std::string, int> counters;
+        std::vector<Configuration> configs;
+        std::string activeConfig;
     };
     std::shared_ptr<CadDoc> doc_;
     std::function<Result(CadDoc&)> fn_;

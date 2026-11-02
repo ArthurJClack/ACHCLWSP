@@ -592,4 +592,120 @@ Mesh shell(const Mesh& body, double thickness, const std::vector<Vec3>& open, co
     return out;
 }
 
+
+// ---- offset face (push/pull on any face) ----
+
+namespace {
+
+double pointToTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c) {
+    const Vec3 n = mesh::normalize(mesh::cross(b - a, c - a));
+    const Vec3 foot = p - n * mesh::dot(p - a, n);
+    auto inside = [&](const Vec3& x, const Vec3& y) { return mesh::dot(mesh::cross(y - x, foot - x), n) >= -1e-12; };
+    if (inside(a, b) && inside(b, c) && inside(c, a)) return std::fabs(mesh::dot(p - a, n));
+    auto seg = [&](const Vec3& x, const Vec3& y) {
+        const Vec3 d = y - x;
+        const double l2 = mesh::dot(d, d);
+        const double t = l2 > 0 ? std::clamp(mesh::dot(p - x, d) / l2, 0.0, 1.0) : 0;
+        return mesh::length(p - (x + d * t));
+    };
+    return std::min({seg(a, b), seg(b, c), seg(c, a)});
+}
+
+}  // namespace
+
+Mesh offsetFace(const Mesh& body, const Vec3& at, double distance, const Csg& csg) {
+    const std::size_t nt = body.triangleCount();
+    if (nt == 0) throw std::runtime_error("the body is empty");
+    if (!(std::fabs(distance) > 0)) throw std::runtime_error("distance can't be 0");
+    // welded vertex ids, so triangles that share a corner position share an id
+    std::map<std::array<double, 3>, std::uint32_t> weld;
+    std::vector<Vec3> pos;
+    std::vector<std::array<std::uint32_t, 3>> tri(nt);
+    for (std::size_t t = 0; t < nt; ++t)
+        for (int k = 0; k < 3; ++k) {
+            const Vec3& p = body.corner(t, k);
+            auto [it, fresh] = weld.try_emplace({p.x, p.y, p.z}, static_cast<std::uint32_t>(pos.size()));
+            if (fresh) pos.push_back(p);
+            tri[t][static_cast<std::size_t>(k)] = it->second;
+        }
+    std::vector<Vec3> normal(nt);
+    for (std::size_t t = 0; t < nt; ++t) normal[t] = mesh::normalize(body.faceNormal(t));
+    std::size_t start = nt;
+    double best = 1e300;
+    for (std::size_t t = 0; t < nt; ++t) {
+        if (mesh::length(body.faceNormal(t)) == 0) continue;
+        const double d = pointToTriangle(at, body.corner(t, 0), body.corner(t, 1), body.corner(t, 2));
+        if (d < best) best = d, start = t;
+    }
+    if (start == nt) throw std::runtime_error("no face there");
+    {
+        const mesh::Bounds b = mesh::bounds(body);
+        if (best > 0.05 * b.diagonal() + 1e-9) throw std::runtime_error("no face near that point (cad.pick gives a point on one)");
+    }
+    // edges -> triangles, then grow the smooth patch
+    std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::size_t>> edges;
+    for (std::size_t t = 0; t < nt; ++t)
+        for (int k = 0; k < 3; ++k) {
+            std::uint32_t a = tri[t][static_cast<std::size_t>(k)], b = tri[t][static_cast<std::size_t>((k + 1) % 3)];
+            if (b < a) std::swap(a, b);
+            edges[{a, b}].push_back(t);
+        }
+    const double smooth = std::cos(20 * mesh::kPi / 180);
+    std::vector<char> in(nt, 0);
+    std::vector<std::size_t> todo{start}, region;
+    in[start] = 1;
+    while (!todo.empty()) {
+        const std::size_t t = todo.back();
+        todo.pop_back();
+        region.push_back(t);
+        for (int k = 0; k < 3; ++k) {
+            std::uint32_t a = tri[t][static_cast<std::size_t>(k)], b = tri[t][static_cast<std::size_t>((k + 1) % 3)];
+            if (b < a) std::swap(a, b);
+            for (std::size_t u : edges[{a, b}])
+                if (!in[u] && mesh::length(body.faceNormal(u)) > 0 && mesh::dot(normal[u], normal[t]) >= smooth) {
+                    in[u] = 1;
+                    todo.push_back(u);
+                }
+        }
+    }
+    // each patch corner moves along the area-weighted normal of the patch triangles around it
+    std::map<std::uint32_t, Vec3> vn;
+    for (std::size_t t : region)
+        for (int k = 0; k < 3; ++k) vn[tri[t][static_cast<std::size_t>(k)]] = vn[tri[t][static_cast<std::size_t>(k)]] + body.faceNormal(t);
+    for (auto& [v, n] : vn) n = mesh::normalize(n);
+    // the slab runs from a little inside the face to `distance` out (or from a little outside to
+    // `distance` in), so the boolean overlaps instead of meeting face to face
+    const mesh::Bounds bb = mesh::bounds(body);
+    const double overlap = std::min(std::fabs(distance) * 0.25, 1e-3 * (mesh::length(bb.max - bb.min) + 1));
+    const double lo = distance > 0 ? -overlap : distance, hi = distance > 0 ? distance : overlap;
+    Mesh slab;
+    std::map<std::uint32_t, std::uint32_t> low, high;
+    for (const auto& [v, n] : vn) {
+        low[v] = slab.addVertex(pos[v] + n * lo);
+        high[v] = slab.addVertex(pos[v] + n * hi);
+    }
+    std::map<std::pair<std::uint32_t, std::uint32_t>, int> uses;
+    for (std::size_t t : region) {
+        const auto& f = tri[t];
+        slab.addTriangle(high[f[0]], high[f[1]], high[f[2]]);
+        slab.addTriangle(low[f[0]], low[f[2]], low[f[1]]);
+        for (int k = 0; k < 3; ++k) {
+            std::uint32_t a = f[static_cast<std::size_t>(k)], b = f[static_cast<std::size_t>((k + 1) % 3)];
+            ++uses[{std::min(a, b), std::max(a, b)}];
+        }
+    }
+    for (std::size_t t : region) {  // walls along the patch's outline, facing out
+        const auto& f = tri[t];
+        for (int k = 0; k < 3; ++k) {
+            const std::uint32_t a = f[static_cast<std::size_t>(k)], b = f[static_cast<std::size_t>((k + 1) % 3)];
+            if (uses[{std::min(a, b), std::max(a, b)}] != 1) continue;
+            slab.addTriangle(low[a], low[b], high[b]);
+            slab.addTriangle(low[a], high[b], high[a]);
+        }
+    }
+    Mesh out = csg(body, slab, distance > 0 ? mesh::BooleanOp::Union : mesh::BooleanOp::Difference);
+    if (out.empty()) throw std::runtime_error("moving that face by " + std::to_string(distance) + " leaves nothing");
+    return out;
+}
+
 }  // namespace wetwaresuite::cad::detail
