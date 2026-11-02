@@ -222,7 +222,35 @@ Pt toBoard(const PcbPlace& place, Pt p) {
     if (r == 90) q = {p.y, -p.x};
     else if (r == 180) q = {-p.x, -p.y};
     else if (r == 270) q = {-p.y, p.x};
+    else if (r != 0) {
+        const double a = r * 3.14159265358979323846 / 180, cs = std::cos(a), sn = std::sin(a);
+        q = {p.x * cs + p.y * sn, -p.x * sn + p.y * cs};
+    }
     return {place.pos.x + q.x, place.pos.y + q.y};
+}
+
+std::vector<Pt> padOutline(const WorldPad& p, double grow) {
+    const double w = (p.angle != 0 ? p.rw : p.w) + 2 * grow, h = (p.angle != 0 ? p.rh : p.h) + 2 * grow;
+    const double a = p.angle * 3.14159265358979323846 / 180, cs = std::cos(a), sn = std::sin(a);
+    auto turn = [&](double x, double y) { return Pt{p.pos.x + x * cs + y * sn, p.pos.y - x * sn + y * cs}; };
+    std::vector<Pt> out;
+    if (p.shape == PadShape::Rect) {
+        for (auto [x, y] : {std::pair{-w / 2, -h / 2}, {w / 2, -h / 2}, {w / 2, h / 2}, {-w / 2, h / 2}}) out.push_back(turn(x, y));
+        return out;
+    }
+    // oval / circle: two half circles joined
+    const double r = std::min(w, h) / 2, half = std::max(w, h) / 2 - r;
+    const bool wide = w >= h;
+    const int steps = 10;
+    for (int side = 0; side < 2; ++side) {
+        const double cx = wide ? (side ? -half : half) : 0, cy = wide ? 0 : (side ? -half : half);
+        const double start = (wide ? -90.0 : 0.0) + side * 180.0;
+        for (int i = 0; i <= steps; ++i) {
+            const double t = (start + 180.0 * i / steps) * 3.14159265358979323846 / 180;
+            out.push_back(turn(cx + r * std::cos(t), cy + r * std::sin(t)));
+        }
+    }
+    return out;
 }
 
 std::vector<WorldPad> worldPads(const Circuit& c, const Netlist& nl) {
@@ -238,9 +266,20 @@ std::vector<WorldPad> worldPads(const Circuit& c, const Netlist& nl) {
             w.number = pad.number;
             w.net = nl.netOf(part.ref, pad.number);
             w.pos = toBoard(part.pcb, pad.pos);
-            w.w = (r == 90 || r == 270) ? pad.h : pad.w;
-            w.h = (r == 90 || r == 270) ? pad.w : pad.h;
+            const int quarter = ((r + 45) / 90 * 90) % 360;  // nearest quarter turn
+            const bool sideways = quarter == 90 || quarter == 270;
+            w.w = sideways ? pad.h : pad.w;
+            w.h = sideways ? pad.w : pad.h;
             w.shape = pad.shape;
+            if (r % 90 != 0) {
+                // -45 .. 45; the same on the bottom (the mirror happens before the turn, so pads keep their axes)
+                const double left = r - ((r + 45) / 90 * 90);
+                w.angle = left;
+                w.rw = w.w, w.rh = w.h;
+                const double a = std::abs(left) * 3.14159265358979323846 / 180;
+                w.w = w.rw * std::cos(a) + w.rh * std::sin(a);
+                w.h = w.rw * std::sin(a) + w.rh * std::cos(a);
+            }
             w.drill = pad.drill;
             w.plated = pad.plated || pad.drill <= 0;
             w.layers = pad.drill > 0 ? kAllCopper : (part.pcb.bottom ? 2 : 1);

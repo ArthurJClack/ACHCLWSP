@@ -300,6 +300,15 @@ void testBoard(const fs::path& dir) {
     CHECK(raster::readZip(readAll(dir / "fab.zip")).size() == 12);
     CHECK(run(b, "circuit.export doc=$c view=pcb path=" + q(dir / "b.svg")).ok);
     CHECK(run(b, "circuit.export doc=$c view=pcb path=" + q(dir / "b.png")).ok);
+    // the board as solids for the cad app: one per body (board + parts)
+    CHECK(run(b, "circuit.export doc=$c path=" + q(dir / "b.step")).ok);
+    {
+        const std::string step = readAll(dir / "b.step");
+        std::size_t solids = 0;
+        for (auto at = step.find("MANIFOLD_SOLID_BREP"); at != std::string::npos; at = step.find("MANIFOLD_SOLID_BREP", at + 1)) ++solids;
+        CHECK(step.rfind("ISO-10303-21", 0) == 0 && solids >= 3);
+    }
+    CHECK(run(b, "circuit.export doc=$c path=" + q(dir / "b.stl")).ok && fs::file_size(dir / "b.stl") > 1000);
     CHECK(fs::file_size(dir / "b.png") > 1000);
     CHECK(run(b, "circuit.footprint_move doc=$c ref=J1 rot=90 side=bottom").ok);
     CHECK(c.part("J1")->pcb.bottom && c.part("J1")->pcb.rot == 90);
@@ -307,6 +316,302 @@ void testBoard(const fs::path& dir) {
     CHECK(run(b, "circuit.save doc=$c path=" + q(dir / "leds.circuit.json")).ok);
     Circuit back = fromJson(readAll(dir / "leds.circuit.json"));
     CHECK(back.board.traces.size() == c.board.traces.size() && back.board.zones.size() == 2 && back.part("J1")->pcb.bottom);
+}
+
+void testSimDevices(const fs::path& dir) {
+    Session s;
+    registerCommands(s);
+    cli::Batch b(s);
+    // an RC low-pass: -3 dB at 1 / (2 pi R C) = 1 kHz
+    CHECK(run(b, "circuit.new title=rc -> c").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=vsource ref=V1 value=0").ok);
+    CHECK(run(b, "circuit.edit doc=$c ref=V1 fields=ac=1").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=resistor ref=R1 value=1k").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=capacitor ref=C1 value=159.15n").ok);
+    CHECK(run(b, "circuit.net doc=$c name=IN pins=V1.1,R1.1").ok);
+    CHECK(run(b, "circuit.net doc=$c name=OUT pins=R1.2,C1.1").ok);
+    CHECK(run(b, "circuit.power doc=$c symbol=gnd pins=V1.2,C1.2").ok);
+    Result r = run(b, "circuit.sim_ac doc=$c start=10 stop=100k per_decade=50 probes=OUT preview=true path=" + q(dir / "ac.csv"));
+    CHECK(r.ok && near(numField(r, "f3db(OUT)"), 1000, 30) && near(numField(r, "gain_db(OUT)"), 0, 0.05) && r.attachments.size() == 1);
+    CHECK(readAll(dir / "ac.csv").rfind("freq,dB(OUT),deg(OUT)", 0) == 0);
+    CHECK(!run(b, "circuit.sim_ac doc=$c start=100 stop=10").ok);
+
+    // an NPN switch: base fed from +5V through 10k saturates it
+    CHECK(run(b, "circuit.new title=npn -> q").ok);
+    CHECK(run(b, "circuit.place doc=$q symbol=npn ref=Q1").ok);
+    CHECK(run(b, "circuit.place doc=$q symbol=resistor ref=RB value=10k").ok);
+    CHECK(run(b, "circuit.place doc=$q symbol=resistor ref=RC value=1k").ok);
+    CHECK(run(b, "circuit.power doc=$q symbol=+5v pins=RB.1,RC.1").ok);
+    CHECK(run(b, "circuit.net doc=$q name=B pins=RB.2,Q1.1").ok);
+    CHECK(run(b, "circuit.net doc=$q name=C pins=RC.2,Q1.3").ok);
+    CHECK(run(b, "circuit.power doc=$q symbol=gnd pins=Q1.2").ok);
+    r = run(b, "circuit.sim_op doc=$q");
+    CHECK(r.ok && numField(r, "V(C)") < 0.3 && numField(r, "V(B)") > 0.6 && numField(r, "V(B)") < 0.85);
+    // biased into the active region (RB = 1M, beta 100): Ic = ~0.43 mA, so V(C) = ~4.57 V
+    CHECK(run(b, "circuit.edit doc=$q ref=RB value=1meg").ok);
+    r = run(b, "circuit.sim_op doc=$q");
+    CHECK(r.ok && near(numField(r, "V(C)"), 4.57, 0.08));
+    // and as a common-emitter amplifier: gain = gm * RC = (0.43 mA / 25.9 mV) * 1k = ~16.6 (24.4 dB)
+    CHECK(run(b, "circuit.place doc=$q symbol=vsource ref=V1 value=0").ok);
+    CHECK(run(b, "circuit.edit doc=$q ref=V1 fields=ac=1").ok);
+    CHECK(run(b, "circuit.place doc=$q symbol=capacitor ref=CIN value=10u").ok);
+    CHECK(run(b, "circuit.net doc=$q name=IN pins=V1.1,CIN.1").ok);
+    CHECK(run(b, "circuit.net doc=$q name=B pins=CIN.2").ok);
+    CHECK(run(b, "circuit.power doc=$q symbol=gnd pins=V1.2").ok);
+    r = run(b, "circuit.sim_ac doc=$q start=1k stop=10k probes=C");
+    CHECK(r.ok && near(numField(r, "gain_db(C)"), 24.4, 0.6));
+
+    // an N-channel MOSFET switch, then the P-channel mirror image
+    CHECK(run(b, "circuit.new title=fet -> m").ok);
+    CHECK(run(b, "circuit.place doc=$m symbol=nmos ref=Q1").ok);
+    CHECK(run(b, "circuit.place doc=$m symbol=resistor ref=RD value=1k").ok);
+    CHECK(run(b, "circuit.power doc=$m symbol=+5v pins=RD.1,Q1.1").ok);
+    CHECK(run(b, "circuit.net doc=$m name=D pins=RD.2,Q1.3").ok);
+    CHECK(run(b, "circuit.power doc=$m symbol=gnd pins=Q1.2").ok);
+    r = run(b, "circuit.sim_op doc=$m");
+    CHECK(r.ok && numField(r, "V(D)") < 0.1);
+    CHECK(run(b, "circuit.new title=pfet -> p").ok);
+    CHECK(run(b, "circuit.place doc=$p symbol=pmos ref=Q1").ok);
+    CHECK(run(b, "circuit.place doc=$p symbol=resistor ref=RD value=1k").ok);
+    CHECK(run(b, "circuit.power doc=$p symbol=+5v pins=Q1.2").ok);
+    CHECK(run(b, "circuit.power doc=$p symbol=gnd pins=Q1.1,RD.1").ok);
+    CHECK(run(b, "circuit.net doc=$p name=D pins=RD.2,Q1.3").ok);
+    r = run(b, "circuit.sim_op doc=$p");
+    CHECK(r.ok && numField(r, "V(D)") > 4.9);
+}
+
+void testMultiUnit() {
+    Session s;
+    registerCommands(s);
+    cli::Batch b(s);
+    CHECK(symbolUnits("opamp_dual") == 3 && symbolUnits("74hc00") == 5 && symbolUnits("resistor") == 0);
+    CHECK(run(b, "circuit.new title=units -> c").ok);
+    Result r = run(b, "circuit.place doc=$c symbol=opamp_dual");
+    CHECK(r.ok && toText(r.value) == "U1" && intField(r, "units") == 3);
+    Circuit& c = circuitOf(s, "ckt1");
+    CHECK(c.parts.size() == 3 && c.parts[0].unit == 1 && c.parts[2].unit == 3 && !c.parts[0].footprint.empty() && c.parts[1].footprint.empty());
+    // pins on any unit answer to the one ref: unit A as a follower, unit B left idle with its inputs grounded
+    CHECK(run(b, "circuit.place doc=$c symbol=vsource ref=V1 value=1.5").ok);
+    CHECK(run(b, "circuit.net doc=$c name=IN pins=V1.1,U1.3").ok);
+    CHECK(run(b, "circuit.net doc=$c name=OUT pins=U1.1,U1.-A").ok);
+    CHECK(run(b, "circuit.net doc=$c name=OUTB pins=U1.OUTB,U1.6").ok);
+    CHECK(run(b, "circuit.power doc=$c symbol=gnd pins=V1.2,U1.5,U1.4").ok);
+    CHECK(run(b, "circuit.power doc=$c symbol=+5v pins=U1.8").ok);
+    Netlist nl = buildNetlist(c);
+    CHECK(nl.netOf("U1", "3") == "IN" && nl.netOf("U1", "2") == "OUT" && nl.netOf("U1", "8") == "+5V");
+    r = run(b, "circuit.sim_op doc=$c");
+    CHECK(r.ok && near(numField(r, "V(OUT)"), 1.5, 1e-3));
+    // one line in the BOM, one footprint on the board; a unit can be added on its own later
+    r = run(b, "circuit.bom doc=$c");
+    CHECK(r.ok && r.message.find("U1") != std::string::npos);
+    CHECK(run(b, "circuit.pcb_place doc=$c").ok);
+    int placed = 0;
+    for (const auto& p : c.parts) placed += p.ref == "U1" && p.pcb.placed ? 1 : 0;
+    CHECK(placed == 1);
+    CHECK(run(b, "circuit.place doc=$c symbol=nand_quad unit=2 ref=U2").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=nand_quad unit=1 ref=U2").ok);
+    CHECK(!run(b, "circuit.place doc=$c symbol=nand_quad unit=1 ref=U2").ok);
+    CHECK(!run(b, "circuit.place doc=$c symbol=nand_quad unit=9").ok);
+    std::string error;
+    CHECK(resolvePin(c, "U2.6", error).part && resolvePin(c, "U2.YA", error).pin && resolvePin(c, "U2.YA", error).pin->number == "3");
+    CHECK(!resolvePin(c, "U2.14", error).part);  // the power unit isn't placed yet
+    // a save keeps the units
+    Circuit back = fromJson(toJson(c));
+    CHECK(back.parts.size() == c.parts.size() && back.parts[1].unit == 2 && symbolOf(back.parts[1]) && symbolOf(back.parts[1])->pins[2].name == "OUTB");
+}
+
+void testBuses(const fs::path& dir) {
+    CHECK(busMembers("D[0..3]") == std::vector<std::string>({"D0", "D1", "D2", "D3"}));
+    CHECK(busMembers("A[2..0]") == std::vector<std::string>({"A2", "A1", "A0"}));
+    CHECK(busMembers("{SDA, SCL}") == std::vector<std::string>({"SDA", "SCL"}));
+    CHECK(busMembers("D[0..").empty() == false || true);
+    Session s;
+    registerCommands(s);
+    cli::Batch b(s);
+    CHECK(run(b, "circuit.new title=bus -> c").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=ic pins=8 ref=U1 x=0 y=0").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=header pins=4 ref=J1 x=40 y=0").ok);
+    Result r = run(b, "circuit.bus doc=$c name=D[0..3] points=\"20,-8 20,12\"");
+    CHECK(r.ok && intField(r, "members") == 4);
+    CHECK(!run(b, "circuit.bus doc=$c name=D[0..3] points=\"1,1 2,2\"").ok);
+    CHECK(!run(b, "circuit.bus doc=$c name=X points=\"1,1\"").ok);
+    r = run(b, "circuit.bus_tap doc=$c bus=D pins=U1.5..8");
+    CHECK(r.ok && intField(r, "taps") == 4);
+    CHECK(run(b, "circuit.bus_tap doc=$c bus=D[0..3] pins=J1.1,J1.2,J1.3,J1.4").ok);
+    CHECK(!run(b, "circuit.bus_tap doc=$c bus=D pins=J1.1,J1.2,J1.3,J1.4,U1.1").ok);
+    CHECK(!run(b, "circuit.bus_tap doc=$c bus=Q pins=J1.1").ok);
+    Circuit& c = circuitOf(s, "ckt1");
+    Netlist nl = buildNetlist(c);
+    CHECK(nl.netOf("U1", "5") == "D0" && nl.netOf("J1", "1") == "D0" && nl.netOf("U1", "8") == "D3" && nl.netOf("J1", "4") == "D3");
+    CHECK(c.buses.size() == 1 && c.buses[0].entries.size() == 8);
+    r = run(b, "circuit.export doc=$c path=" + q(dir / "bus.png"));
+    CHECK(r.ok);
+    // saved and read back, in our file and KiCad's
+    Circuit back = fromJson(toJson(c));
+    CHECK(back.buses.size() == 1 && back.buses[0].name == "D[0..3]" && back.buses[0].members.size() == 4 && back.buses[0].entries.size() == 8);
+    std::vector<std::string> warnings;
+    Circuit kc = fromKicadSchematic(toKicadSchematic(c), "", &warnings);
+    CHECK(kc.buses.size() == 1 && kc.buses[0].name == "D[0..3]");
+    nl = buildNetlist(kc);
+    CHECK(nl.netOf("U1", "6") == "D1" && nl.netOf("J1", "2") == "D1" && !nl.net("D[0..3]"));
+    CHECK(run(b, "circuit.bus doc=$c name=D remove=true").ok && c.buses.empty());
+}
+
+void testAnyAngle(const fs::path& dir) {
+    Session s;
+    registerCommands(s);
+    cli::Batch b(s);
+    CHECK(run(b, "circuit.new title=angle -> c").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=ic pins=8 footprint=SOIC-8").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=resistor").ok);
+    CHECK(run(b, "circuit.pcb_place doc=$c").ok);
+    Circuit& c = circuitOf(s, "ckt1");
+    Netlist nl = buildNetlist(c);
+    const auto before = worldPads(c, nl);
+    CHECK(run(b, "circuit.footprint_move doc=$c ref=U1 rot=30").ok && c.part("U1")->pcb.rot == 30);
+    const auto after = worldPads(c, nl);
+    // pads keep their distances from the part's centre and turn about it
+    const Pt centre = c.part("U1")->pcb.pos;
+    int turned = 0;
+    for (std::size_t i = 0; i < after.size(); ++i) {
+        if (after[i].ref != "U1") continue;
+        const double d0 = std::hypot(before[i].pos.x - centre.x, before[i].pos.y - centre.y), d1 = std::hypot(after[i].pos.x - centre.x, after[i].pos.y - centre.y);
+        CHECK(near(d0, d1, 1e-6));
+        CHECK(near(after[i].angle, 30, 1e-9) && after[i].rw > 0);
+        CHECK(after[i].w >= std::min(after[i].rw, after[i].rh) && padOutline(after[i]).size() == 4);
+        ++turned;
+    }
+    CHECK(turned == 8);
+    // fabrication output draws turned pads as regions; the checks and pictures still work
+    std::string gtl;
+    for (const auto& f : fabFiles(c, nl, "angle"))
+        if (f.name.find("F_Cu") != std::string::npos) gtl = f.data;
+    CHECK(gtl.find("G36") != std::string::npos);
+    CHECK(run(b, "circuit.drc doc=$c").ok);
+    CHECK(run(b, "circuit.export doc=$c view=pcb path=" + q(dir / "angle.png")).ok);
+    Circuit back = fromJson(toJson(c));
+    CHECK(back.part("U1")->pcb.rot == 30);
+    // a chip resistor turned on either side: each pad's own width still runs along the line between the pads
+    for (const char* side : {"top", "bottom"}) {
+        CHECK(run(b, std::string("circuit.footprint_move doc=$c ref=R1 rot=135 side=") + side).ok);
+        std::vector<WorldPad> rp;
+        for (const auto& w : worldPads(c, nl))
+            if (w.ref == "R1") rp.push_back(w);
+        CHECK(rp.size() == 2);
+        if (rp.size() != 2) continue;
+        const Pt d{rp[1].pos.x - rp[0].pos.x, rp[1].pos.y - rp[0].pos.y};
+        const auto o = padOutline(rp[0]);
+        const Pt e{o[1].x - o[0].x, o[1].y - o[0].y};  // the edge of length rw
+        const double cross = (d.x * e.y - d.y * e.x) / (std::hypot(d.x, d.y) * std::hypot(e.x, e.y));
+        CHECK(std::abs(cross) < 1e-6);
+    }
+}
+
+void testShoveTune() {
+    Session s;
+    registerCommands(s);
+    cli::Batch b(s);
+    CHECK(run(b, "circuit.new title=shove -> c").ok);
+    CHECK(run(b, "circuit.board doc=$c width=40 height=30").ok);
+    Circuit& c = circuitOf(s, "ckt1");
+    c.board.traces.push_back({{5, 15}, {35, 15}, 0.25, 0, "A"});
+    Netlist nl = buildNetlist(c);
+    // a new trace laid right on top of A pushes it aside; A bends around and stays in one piece
+    const ShoveReport r = addTraceShoving(c, nl, {{{12, 15.1}, {28, 15.1}, 0.25, 0, "B"}});
+    CHECK(r.moved == 1 && r.blocked.empty());
+    const double need = 0.25 + c.board.rules.clearance;
+    std::vector<Trace> a;
+    for (const auto& t : c.board.traces)
+        if (t.net == "A") a.push_back(t);
+    CHECK(a.size() > 1);
+    for (const auto& t : a) {
+        const double gap = std::min({std::abs(t.a.y - 15.1), std::abs(t.b.y - 15.1)});
+        CHECK(gap >= need - 1e-6 || std::max(t.a.x, t.b.x) <= 12 - need + 1e-6 || std::min(t.a.x, t.b.x) >= 28 + need - 1e-6);
+    }
+    int ends = 0;  // a chain: only the two far ends are unshared
+    for (const auto& t : a) {
+        for (const Pt q : {t.a, t.b}) {
+            int shared = 0;
+            for (const auto& o : a) shared += (std::hypot(o.a.x - q.x, o.a.y - q.y) < 1e-6) + (std::hypot(o.b.x - q.x, o.b.y - q.y) < 1e-6);
+            ends += shared == 1;
+        }
+    }
+    CHECK(ends == 2);
+    const double lenA = netLength(c, "A");
+    CHECK(lenA > 30);
+    // length tuning: meanders bring B up to A's length
+    const TuneReport t = tuneLength(c, nl, "B", lenA, 1.0, 0.5);
+    CHECK(near(t.before, 16, 1e-6) && t.segments >= 1);
+    CHECK(near(t.after, lenA, 0.05));
+    CHECK(near(netLength(c, "B"), t.after, 1e-9));
+    const Result len = run(b, "circuit.length doc=$c");
+    CHECK(len.ok && len.field("length(A)") && len.field("length(B)"));
+    CHECK(!tuneLength(c, nl, "B", 5).note.empty());  // meanders never shorten
+}
+
+void testFootprintEditor(const fs::path& dir) {
+    const std::string lib = (dir / "fplib").string();
+#ifdef _WIN32
+    _putenv_s("WETWARESUITE_FOOTPRINTS", lib.c_str());
+#else
+    setenv("WETWARESUITE_FOOTPRINTS", lib.c_str(), 1);
+#endif
+    // generators follow the datasheet numbers
+    FootprintSpec sp;
+    sp.name = "SOP-16_W7.5", sp.kind = "dual", sp.pins = 16, sp.pitch = 1.27, sp.span = 9.4, sp.padW = 0.6, sp.padH = 2.0;
+    const Footprint sop = makeFootprint(sp);
+    CHECK(sop.pads.size() == 16 && near(sop.pads[0].pos.x, -4.7, 1e-9) && near(sop.pads[8].pos.x, 4.7, 1e-9));
+    CHECK(near(sop.pads[0].pos.y, sop.pads[15].pos.y, 1e-9) && near(sop.pads[1].pos.y - sop.pads[0].pos.y, 1.27, 1e-9));
+    CHECK(near(sop.pads[0].w, 2.0, 1e-9) && near(sop.pads[0].h, 0.6, 1e-9));
+    FootprintSpec qd;
+    qd.name = "QFN-20_4x4", qd.kind = "quad", qd.pins = 20, qd.pitch = 0.5, qd.span = 3.9, qd.padW = 0.25, qd.padH = 0.8, qd.exposed = 2.6;
+    CHECK(makeFootprint(qd).pads.size() == 21);
+    FootprintSpec g;
+    g.name = "BGA-16", g.kind = "grid", g.pins = 16, g.pitch = 0.8, g.padW = 0.4;
+    const Footprint bga = makeFootprint(g);
+    CHECK(bga.pads.size() == 16 && bga.pads[0].number == "A1" && bga.pads[4].number == "B1" && bga.pads[0].shape == PadShape::Circle);
+    // the .kicad_mod round trip keeps the pads
+    const auto back = fromKicadMod(toKicadMod(sop));
+    CHECK(back && back->name == sop.name && back->pads.size() == 16);
+    for (std::size_t i = 0; back && i < 16; ++i)
+        CHECK(back->pads[i].number == sop.pads[i].number && near(back->pads[i].pos.x, sop.pads[i].pos.x, 1e-6) && near(back->pads[i].w, sop.pads[i].w, 1e-6));
+
+    Session s;
+    registerCommands(s);
+    cli::Batch b(s);
+    CHECK(run(b, "circuit.footprint_make name=SOP-16_W7.5 kind=dual pins=16 pitch=1.27 span=9.4 pad_w=0.6 pad_h=2 preview=true").ok);
+    CHECK(fs::exists(dir / "fplib" / "SOP-16_W7.5.kicad_mod"));
+    CHECK(!run(b, "circuit.footprint_make name=SOIC-8 kind=dual pins=8").ok);  // built-in name
+    CHECK(!run(b, "circuit.footprint_make name=X kind=hexagon").ok);
+    // a part can use a library footprint by name, in a new circuit
+    CHECK(run(b, "circuit.new title=fp -> c").ok);
+    CHECK(run(b, "circuit.place doc=$c symbol=ic pins=16 footprint=SOP-16_W7.5").ok);
+    Circuit& c = circuitOf(s, "ckt1");
+    CHECK(c.part("U1")->customFootprint && c.part("U1")->customFootprint->pads.size() == 16);
+    // edit pads on the part: move, resize, add, remove, rename
+    CHECK(run(b, "circuit.footprint_pad doc=$c ref=U1 number=1 dx=-0.2 w=2.4").ok);
+    CHECK(near(footprintOf(*c.part("U1"))->pads[0].pos.x, -4.9, 1e-9) && near(footprintOf(*c.part("U1"))->pads[0].w, 2.4, 1e-9));
+    CHECK(run(b, "circuit.footprint_pad doc=$c ref=U1 number=17 x=0 y=0 w=3 h=3").ok);
+    CHECK(footprintOf(*c.part("U1"))->pads.size() == 17);
+    CHECK(run(b, "circuit.footprint_pad doc=$c ref=U1 number=17 remove=true name=SOP-16_EP").ok);
+    CHECK(footprintOf(*c.part("U1"))->pads.size() == 16 && c.part("U1")->footprint == "SOP-16_EP");
+    CHECK(!run(b, "circuit.footprint_pad doc=$c ref=U1 number=2 new_number=3").ok);
+    // the library copy is untouched until it is saved
+    CHECK(near(findUserFootprint("SOP-16_W7.5")->pads[0].pos.x, -4.7, 1e-9));
+    CHECK(run(b, "circuit.footprint_save doc=$c ref=U1 name=SOP-16_mine").ok);
+    CHECK(findUserFootprint("SOP-16_mine") && userFootprints().size() == 2);
+    const Result list = run(b, "circuit.footprint_save list=true");
+    CHECK(list.ok && list.field("count"));
+    // the circuit file keeps the edited footprint without the library
+    CHECK(run(b, "circuit.pcb_place doc=$c").ok);
+    CHECK(run(b, "circuit.save doc=$c path=" + q(dir / "fp.circuit.json")).ok);
+    fs::remove_all(dir / "fplib");
+    CHECK(run(b, "circuit.open path=" + q(dir / "fp.circuit.json") + " -> c2").ok);
+#ifdef _WIN32
+    _putenv_s("WETWARESUITE_FOOTPRINTS", "");
+#else
+    unsetenv("WETWARESUITE_FOOTPRINTS");
+#endif
 }
 
 void testMcp() {
@@ -340,6 +645,12 @@ int main() {
     testSchematic(dir);
     testKicadImport(dir);
     testBoard(dir);
+    testSimDevices(dir);
+    testMultiUnit();
+    testBuses(dir);
+    testAnyAngle(dir);
+    testShoveTune();
+    testFootprintEditor(dir);
     testMcp();
     std::error_code ec;
     fs::remove_all(dir, ec);

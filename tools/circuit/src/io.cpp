@@ -251,6 +251,16 @@ std::string toJson(const Circuit& c) {
         wires.push_back(std::move(pts));
     }
     j["wires"] = std::move(wires);
+    if (!c.buses.empty()) {
+        json buses = json::array();
+        for (const auto& b : c.buses) {
+            json pts = json::array(), entries = json::array();
+            for (const auto& p : b.pts) pts.push_back(pt(p));
+            for (const auto& [a, e] : b.entries) entries.push_back(json::array({pt(a), pt(e)}));
+            buses.push_back({{"name", b.name}, {"pts", pts}, {"entries", entries}});
+        }
+        j["buses"] = std::move(buses);
+    }
     json labels = json::array();
     for (const auto& l : c.labels) {
         json q{{"name", l.name}, {"at", pt(l.pos)}};
@@ -343,6 +353,17 @@ Circuit fromJson(const std::string& text) {
                 Wire wire;
                 for (const auto& p : w) wire.pts.push_back(readPt(p));
                 if (wire.pts.size() >= 2) c.wires.push_back(std::move(wire));
+            }
+        }
+        if (j.contains("buses")) {
+            for (const auto& q : j["buses"]) {
+                Bus b;
+                b.name = q.value("name", "");
+                b.members = busMembers(b.name);
+                for (const auto& p : q["pts"]) b.pts.push_back(readPt(p));
+                if (q.contains("entries"))
+                    for (const auto& e : q["entries"]) b.entries.push_back({readPt(e[0]), readPt(e[1])});
+                if (b.pts.size() >= 2) c.buses.push_back(std::move(b));
             }
         }
         if (j.contains("labels")) {

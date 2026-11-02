@@ -58,10 +58,26 @@ public:
         body_ << "X" << coord(p.x) << "Y" << coord(-p.y) << "D03*\n";
     }
     void pad(const WorldPad& p, double grow) {
+        if (p.angle != 0 && p.shape == PadShape::Rect) {  // a turned pad: its outline as a region
+            region(padOutline(p, grow));
+            return;
+        }
+        if (p.angle != 0 && p.shape == PadShape::Oval && std::abs(p.rw - p.rh) > 1e-9) {
+            region(padOutline(p, grow));
+            return;
+        }
         const double w = p.w + 2 * grow, h = p.h + 2 * grow;
         if (p.shape == PadShape::Circle) flash(p.pos, "C," + dec(std::min(w, h)));
         else if (p.shape == PadShape::Oval) flash(p.pos, std::abs(w - h) < 1e-9 ? "C," + dec(w) : "O," + dec(w) + "X" + dec(h));
         else flash(p.pos, "R," + dec(w) + "X" + dec(h));
+    }
+    void region(const std::vector<Pt>& pts) {
+        if (pts.size() < 3) return;
+        body_ << "G36*\n";
+        body_ << "X" << coord(pts[0].x) << "Y" << coord(-pts[0].y) << "D02*\n";
+        for (std::size_t i = 1; i < pts.size(); ++i) body_ << "X" << coord(pts[i].x) << "Y" << coord(-pts[i].y) << "D01*\n";
+        body_ << "X" << coord(pts[0].x) << "Y" << coord(-pts[0].y) << "D01*\n";
+        body_ << "G37*\n";
     }
     void rect(double x0, double y0, double x1, double y1) {
         body_ << "G36*\n";

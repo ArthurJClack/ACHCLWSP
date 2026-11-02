@@ -244,13 +244,20 @@ void registerFileCommands(Session& session) {
     reg.add({"circuit.footprints", "List Footprints",
              "The built-in footprints (SMD 0603/0805/1206, SOT-23, SOIC-N, through-hole axial, radial, DIP-N, TO-92, TO-220, pin "
              "headers, switches, dev boards). Names with N take a pin count, e.g. SOIC-8, DIP-28, PinHeader_1x06. KiCad library "
-             "names such as Resistor_SMD:R_0805_2012Metric are understood too.",
+             "names such as Resistor_SMD:R_0805_2012Metric are understood too, and so are footprints in your own library "
+             "(circuit.footprint_make / footprint_save).",
              {}, false, true},
             [](const Params&) -> std::unique_ptr<Action> {
                 return std::make_unique<FunctionAction>([] {
                     std::string s;
                     for (const auto& e : footprintCatalog()) s += "\n" + e.name + ": " + e.description;
-                    return Result::success(std::to_string(footprintCatalog().size()) + " footprint families:" + s);
+                    const auto mine = userFootprints();
+                    if (!mine.empty()) {
+                        s += "\n\nyour library (" + userFootprintDir().string() + "):";
+                        for (const auto& n : mine) s += "\n" + n;
+                    }
+                    return Result::success(std::to_string(footprintCatalog().size()) + " footprint families:" + s)
+                        .with("user", static_cast<std::int64_t>(mine.size()));
                 });
             });
 
@@ -319,9 +326,10 @@ void registerFileCommands(Session& session) {
 
     reg.add({"circuit.export", "Export Drawing",
              "Write the schematic or the board as a picture: .svg, .pdf (schematic only) or .png (view=3d: the assembled board); "
-             "the extension picks the format. For fabrication files use circuit.gerber, for KiCad circuit.save to .kicad_sch.",
+             "the extension picks the format. .step/.stp, .stl, .obj, .glb or .3mf write the assembled board as solids (board with "
+             "mounting holes, parts as boxes) to open in cad and design an enclosure around. For fabrication files use circuit.gerber, for KiCad circuit.save to .kicad_sch.",
              [] {
-                 std::vector<ParamSpec> v = {docParam(), {"path", ParamType::String, "output file (.svg, .pdf, .png)", true}};
+                 std::vector<ParamSpec> v = {docParam(), {"path", ParamType::String, "output file (.svg, .pdf, .png; .step/.stl/.obj/.glb/.3mf: the board in 3D)", true}};
                  for (auto& s : viewParams()) v.push_back(s);
                  v.push_back({"scale", ParamType::Number, "png: pixels per grid unit (schematic), per mm (pcb), or the width (3d)", false});
                  return v;
@@ -334,8 +342,13 @@ void registerFileCommands(Session& session) {
                     const std::string ext = lower(path.extension().string());
                     const bool pcb = stringParam(p, "view", "schematic") == "pcb";
                     std::string data;
-                    if (stringParam(p, "view", "schematic") == "3d") {
-                        if (ext != ".png") return Result::failure("the 3D view exports as .png");
+                    const bool model = ext == ".step" || ext == ".stp" || ext == ".stl" || ext == ".obj" || ext == ".glb" || ext == ".3mf";
+                    if (model) {  // the assembled board as solids, for designing an enclosure in cad
+                        if (!doc.circuit.board.outline.size() && std::none_of(doc.circuit.parts.begin(), doc.circuit.parts.end(), [](const Part& q) { return q.pcb.placed; }))
+                            return Result::failure("no board yet: circuit.board or circuit.pcb_place first");
+                        data = boardModel(doc.circuit, buildNetlist(doc.circuit), ext);
+                    } else if (stringParam(p, "view", "schematic") == "3d") {
+                        if (ext != ".png") return Result::failure("the 3D view exports as .png (or the board as solids: .step, .stl, .obj, .glb, .3mf)");
                         const int w = has(p, "scale") ? static_cast<int>(std::clamp(numberParam(p, "scale"), 200.0, 8000.0)) : 2000;
                         data = board3dPng(doc.circuit, p, w, static_cast<int>(w * 0.72)).bytes;
                     } else if (pcb) {

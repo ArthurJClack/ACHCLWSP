@@ -7,6 +7,8 @@
 #include <map>
 
 #include "wetwaresuite/circuit/circuit.hpp"
+#include "wetwaresuite/mesh/io.hpp"
+#include "wetwaresuite/mesh/primitives.hpp"
 #include "wetwaresuite/raster/paint.hpp"
 #include "geom.hpp"
 
@@ -349,6 +351,7 @@ std::vector<Pt> capsulePts(Pt a, Pt b, double r) {
 }
 
 std::vector<Pt> padPts(const WorldPad& p) {
+    if (p.angle != 0) return padOutline(p);
     if (p.shape == PadShape::Rect) {
         return {{p.pos.x - p.w / 2, p.pos.y - p.h / 2}, {p.pos.x + p.w / 2, p.pos.y - p.h / 2}, {p.pos.x + p.w / 2, p.pos.y + p.h / 2}, {p.pos.x - p.w / 2, p.pos.y + p.h / 2}};
     }
@@ -411,6 +414,57 @@ raster::Image renderBoard3d(const Circuit& c, const Netlist& nl, int width, int 
         }
     }
     return scene.render(width, height, rgb(v.background));
+}
+
+// The assembled board as solids for a CAD app: the board (1.6 mm, with its mounting and large
+// holes) and every part as the same boxes and cylinders the 3D view draws. Millimetres, y up
+// (the board file's y flipped), the top of the board at z = 1.6.
+std::string boardModel(const Circuit& c, const Netlist& nl, const std::string& ext) {
+    mesh::Mesh all;
+    auto add = [&](const std::vector<Pt>& base, std::vector<std::vector<Pt>> holes, double z0, double z1) {
+        if (base.size() < 3 || z1 - z0 < 1e-6) return;
+        mesh::Polygon2 poly;
+        for (const auto& p : base) poly.outer.push_back({p.x, -p.y});
+        for (const auto& h : holes) {
+            poly.holes.emplace_back();
+            for (const auto& p : h) poly.holes.back().push_back({p.x, -p.y});
+        }
+        const mesh::Mesh m = mesh::extrude(poly, z1 - z0);
+        const auto offset = static_cast<std::uint32_t>(all.positions.size());
+        for (auto v : m.positions) all.positions.push_back({v.x, v.y, v.z + z0});
+        for (auto i : m.indices) all.indices.push_back(i + offset);
+    };
+    std::vector<Pt> outline = c.board.outline;
+    if (outline.size() < 3) {
+        double x0, y0, x1, y1;
+        boardBounds(c.board, x0, y0, x1, y1);
+        outline = {{x0 - 5, y0 - 5}, {x1 + 5, y0 - 5}, {x1 + 5, y1 + 5}, {x0 - 5, y1 + 5}};
+    }
+    std::vector<std::vector<Pt>> holes;  // mounting holes and anything big a screw or post goes through
+    for (const auto& p : worldPads(c, nl)) {
+        if (p.drill >= 2.0 || (!p.plated && p.drill > 0)) holes.push_back(circlePts(p.pos, p.drill / 2, 24));
+    }
+    add(outline, holes, 0, kThick);
+    for (const auto& part : c.parts) {
+        if (!part.pcb.placed) continue;
+        auto fp = footprintOf(part);
+        if (!fp) continue;
+        for (const auto& body : bodiesFor(part, *fp)) {
+            std::vector<Pt> base;
+            if (body.kind == Body::Cylinder) {
+                for (const auto& p : circlePts({(body.x0 + body.x1) / 2, (body.y0 + body.y1) / 2}, (body.x1 - body.x0) / 2, 24)) base.push_back(toBoard(part.pcb, p));
+            } else {
+                for (Pt p : {Pt{body.x0, body.y0}, Pt{body.x1, body.y0}, Pt{body.x1, body.y1}, Pt{body.x0, body.y1}}) base.push_back(toBoard(part.pcb, p));
+            }
+            const double z0 = part.pcb.bottom ? -body.z1 : kThick + body.z0;
+            const double z1 = part.pcb.bottom ? -body.z0 : kThick + body.z1;
+            add(base, {}, z0, z1);
+        }
+    }
+    std::string e = ext;
+    if (!e.empty() && e[0] == '.') e.erase(0, 1);
+    if (e == "stp") e = "step";
+    return mesh::encode(all, e);
 }
 
 }  // namespace wetwaresuite::circuit

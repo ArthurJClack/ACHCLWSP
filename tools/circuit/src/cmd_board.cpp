@@ -54,6 +54,73 @@ void registerBoardToolCommands(Session& session) {
                     return edited(s, p).with("placed", static_cast<std::int64_t>(placed));
                 },
                 View::Pcb));
+    reg.add({"circuit.length", "Net Lengths",
+             "Copper length of nets (their traces), in mm: for matching a bus or a differential pair before circuit.tune.",
+             {docParam(), {"nets", ParamType::String, "nets, comma-separated (default: every routed net)", false}}, false},
+            circuitCommand(
+                session,
+                [](CircuitDoc& doc, const Params& p) {
+                    const Netlist nl = buildNetlist(doc.circuit);
+                    std::vector<std::string> nets;
+                    if (has(p, "nets")) {
+                        for (const auto& n : splitList(stringParam(p, "nets"))) {
+                            const Net* net = nl.net(n);
+                            if (!net) return Result::failure("no net called " + n + " (circuit.nets lists them)");
+                            nets.push_back(net->name);
+                        }
+                    } else {
+                        for (const auto& t : doc.circuit.board.traces)
+                            if (!t.net.empty() && std::find(nets.begin(), nets.end(), t.net) == nets.end()) nets.push_back(t.net);
+                        std::sort(nets.begin(), nets.end());
+                    }
+                    std::string s;
+                    Result r = Result::success("");
+                    for (const auto& n : nets) {
+                        const double l = netLength(doc.circuit, n);
+                        s += (s.empty() ? "" : "\n") + n + ": " + num(l) + " mm";
+                        r.with("length(" + n + ")", l);
+                    }
+                    r.message = s.empty() ? "no routed nets yet" : s;
+                    return r;
+                },
+                View::Pcb, false));
+
+    reg.add({"circuit.tune", "Tune Length",
+             "Stretch a net with meanders (trombone bumps) until it is a given length, or as long as another net (match=), "
+             "the way high-speed buses and differential pairs are matched. Bumps go on its longest straight traces, on "
+             "whichever side has room; meanders only add length.",
+             {docParam(),
+              {"net", ParamType::String, "the net to stretch", true},
+              {"length", ParamType::Number, "target length, mm", false},
+              {"match", ParamType::String, "make it as long as this net instead", false},
+              {"amplitude", ParamType::Number, "how far a bump sticks out, mm", false, {}, 1.0},
+              {"spacing", ParamType::Number, "gap between bumps, mm", false, {}, 0.5},
+              previewParam()},
+             true},
+            circuitCommand(
+                session,
+                [](CircuitDoc& doc, const Params& p) {
+                    const Netlist nl = buildNetlist(doc.circuit);
+                    const Net* net = nl.net(stringParam(p, "net"));
+                    if (!net) return Result::failure("no net called " + stringParam(p, "net") + " (circuit.nets lists them)");
+                    double target = 0;
+                    if (has(p, "match")) {
+                        const Net* other = nl.net(stringParam(p, "match"));
+                        if (!other) return Result::failure("no net called " + stringParam(p, "match"));
+                        target = netLength(doc.circuit, other->name);
+                    } else if (has(p, "length")) {
+                        target = numberParam(p, "length");
+                    } else {
+                        return Result::failure("give length= (mm) or match= (another net)");
+                    }
+                    const double amp = numberParam(p, "amplitude", 1.0), gap = numberParam(p, "spacing", 0.5);
+                    if (amp <= 0 || gap <= 0) return Result::failure("amplitude and spacing must be above 0");
+                    const TuneReport t = tuneLength(doc.circuit, nl, net->name, target, amp, gap);
+                    std::string s = net->name + ": " + num(t.before) + " mm -> " + num(t.after) + " mm (target " + num(target) + ")";
+                    if (!t.note.empty()) s += "; " + t.note;
+                    return edited(s, p).with("before", t.before).with("after", t.after).with("segments", static_cast<std::int64_t>(t.segments));
+                },
+                View::Pcb));
 }
 
 }  // namespace wetwaresuite::circuit::cmd

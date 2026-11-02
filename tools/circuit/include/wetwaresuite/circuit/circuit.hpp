@@ -74,6 +74,10 @@ std::shared_ptr<const Symbol> findSymbol(const std::string& name, int pins = 0, 
                                          std::string* error = nullptr);
 // The canonical library name for a name or alias ("R" -> "resistor"), empty if unknown.
 std::string canonicalSymbol(const std::string& name);
+// Multi-unit library parts (opamp_dual, opamp_quad, nand_quad, inverter_hex): how many units
+// (0 for an ordinary symbol, the power unit counted), and one unit's symbol (1-based).
+int symbolUnits(const std::string& name);
+std::shared_ptr<const Symbol> findSymbolUnit(const std::string& name, int unit);
 
 // ---- footprints ---------------------------------------------------------------------
 
@@ -115,7 +119,7 @@ void finishFootprint(Footprint& f);
 struct PcbPlace {
     bool placed = false;
     Pt pos;           // mm
-    int rot = 0;      // degrees counter-clockwise, multiples of 90
+    int rot = 0;      // degrees counter-clockwise, any whole degree (0..359)
     bool bottom = false;
 };
 
@@ -138,6 +142,17 @@ struct Part {
 struct Wire {
     std::vector<Pt> pts;  // polyline, grid units
 };
+
+// A bus: a thick line that groups related signals (D0..D7). It is a drawing aid, as in KiCad: what
+// connects is the net labels on its members, which bus_tap puts on each pin with an entry line.
+struct Bus {
+    std::string name;                  // as written, e.g. D[0..7]
+    std::vector<std::string> members;  // expanded: D0, D1, ...
+    std::vector<Pt> pts;               // polyline, grid units
+    std::vector<std::pair<Pt, Pt>> entries;  // short lines from member labels to the bus
+};
+// "D[0..7]" -> D0..D7, "A[3..0]" -> A3..A0, "{SDA,SCL}" or "SDA,SCL" -> SDA, SCL.
+std::vector<std::string> busMembers(const std::string& name);
 
 struct Label {
     std::string name;
@@ -201,6 +216,7 @@ struct Circuit {
     std::vector<Wire> wires;
     std::vector<Label> labels;
     std::vector<Pt> noConnects;
+    std::vector<Bus> buses;
     Board board;
 
     Part* part(const std::string& ref);
@@ -289,6 +305,31 @@ Circuit fromKicadPcb(const std::string& text, std::vector<std::string>* warnings
 void mergeKicadPcb(Circuit& c, const std::string& text, std::vector<std::string>* warnings);
 std::string toKicadSchematic(const Circuit& c);
 std::string toKicadPcb(const Circuit& c);
+// One KiCad footprint file (.kicad_mod), both ways.
+std::shared_ptr<const Footprint> fromKicadMod(const std::string& text, std::vector<std::string>* warnings = nullptr);
+std::string toKicadMod(const Footprint& fp);
+
+// ---- footprint editor ------------------------------------------------------------------
+// A footprint made from a few numbers, the way package datasheets give them.
+struct FootprintSpec {
+    std::string name, kind;  // kind: smd2, row, dual, quad, grid, blank
+    int pins = 2;
+    double pitch = 1.27;     // pad to pad, mm
+    double span = 5.4;       // dual: row centre to row centre; quad: across; grid: unused
+    double padW = 0.6, padH = 1.5;  // dual/quad pads are padH long, pointing away from the body
+    double drill = 0;        // > 0: through hole
+    PadShape shape = PadShape::Rect;
+    int columns = 0;         // grid: per row (default: square)
+    double exposed = 0;      // quad: centre pad size (0: none)
+};
+Footprint makeFootprint(const FootprintSpec& spec);
+// The user's own footprint library: a folder of .kicad_mod files (WETWARESUITE_FOOTPRINTS, or
+// "footprints" next to the suite's settings). Looked up after the built-in footprints.
+std::filesystem::path userFootprintDir();
+std::shared_ptr<const Footprint> findUserFootprint(const std::string& name);
+std::vector<std::string> userFootprints();
+// Writes a footprint into the user library; returns the file.
+std::filesystem::path saveUserFootprint(const Footprint& fp);
 
 // ---- schematic editing helpers ------------------------------------------------------
 
@@ -315,7 +356,12 @@ struct WorldPad {
     double drill = 0;
     int layers = 1;  // layer mask: bit 0 = top, bit 1 = bottom, bits 2, 3 = inner layers
     bool plated = true;  // false: a non-plated hole (no copper, no net)
+    // a part turned by something other than a multiple of 90: the pad's own size and its turn left over
+    // after the nearest quarter turn (w, h above are then its upright bounding box, for clearances)
+    double angle = 0, rw = 0, rh = 0;
 };
+// The outline of a pad as a polygon (exact for turned pads; arcs as short segments).
+std::vector<Pt> padOutline(const WorldPad& pad, double grow = 0);
 
 std::vector<WorldPad> worldPads(const Circuit& c, const Netlist& nl);
 Pt toBoard(const PcbPlace& place, Pt local);  // footprint space -> board space
@@ -372,6 +418,26 @@ struct FanoutReport {
 };
 FanoutReport fanout(Circuit& c, const Netlist& nl, const std::vector<std::string>& nets);
 
+// Push-and-shove: adds the trace segments, pushing traces of other nets on the same layer aside
+// (they bend around with 45-degree jogs and stay connected; pushed traces push others, maxDepth deep).
+// Pads and vias don't move; a push that would hit one is skipped and listed in `blocked`.
+struct ShoveReport {
+    int moved = 0;
+    std::vector<std::string> blocked;
+};
+ShoveReport addTraceShoving(Circuit& c, const Netlist& nl, const std::vector<Trace>& segs, double maxDepth = 3);
+
+// Copper length of a net (its traces), mm.
+double netLength(const Circuit& c, const std::string& net);
+// Adds meanders (trombone bumps of up to `amplitude` mm, `spacing` mm apart) to a net's straight traces
+// until it is `target` mm long, where they fit without touching other copper.
+struct TuneReport {
+    double before = 0, after = 0;
+    int segments = 0;  // traces meandered
+    std::string note;
+};
+TuneReport tuneLength(Circuit& c, const Netlist& nl, const std::string& net, double target, double amplitude = 1.0, double spacing = 0.5);
+
 struct OutFile {
     std::string name, data;
 };
@@ -413,6 +479,9 @@ struct View3d {
     unsigned background = 0x1b1d22;
 };
 raster::Image renderBoard3d(const Circuit& c, const Netlist& nl, int width, int height, const View3d& view = {});
+// The assembled board as solids (board with its mounting holes, parts as boxes) for a CAD app, encoded
+// by extension: .step/.stp (one solid per body), .stl, .obj, .glb, .3mf. Millimetres, y up.
+std::string boardModel(const Circuit& c, const Netlist& nl, const std::string& ext);
 
 // The window's picture of a circuit (CircuitDoc::preview): view "schematic", "pcb" or "3d", and how
 // its pixels map back: model point = origin + pixel / scale (grid units on the sheet, mm on the board;
@@ -435,6 +504,9 @@ struct SimOptions {
     double tstop = 0, step = 0;  // transient when tstop > 0
     std::vector<std::string> probes;  // net names to record (empty = all)
     bool ignoreUnsupported = false;
+    // AC sweep (small signal around the operating point) when acStop > 0: log steps from acStart
+    double acStart = 0, acStop = 0;
+    int acPerDecade = 20;
 };
 struct SimResult {
     std::vector<std::string> nets;    // node names, ground excluded
@@ -445,12 +517,19 @@ struct SimResult {
     std::vector<std::vector<double>> series;  // per probe, per time
     std::vector<std::string> warnings;
     int iterations = 0;
+    // AC sweep: per probe, per frequency, gain in dB (against a 1 V source) and phase in degrees
+    std::vector<double> freqs;
+    std::vector<std::string> acProbes;
+    std::vector<std::vector<double>> acMag, acPhase;
 };
-// DC operating point (tstop == 0) or a fixed-step transient. Resistors, capacitors, inductors,
-// diodes/LEDs, switches, potentiometers, voltage/current sources and batteries; power symbols
-// named like +5V become sources. Ground is the GND (or 0) net. Throws std::runtime_error.
+// DC operating point (tstop == 0), a fixed-step transient, and/or an AC sweep. Resistors,
+// capacitors, inductors, diodes/LEDs, NPN/PNP transistors (Ebers-Moll: fields beta, br, is),
+// N/P MOSFETs (square law: fields vth, k, lambda), switches, potentiometers, ideal op-amps,
+// voltage/current sources and batteries; power symbols named like +5V become sources. Ground is
+// the GND (or 0) net. Throws std::runtime_error.
 SimResult simulate(const Circuit& c, const Netlist& nl, const SimOptions& options);
 raster::Image plotSeries(const SimResult& r, int width, int height);
+raster::Image plotBode(const SimResult& r, int width, int height);  // gain (dB) above phase, log frequency
 
 // ---- files --------------------------------------------------------------------------
 
