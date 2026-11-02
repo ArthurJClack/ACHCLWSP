@@ -62,6 +62,10 @@ bool ProjectDoc::timeline(TimelineLayout& out) const {
             tc.length = c.seconds();
             tc.headroom = c.offset;
             tc.tailroom = std::max(0.0, c.sourceSeconds() - c.offset - c.seconds());
+            tc.fadeIn = c.fadeIn;
+            tc.fadeOut = c.fadeOut;
+            tc.gainDb = c.gainDb;
+            tc.gainHandle = true;
             tt.clips.push_back(tc);
         }
         out.tracks.push_back(std::move(tt));
@@ -86,6 +90,10 @@ std::string ProjectDoc::timelineCommand(const TimelineEdit& e) const {
         case TimelineEditKind::TrimEnd: return "audio.clip_trim" + which + " length=" + t4(std::max(0.001, e.length));
         case TimelineEditKind::Split: return "audio.clip_split" + which + " at=" + t4(e.at);
         case TimelineEditKind::Delete: return "audio.clip_remove" + which;
+        case TimelineEditKind::SetProperty:
+            if (e.name == "fade_in" || e.name == "fade_out") return "audio.clip_set" + which + " " + e.name + "=" + t4(std::max(0.0, e.at));
+            if (e.name == "gain") return "audio.clip_set" + which + " gain=" + t4(std::clamp(e.at, -60.0, 24.0));
+            break;
         default: break;
     }
     return {};

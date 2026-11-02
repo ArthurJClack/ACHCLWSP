@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <array>
 #include <map>
 
 #include "shell.hpp"
@@ -66,6 +67,15 @@ struct SoundState {
     bool dragMoved = false;
     int addType = 0;
     std::map<std::string, float> sliders;  // a slider's value while it's dragged
+    // effects buses (audio projects): id "bus<n>", name, level, muted, and the sends into each
+    struct BusRow {
+        int index = 0;
+        std::string name;
+        double gainDb = 0;
+        bool mute = false;
+        std::map<int, double> sends;  // track -> level dB
+    };
+    std::vector<BusRow> buses;
 };
 
 struct Roll {
@@ -80,8 +90,18 @@ struct Roll {
     std::vector<N> notes;
     int bars = 1;
     double beatsPerBar = 4;
-    int selected = -1;
-    enum class Drag { None, Move, Resize } drag = Drag::None;
+    std::vector<int> sel;  // selected note numbers, sorted
+    bool isSel(int i) const { return std::binary_search(sel.begin(), sel.end(), i); }
+    enum class Drag { None, Move, Resize, Box } drag = Drag::None;
+    double boxBeat = 0;
+    int boxPitch = 0;
+    // MIDI recording: live (with the song playing) or step entry, from a MIDI keyboard or the computer keys
+    bool recording = false, live = false, keys = true;
+    double recAt = 0, recSince = 0, stepBeat = 0, bpm = 120;
+    int octave = 4;
+    std::vector<std::array<double, 4>> pending;  // step mode: on(1)/off(0), pitch, velocity, time, until the keys are up
+    std::vector<int> held;
+    bool focused = false;  // the grid had keyboard focus last frame (keys act on the selection)
     int dragNote = -1;
     double grabBeat = 0, newStart = 0, newLength = 1;
     int grabPitch = 0, newPitch = 0;
@@ -133,6 +153,8 @@ void Shell::soundPanel() {
         p[docKey] = currentDoc_;
         if (st.owner == "master") {
             p["master"] = true;
+        } else if (st.owner.rfind("bus", 0) == 0) {
+            p["bus"] = static_cast<std::int64_t>(std::atoi(st.owner.c_str() + 3));
         } else if (song) {
             p["track"] = st.owner;
         } else {
@@ -163,6 +185,18 @@ void Shell::soundPanel() {
             for (const auto& t : layout.tracks) {
                 st.owners.emplace_back(t.id, t.id + ": " + t.name);
                 for (const auto& c : t.clips) end = std::max(end, c.start + c.length);
+            }
+        }
+        st.buses.clear();
+        if (!song && find("audio.sends")) {
+            for (const auto& row : tp::rows(query("audio.sends", {{"project", currentDoc_}}))) {
+                if (row.size() < 6) continue;
+                const int b = std::atoi(row[0].c_str());
+                if (st.buses.empty() || st.buses.back().index != b) {
+                    st.buses.push_back({b, row[1], toNum(row[2]), row[3] == "1", {}});
+                    st.owners.emplace_back("bus" + std::to_string(b), "Bus " + std::to_string(b) + ": " + row[1]);
+                }
+                if (row[4] != "-1") st.buses.back().sends[std::atoi(row[4].c_str())] = toNum(row[5]);
             }
         }
         if (std::none_of(st.owners.begin(), st.owners.end(), [&](const auto& o) { return o.first == st.owner; })) st.owner = "master";
@@ -216,6 +250,68 @@ void Shell::soundPanel() {
             }
         }
         ImGui::EndCombo();
+    }
+
+    // ---- buses: a bus's own level, a track's sends ----
+    if (!song && find("audio.bus_add")) {
+        const bool isBus = st.owner.rfind("bus", 0) == 0;
+        if (isBus) {
+            const int b = std::atoi(st.owner.c_str() + 3);
+            for (const auto& bus : st.buses) {
+                if (bus.index != b) continue;
+                const std::string key = "busgain" + std::to_string(b);
+                auto it = st.sliders.find(key);
+                float g = it != st.sliders.end() ? it->second : static_cast<float>(bus.gainDb);
+                ImGui::SetNextItemWidth(-unit * 7.5f);
+                if (ImGui::SliderFloat("##busgain", &g, -40, 12, "level %.1f dB")) st.sliders[key] = g;
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    st.sliders.erase(key);
+                    run("audio.bus_set", {{"project", currentDoc_}, {"bus", static_cast<std::int64_t>(b)}, {"gain", static_cast<double>(g)}});
+                }
+                ImGui::SameLine();
+                bool muted = bus.mute;
+                if (ImGui::Checkbox("Mute", &muted)) run("audio.bus_set", {{"project", currentDoc_}, {"bus", static_cast<std::int64_t>(b)}, {"mute", muted}});
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x##bus")) {
+                    run("audio.bus_remove", {{"project", currentDoc_}, {"bus", static_cast<std::int64_t>(b)}});
+                    st.owner = "master";
+                }
+                ImGui::SetItemTooltip("Remove this bus (and the sends to it)");
+                tp::muted(bus.sends.empty() ? "Nothing sends here yet: pick a track and turn up its send." : (std::to_string(bus.sends.size()) + " track(s) send here.").c_str());
+            }
+        } else if (st.owner != "master") {
+            // sends: left end = off
+            const int track = std::atoi(st.owner.c_str());
+            for (const auto& bus : st.buses) {
+                ImGui::PushID(bus.index);
+                const auto have = bus.sends.find(track);
+                const std::string key = "send" + st.owner + "/" + std::to_string(bus.index);
+                auto it = st.sliders.find(key);
+                float v = it != st.sliders.end() ? it->second : have != bus.sends.end() ? static_cast<float>(have->second) : -60.0f;
+                ImGui::SetNextItemWidth(-1);
+                const std::string fmtText = "send to " + bus.name + (v <= -59.5f ? ": off" : ": %.1f dB");
+                if (ImGui::SliderFloat("##send", &v, -60, 6, fmtText.c_str())) st.sliders[key] = v;
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    st.sliders.erase(key);
+                    Params sp{{"project", currentDoc_}, {"track", static_cast<std::int64_t>(track)}, {"bus", static_cast<std::int64_t>(bus.index)}};
+                    if (v <= -59.5f) sp["off"] = true;
+                    else sp["level"] = static_cast<double>(v);
+                    run("audio.send", sp);
+                }
+                ImGui::PopID();
+            }
+        }
+        if (ImGui::SmallButton("+ Reverb bus")) {
+            Result r = run("audio.bus_add", {{"project", currentDoc_}, {"fx", std::string("reverb")}});
+            if (r.ok) st.owner = "bus" + std::to_string(static_cast<int>(tp::number(r, "bus", 0)));
+        }
+        ImGui::SetItemTooltip("A shared reverb that tracks feed with their send sliders");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+ Delay bus")) {
+            Result r = run("audio.bus_add", {{"project", currentDoc_}, {"fx", std::string("delay")}});
+            if (r.ok) st.owner = "bus" + std::to_string(static_cast<int>(tp::number(r, "bus", 0)));
+        }
+        ImGui::Spacing();
     }
 
     // ---- the rack ----
@@ -302,7 +398,7 @@ void Shell::soundPanel() {
             double lo, hi;
         };
         std::vector<Target> targets = {{"volume", -60, 12}};
-        if (st.owner != "master" || !song) targets.push_back({"pan", -1, 1});
+        if ((st.owner != "master" || !song) && st.owner.rfind("bus", 0) != 0) targets.push_back({"pan", -1, 1});
         for (const auto& fx : st.rack)
             for (const auto& s : fx.settings)
                 if (s.choices.empty()) targets.push_back({"fx" + std::to_string(fx.index) + "." + s.name, s.min, s.max});
@@ -436,15 +532,16 @@ void Shell::pianoRollView() {
             r.bars = std::max(1, static_cast<int>(tp::number(q, "bars", 1)));
             r.beatsPerBar = std::max(1.0, tp::number(q, "beats_per_bar", 4));
         }
-        if (r.selected >= static_cast<int>(r.notes.size())) r.selected = -1;
-        if (r.selected >= 0) r.velocity = static_cast<float>(r.notes[static_cast<std::size_t>(r.selected)].velocity);
+        r.sel.erase(std::remove_if(r.sel.begin(), r.sel.end(), [&](int k) { return k >= static_cast<int>(r.notes.size()); }), r.sel.end());
+        if (!r.sel.empty()) r.velocity = static_cast<float>(r.notes[static_cast<std::size_t>(r.sel.front())].velocity);
+        r.bpm = std::max(1.0, tp::number(query("beats.info", {{"song", currentDoc_}}), "bpm", 120));
     }
 
     // ---- toolbar ----
     ImGui::SetNextItemWidth(unit * 9);
     if (ImGui::BeginCombo("##pattern", r.pattern.empty() ? "(no patterns)" : r.pattern.c_str())) {
         for (const auto& p : r.patterns)
-            if (ImGui::Selectable(p.c_str(), p == r.pattern)) r.pattern = p, r.seen = ~0ull, r.selected = -1;
+            if (ImGui::Selectable(p.c_str(), p == r.pattern)) r.pattern = p, r.seen = ~0ull, r.sel.clear();
         ImGui::EndCombo();
     }
     if (r.pattern.empty()) {
@@ -456,21 +553,124 @@ void Shell::pianoRollView() {
     if (ImGui::Button("Quantize")) act("beats.note_quantize", {{"grid", 0.25}}, "Quantize");
     ImGui::SetItemTooltip("Snap every note start to 16ths");
     ImGui::SameLine();
-    if (ImGui::Button("-12")) act("beats.note_transpose", {{"semitones", std::int64_t{-12}}}, "Transpose");
+    auto transpose = [&](std::int64_t semis) {
+        Params tp{{"semitones", semis}};
+        if (!r.sel.empty()) {
+            NumberList v;
+            for (int k : r.sel) v.push_back(static_cast<double>(k));
+            tp["notes"] = v;
+        }
+        act("beats.note_transpose", tp, "Transpose");
+    };
+    if (ImGui::Button("-12")) transpose(-12);
+    ImGui::SetItemTooltip("An octave down (the selection, or every note)");
     ImGui::SameLine();
-    if (ImGui::Button("+12")) act("beats.note_transpose", {{"semitones", std::int64_t{12}}}, "Transpose");
+    if (ImGui::Button("+12")) transpose(12);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(unit * 5);
     ImGui::SliderFloat("##zoom", &r.pxPerBeat, 16, 160, "zoom %.0f");
-    if (r.selected >= 0) {
+    auto selList = [&] {
+        NumberList v;
+        for (int k : r.sel) v.push_back(static_cast<double>(k));
+        return v;
+    };
+    const bool rollFocused = r.focused && !ImGui::GetIO().WantTextInput;
+    if (rollFocused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
+        r.sel.clear();
+        for (int k = 0; k < static_cast<int>(r.notes.size()); ++k) r.sel.push_back(k);
+    }
+    if (!r.sel.empty()) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(unit * 7);
         ImGui::SliderFloat("##vel", &r.velocity, 1, 127, "velocity %.0f");
         if (ImGui::IsItemDeactivatedAfterEdit())
-            act("beats.note_set", {{"notes", NumberList{static_cast<double>(r.selected)}}, {"velocity", static_cast<std::int64_t>(std::lround(r.velocity))}}, "Velocity");
+            act("beats.note_set", {{"notes", selList()}, {"velocity", static_cast<std::int64_t>(std::lround(r.velocity))}}, "Velocity");
         ImGui::SameLine();
-        if (ImGui::Button("Delete") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
-            if (act("beats.note_remove", {{"notes", NumberList{static_cast<double>(r.selected)}}}, "Delete note")) r.selected = -1;
+        if (ImGui::Button("Delete") || (rollFocused && !r.recording && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
+            if (act("beats.note_remove", {{"notes", selList()}}, "Delete notes")) r.sel.clear();
+        }
+        // arrows nudge the selection: up/down a semitone (Shift: an octave), left/right a 16th
+        if (rollFocused && !r.recording) {
+            int semis = 0;
+            double shift = 0;
+            const bool big = ImGui::GetIO().KeyShift;
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) semis = big ? 12 : 1;
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) semis = big ? -12 : -1;
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) shift = big ? r.beatsPerBar : 0.25;
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) shift = big ? -r.beatsPerBar : -0.25;
+            if (semis || shift != 0) act("beats.note_move", {{"notes", selList()}, {"semitones", static_cast<std::int64_t>(semis)}, {"shift", shift}}, "Move notes");
+        }
+    }
+
+    // ---- MIDI recording ----
+    ImGui::SameLine();
+    if (!r.recording) {
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 80, 80, 255));
+        const bool rec = ImGui::Button("Rec");
+        ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("Record from a MIDI keyboard (or the computer keys A W S E D...): with the song playing it keeps your timing, stopped it enters one note or chord per step");
+        if (rec && run("beats.midi_open", {}).ok) {
+            Result rd = run("beats.midi_read", {});
+            r.recording = true;
+            r.live = transport_.playing && transport_.source == currentDoc_;
+            r.recSince = tp::number(rd, "time", 0);
+            const double patBeats = r.bars * r.beatsPerBar;
+            r.recAt = r.live ? std::fmod(transport_.position * r.bpm / 60.0, std::max(1.0, patBeats)) : 0;
+            double end = 0;
+            for (int k : r.sel) end = std::max(end, r.notes[static_cast<std::size_t>(k)].start + r.notes[static_cast<std::size_t>(k)].length);
+            r.stepBeat = r.sel.empty() ? 0 : end;
+            r.pending.clear();
+            r.held.clear();
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(190, 40, 40, 255));
+        const bool stop = ImGui::Button(r.live ? "Stop rec (live)" : "Stop rec (step)");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::Checkbox("Computer keys", &r.keys);
+        ImGui::SetItemTooltip("A W S E D F T G Y H U J K play notes, Z and X change octave");
+        if (r.keys) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("octave %d", r.octave);
+        }
+        // the computer keyboard as a piano (Ableton's layout)
+        static const std::pair<ImGuiKey, int> keyMap[] = {
+            {ImGuiKey_A, 0}, {ImGuiKey_W, 1}, {ImGuiKey_S, 2}, {ImGuiKey_E, 3}, {ImGuiKey_D, 4}, {ImGuiKey_F, 5}, {ImGuiKey_T, 6}, {ImGuiKey_G, 7},
+            {ImGuiKey_Y, 8}, {ImGuiKey_H, 9}, {ImGuiKey_U, 10}, {ImGuiKey_J, 11}, {ImGuiKey_K, 12}, {ImGuiKey_O, 13}, {ImGuiKey_L, 14}};
+        if (r.keys && !ImGui::GetIO().WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) r.octave = std::max(0, r.octave - 1);
+            if (ImGui::IsKeyPressed(ImGuiKey_X, false)) r.octave = std::min(8, r.octave + 1);
+            for (const auto& [key, semi] : keyMap) {
+                const int pitch = std::clamp((r.octave + 1) * 12 + semi, 0, 127);
+                if (ImGui::IsKeyPressed(key, false)) session_.run("beats.midi_key", {{"pitch", std::to_string(pitch)}, {"velocity", std::int64_t{100}}});
+                if (ImGui::IsKeyReleased(key)) session_.run("beats.midi_key", {{"pitch", std::to_string(pitch)}, {"on", false}});
+            }
+        }
+        if (!r.live) {
+            // step entry: collect until every key is up, then the chord goes in at the step
+            Result rd = session_.run("beats.midi_read", {});
+            for (const auto& row : tp::rows(rd)) {
+                if (row.size() < 5) continue;
+                const bool on = row[0] == "on";
+                const int pitch = std::atoi(row[1].c_str());
+                r.pending.push_back({on ? 1.0 : 0.0, static_cast<double>(pitch), toNum(row[3]), toNum(row[4])});
+                if (on) r.held.push_back(pitch);
+                else r.held.erase(std::remove(r.held.begin(), r.held.end(), pitch), r.held.end());
+            }
+            if (r.held.empty() && !r.pending.empty()) {
+                for (const auto& e : r.pending)
+                    session_.run("beats.midi_key", {{"pitch", std::to_string(static_cast<int>(e[1]))}, {"on", e[0] > 0.5},
+                                                    {"velocity", static_cast<std::int64_t>(std::max(1.0, e[2]))}, {"time", e[3]}});
+                r.pending.clear();
+                Result took = run("beats.midi_take", {{"song", currentDoc_}, {"pattern", r.pattern}, {"mode", std::string("step")}, {"at", r.stepBeat}, {"step", 0.5}});
+                if (took.ok) r.stepBeat += 0.5;
+            }
+        }
+        if (stop) {
+            r.recording = false;
+            if (r.live)
+                act("beats.midi_take", {{"mode", std::string("live")}, {"at", r.recAt}, {"since", r.recSince}, {"grid", 0.25}}, "Record notes");
+            session_.run("beats.midi_close", {});
         }
     }
 
@@ -524,28 +724,63 @@ void Shell::pianoRollView() {
     }
     for (std::size_t i = 0; i < r.notes.size(); ++i) {
         auto n = r.notes[i];
-        if (static_cast<int>(i) == r.dragNote && r.drag != Roll::Drag::None) n.start = r.newStart, n.pitch = r.newPitch, n.length = r.newLength;
+        if (r.drag == Roll::Drag::Move && r.isSel(static_cast<int>(i)) && r.dragNote >= 0) {
+            const auto& g = r.notes[static_cast<std::size_t>(r.dragNote)];
+            n.start = std::max(0.0, n.start + r.newStart - g.start);
+            n.pitch = std::clamp(n.pitch + r.newPitch - g.pitch, 0, 127);
+        } else if (static_cast<int>(i) == r.dragNote && r.drag == Roll::Drag::Resize) {
+            n.length = r.newLength;
+        }
         const ImVec2 a{beatX(n.start) + 1, rowY(n.pitch) + 1}, b{beatX(n.start + n.length) - 1, rowY(n.pitch) + rowH - 1};
         const float shade = 0.45f + 0.55f * n.velocity / 127.0f;
-        dl->AddRectFilled(a, b, static_cast<int>(i) == r.selected ? sel : (note & 0x00ffffffu) | (static_cast<ImU32>(255 * shade) << 24), 2);
+        dl->AddRectFilled(a, b, r.isSel(static_cast<int>(i)) ? sel : (note & 0x00ffffffu) | (static_cast<ImU32>(255 * shade) << 24), 2);
         dl->AddRect(a, b, text, 2);
     }
     if (hovered) ImGui::SetMouseCursor(edge ? ImGuiMouseCursor_ResizeEW : hit >= 0 ? ImGuiMouseCursor_Hand : ImGuiMouseCursor_Arrow);
 
+    const bool shiftKey = ImGui::GetIO().KeyShift;
     if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && hit < 0 && mouseBeat < beats) {
+        r.drag = Roll::Drag::None;
         act("beats.note_add", {{"pitch", std::to_string(mousePitch)}, {"start", std::floor(mouseBeat * 4) / 4}, {"length", r.lastLength}}, "Add note");
     } else if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hit >= 0) {
         const auto& n = r.notes[static_cast<std::size_t>(hit)];
-        r.selected = r.dragNote = hit;
+        if (shiftKey) {
+            // Shift-click adds or takes away one note
+            if (r.isSel(hit)) r.sel.erase(std::find(r.sel.begin(), r.sel.end(), hit));
+            else r.sel.insert(std::lower_bound(r.sel.begin(), r.sel.end(), hit), hit);
+        } else if (!r.isSel(hit)) {
+            r.sel = {hit};
+        }
+        r.dragNote = hit;
         r.velocity = static_cast<float>(n.velocity);
-        r.drag = edge ? Roll::Drag::Resize : Roll::Drag::Move;
+        r.drag = shiftKey ? Roll::Drag::None : edge ? Roll::Drag::Resize : Roll::Drag::Move;
         r.grabBeat = mouseBeat;
         r.grabPitch = mousePitch;
         r.newStart = n.start, r.newPitch = n.pitch, r.newLength = n.length;
     } else if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        r.selected = -1;
+        // empty space: drag a box to select (Shift adds to the selection)
+        if (!shiftKey) r.sel.clear();
+        r.drag = Roll::Drag::Box;
+        r.boxBeat = mouseBeat;
+        r.boxPitch = mousePitch;
     }
-    if (r.drag != Roll::Drag::None && r.dragNote >= 0 && r.dragNote < static_cast<int>(r.notes.size())) {
+    if (r.drag == Roll::Drag::Box) {
+        const double b0 = std::min(r.boxBeat, mouseBeat), b1 = std::max(r.boxBeat, mouseBeat);
+        const int p0 = std::min(r.boxPitch, mousePitch), p1 = std::max(r.boxPitch, mousePitch);
+        const ImVec2 a{beatX(b0), rowY(p1)}, b{beatX(b1), rowY(p0) + rowH};
+        dl->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_PlotHistogramHovered, 0.18f));
+        dl->AddRect(a, b, ImGui::GetColorU32(ImGuiCol_PlotHistogramHovered));
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            for (std::size_t k = 0; k < r.notes.size(); ++k) {
+                const auto& n = r.notes[k];
+                if (n.pitch >= p0 && n.pitch <= p1 && n.start < b1 && n.start + n.length > b0 && !r.isSel(static_cast<int>(k)))
+                    r.sel.insert(std::lower_bound(r.sel.begin(), r.sel.end(), static_cast<int>(k)), static_cast<int>(k));
+            }
+            if (!r.sel.empty()) r.velocity = static_cast<float>(r.notes[static_cast<std::size_t>(r.sel.front())].velocity);
+            r.drag = Roll::Drag::None;
+        }
+    }
+    if ((r.drag == Roll::Drag::Move || r.drag == Roll::Drag::Resize) && r.dragNote >= 0 && r.dragNote < static_cast<int>(r.notes.size())) {
         const auto& n = r.notes[static_cast<std::size_t>(r.dragNote)];
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             if (r.drag == Roll::Drag::Move) {
@@ -555,24 +790,29 @@ void Shell::pianoRollView() {
                 r.newLength = std::max(0.25, snapTo(n.length + mouseBeat - r.grabBeat, 0.25));
             }
         } else {
-            const NumberList which{static_cast<double>(r.dragNote)};
-            if (r.drag == Roll::Drag::Move && (std::fabs(r.newStart - n.start) > 1e-9 || r.newPitch != n.pitch))
-                act("beats.note_set", {{"notes", which}, {"start", r.newStart}, {"pitch", std::to_string(r.newPitch)}}, "Move note");
+            if (r.drag == Roll::Drag::Move && (std::fabs(r.newStart - n.start) > 1e-9 || r.newPitch != n.pitch)) {
+                // every selected note moves together
+                act("beats.note_move", {{"notes", selList()}, {"shift", r.newStart - n.start}, {"semitones", static_cast<std::int64_t>(r.newPitch - n.pitch)}},
+                    r.sel.size() > 1 ? "Move notes" : "Move note");
+            }
             if (r.drag == Roll::Drag::Resize && std::fabs(r.newLength - n.length) > 1e-9) {
-                if (act("beats.note_set", {{"notes", which}, {"length", r.newLength}}, "Resize note")) r.lastLength = r.newLength;
+                if (act("beats.note_set", {{"notes", NumberList{static_cast<double>(r.dragNote)}}, {"length", r.newLength}}, "Resize note")) r.lastLength = r.newLength;
             }
             r.drag = Roll::Drag::None;
             r.dragNote = -1;
         }
     }
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && hit >= 0) {
-        if (act("beats.note_remove", {{"notes", NumberList{static_cast<double>(hit)}}}, "Delete note")) r.selected = -1;
+        if (act("beats.note_remove", {{"notes", NumberList{static_cast<double>(hit)}}}, "Delete note")) r.sel.clear();
     }
     if (hovered) {
         ImGui::SetTooltip("%s, beat %.2f%s", noteText(mousePitch).c_str(), mouseBeat,
-                          hit >= 0 ? "\ndrag to move, drag the end to resize, right-click to delete" : "\ndouble-click to add a note");
+                          hit >= 0 ? "\ndrag to move (all selected move together), drag the end to resize, Shift-click to add to the selection, right-click to delete"
+                                   : "\ndouble-click to add a note, drag to box-select");
     }
     (void)muted;
+    if (hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) r.focused = true;
+    else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) r.focused = false;
     ImGui::EndChild();
 }
 

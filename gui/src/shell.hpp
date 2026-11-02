@@ -545,6 +545,11 @@ struct Transport {
     double position = 0, length = 0, start = 0, end = 0;
     double cue = 0;  // where Play starts when nothing is playing
     float volumeDb = 0;
+    std::uint64_t liveSeen = 0;  // edits already swapped into what's playing
+    // recording (sound app): into a new clip, or onto a project track at recAt
+    bool recording = false, recClipped = false;
+    std::string recProject;
+    double recAt = 0, recSeconds = 0, recPeakDb = -200;
 };
 
 // The timeline panel's own state (timeline_view.cpp).
@@ -554,8 +559,9 @@ struct TimelineState {
     double scroll = 0;  // seconds at the left edge
     double cursor = 0;  // where Split cuts
     std::string selTrack, selClip;
-    enum class Drag { None, Cursor, Move, TrimStart, TrimEnd } drag = Drag::None;
+    enum class Drag { None, Cursor, Move, TrimStart, TrimEnd, FadeIn, FadeOut, Gain } drag = Drag::None;
     double grabT = 0, origStart = 0, origLength = 0, headroom = -1, tailroom = -1;
+    double origValue = 0, dragValue = 0;  // a fade (seconds) or gain (dB) handle while it's dragged
 };
 
 // The cell grid shown for spreadsheet documents (grid_view.cpp).
@@ -878,6 +884,7 @@ private:
     std::vector<std::string> docIds() const;
     const CommandInfo* find(const std::string& id) const;
     bool accentButton(const char* label, ImVec2 size = {0, 0});
+    void recordButton();
 
     // tool panels (tool_panels.cpp, panel_*.cpp): the calculator, code editor,
     // file manager, terminal, system monitor and clock fill the middle
@@ -1040,6 +1047,9 @@ private:
         double length = 0;        // the clip's length in seconds
         std::uint64_t seen = ~0ull;
         std::string lengthDoc;
+        int handle = 0;          // being dragged: 1 fade-in, 2 fade-out, 3 gain
+        double handleValue = 0;  // seconds of fade, or dB
+        float grabY = 0;
         bool any() const { return a >= 0 && b > a; }
     } audioSel_;
     void audioCanvas(ImDrawList* dl, ImVec2 p0, ImVec2 p1, bool hovered, bool active);

@@ -18,6 +18,13 @@ namespace {
 
 constexpr float kEdge = 6.0f;  // px at each end of a clip that trim instead of move
 
+// A clip's gain line: -24 dB at the bottom, +12 dB at the top, 0 dB a third of the way down.
+float gainY(double db, float top, float bottom) {
+    const double f = (std::clamp(db, -24.0, 12.0) + 24.0) / 36.0;
+    return bottom - static_cast<float>(f) * (bottom - top);
+}
+double gainAt(float y, float top, float bottom) { return std::clamp(-24.0 + 36.0 * (bottom - y) / std::max(1.0f, bottom - top), -24.0, 12.0); }
+
 std::string clockText(double s) {
     char buf[32];
     const int m = static_cast<int>(s / 60);
@@ -306,6 +313,25 @@ void Shell::timelineView(const TimelineLayout& layout) {
                 st.headroom = c.headroom;
                 st.tailroom = c.tailroom;
                 const bool narrow = x1 - x0 < kEdge * 3;
+                // fade handles sit on the clip's top edge, the gain line across it
+                const float cy0 = o.y + rulerH + rowH * static_cast<float>(hoverRow) + 3, cy1 = cy0 + rowH - 8;
+                const float fiX = toX(c.start + std::max(0.0, c.fadeIn)), foX = toX(c.start + c.length - std::max(0.0, c.fadeOut));
+                const bool top = io.MousePos.y < cy0 + kEdge * 1.5f;
+                if (c.fadeIn >= 0 && top && std::fabs(io.MousePos.x - fiX) < kEdge) {
+                    st.drag = TimelineState::Drag::FadeIn;
+                    st.origValue = st.dragValue = c.fadeIn;
+                    break;
+                }
+                if (c.fadeOut >= 0 && top && std::fabs(io.MousePos.x - foX) < kEdge) {
+                    st.drag = TimelineState::Drag::FadeOut;
+                    st.origValue = st.dragValue = c.fadeOut;
+                    break;
+                }
+                if (c.gainHandle && std::fabs(io.MousePos.y - gainY(c.gainDb, cy0, cy1)) < 4 && io.MousePos.x > x0 + kEdge && io.MousePos.x < x1 - kEdge) {
+                    st.drag = TimelineState::Drag::Gain;
+                    st.origValue = st.dragValue = c.gainDb;
+                    break;
+                }
                 if (!narrow && io.MousePos.x < x0 + kEdge && c.trimStart) st.drag = TimelineState::Drag::TrimStart;
                 else if (!narrow && io.MousePos.x > x1 - kEdge) st.drag = TimelineState::Drag::TrimEnd;
                 else st.drag = TimelineState::Drag::Move;
@@ -324,6 +350,27 @@ void Shell::timelineView(const TimelineLayout& layout) {
         scrubTime_ = -1;
         if (layout.cursor >= 0) runTimelineEdit(layout, {TimelineEditKind::Cursor, {}, {}, {}, 0, 0, st.cursor});
         if (timelinePlaying()) seekTo(st.cursor);  // the picture and sound jump there too
+        st.drag = TimelineState::Drag::None;
+    }
+
+    // fade and gain handles: the value follows the mouse, released = one clip_set
+    const bool handleDrag = st.drag == TimelineState::Drag::FadeIn || st.drag == TimelineState::Drag::FadeOut || st.drag == TimelineState::Drag::Gain;
+    if (handleDrag && active) {
+        if (st.drag == TimelineState::Drag::FadeIn) st.dragValue = std::clamp(hoverT - st.origStart, 0.0, st.origLength);
+        else if (st.drag == TimelineState::Drag::FadeOut) st.dragValue = std::clamp(st.origStart + st.origLength - hoverT, 0.0, st.origLength);
+        else if (hoverRow >= 0) {
+            const float cy0 = o.y + rulerH + rowH * static_cast<float>(hoverRow) + 3, cy1 = cy0 + rowH - 8;
+            st.dragValue = std::round(gainAt(io.MousePos.y, cy0, cy1) * 2) / 2;  // half-dB steps
+        }
+        ImGui::SetTooltip(st.drag == TimelineState::Drag::Gain ? "gain %+.1f dB" : "fade %.2f s", st.dragValue);
+    }
+    if (handleDrag && ImGui::IsItemDeactivated()) {
+        if (std::fabs(st.dragValue - st.origValue) > 1e-4) {
+            TimelineEdit e{TimelineEditKind::SetProperty, st.selClip, st.selTrack};
+            e.name = st.drag == TimelineState::Drag::FadeIn ? "fade_in" : st.drag == TimelineState::Drag::FadeOut ? "fade_out" : "gain";
+            e.at = st.dragValue;
+            runTimelineEdit(layout, e);
+        }
         st.drag = TimelineState::Drag::None;
     }
 
@@ -463,6 +510,32 @@ void Shell::timelineView(const TimelineLayout& layout) {
                         }
                     }
                     dl->PopClipRect();
+                }
+            }
+            if (c.fadeIn >= 0 || c.gainHandle) {
+                // fades as shaded wedges with a handle on top, gain as a line (dragged: the new value)
+                const bool editing = isSel && active && handleDrag;
+                const double fi = editing && st.drag == TimelineState::Drag::FadeIn ? st.dragValue : std::max(0.0, c.fadeIn);
+                const double fo = editing && st.drag == TimelineState::Drag::FadeOut ? st.dragValue : std::max(0.0, c.fadeOut);
+                const double g = editing && st.drag == TimelineState::Drag::Gain ? st.dragValue : c.gainDb;
+                const float cy0 = y0 + 3, cy1 = y1 - 5;
+                const float fx = std::min(x1, toX(c.start + fi)), gx = std::max(x0, toX(c.start + c.length - fo));
+                const ImU32 shade = IM_COL32(0, 0, 0, 80), edgeCol = IM_COL32(255, 255, 255, 200), knob = IM_COL32(255, 255, 255, 235);
+                if (fi > 0) {
+                    dl->AddTriangleFilled({x0, cy0}, {fx, cy0}, {x0, cy1}, shade);
+                    dl->AddLine({x0, cy1}, {fx, cy0}, edgeCol, 1.5f);
+                }
+                if (fo > 0) {
+                    dl->AddTriangleFilled({gx, cy0}, {x1, cy0}, {x1, cy1}, shade);
+                    dl->AddLine({gx, cy0}, {x1, cy1}, edgeCol, 1.5f);
+                }
+                if (isSel || x1 - x0 > 40) {
+                    dl->AddRectFilled({fx - 3, cy0}, {fx + 3, cy0 + 6}, knob, 1);
+                    dl->AddRectFilled({gx - 3, cy0}, {gx + 3, cy0 + 6}, knob, 1);
+                }
+                if (c.gainHandle && (isSel || std::fabs(g) > 0.01)) {
+                    const float gy = gainY(g, cy0, cy1);
+                    dl->AddLine({fx, gy}, {gx, gy}, IM_COL32(255, 230, 120, isSel ? 230 : 120), isSel ? 1.5f : 1.0f);
                 }
             }
             if (c.transitionIn > 0) {

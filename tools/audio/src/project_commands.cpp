@@ -52,6 +52,7 @@ std::string listing(const Project& pr) {
         if (anySolo && !t.solo) s += " (silent: another track is solo)";
         if (t.duckUnder >= 0) s += ", ducks " + dbText(t.duckDb) + " under track " + std::to_string(t.duckUnder);
         if (!t.envelope.empty()) s += ", volume envelope with " + std::to_string(t.envelope.size()) + " points";
+        for (const auto& snd : t.sends) s += ", sends " + dbText(snd.levelDb) + " to bus " + std::to_string(snd.bus);
         for (std::size_t f = 0; f < t.fx.size(); ++f) s += "\n  fx " + std::to_string(f) + " " + describeEffect(t.fx[f]);
         for (const auto& l : t.automation)
             if (!l.points.empty()) s += "\n  automation " + l.target + " (" + std::to_string(l.points.size()) + " points)";
@@ -62,6 +63,11 @@ std::string listing(const Project& pr) {
             if (cl.fadeIn > 0) s += ", fade in " + formatTime(cl.fadeIn);
             if (cl.fadeOut > 0) s += ", fade out " + formatTime(cl.fadeOut);
         }
+    }
+    for (std::size_t b = 0; b < pr.buses.size(); ++b) {
+        const Bus& bus = pr.buses[b];
+        s += "\nbus " + std::to_string(b) + " \"" + bus.name + "\": gain " + dbText(bus.gainDb) + (bus.mute ? ", muted" : "");
+        for (std::size_t f = 0; f < bus.fx.size(); ++f) s += "\n  fx " + std::to_string(f) + " " + describeEffect(bus.fx[f]);
     }
     for (std::size_t f = 0; f < pr.masterFx.size(); ++f) s += "\nmaster fx " + std::to_string(f) + " " + describeEffect(pr.masterFx[f]);
     for (const auto& l : pr.masterAutomation)

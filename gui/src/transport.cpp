@@ -89,6 +89,7 @@ void Shell::startPlaying(double from) {
         return;
     }
     transport_.doc = currentDoc_;
+    transport_.liveSeen = changes_;
     pollTransport();
 }
 
@@ -141,6 +142,12 @@ void Shell::transportBar() {
     pollTransport();
     const bool ours = t.doc == currentDoc_ && t.source == currentDoc_;
     const bool playing = ours && t.playing;
+    // live playback: an edit made while it plays is heard at once, from the same spot
+    if (ours && (t.playing || t.paused) && changes_ != t.liveSeen && find(t.tool + ".refresh")) {
+        session_.run(t.tool + ".refresh", {});
+        pollTransport();
+    }
+    t.liveSeen = changes_;
 
     // Space plays and pauses, unless someone is typing
     if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Space, false)) togglePlay();
@@ -157,6 +164,10 @@ void Shell::transportBar() {
     if (ImGui::Checkbox("Loop", &t.loop) && ours) session_.run(tool + ".loop", {{"on", t.loop}});
     ImGui::SetItemTooltip("Play the sound over and over");
     ImGui::SameLine();
+    if (tool == "audio" && find("audio.record_start")) {
+        recordButton();
+        ImGui::SameLine();
+    }
 
     // a timeline keeps its own playhead: the bar shows and moves that one while stopped
     auto doc = session_.workspace().get(currentDoc_);
@@ -188,6 +199,79 @@ void Shell::transportBar() {
 
     // the playhead line only lines up with a clip's waveform
     playheadFraction_ = doc && doc->kind() == "audio" && length > 0 ? static_cast<float>(shown / length) : -1;
+}
+
+// Record: a new clip from the microphone; in a project, onto the picked track (or a new
+// one) at the timeline cursor, with the project playing along so you can overdub.
+void Shell::recordButton() {
+    Transport& t = transport_;
+    const float unit = ImGui::GetFontSize();
+    auto doc = session_.workspace().get(currentDoc_);
+    if (t.recording) {
+        const Result st = session_.run("audio.record_status", {});
+        t.recSeconds = numberField(st, "seconds");
+        t.recPeakDb = numberField(st, "peak_db");
+        t.recClipped = t.recClipped || boolField(st, "clipped");
+        const bool stillGoing = boolField(st, "recording");
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(190, 40, 40, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220, 60, 60, 255));
+        const bool stop = ImGui::Button(("Stop rec " + clock(t.recSeconds)).c_str()) || !stillGoing;
+        ImGui::PopStyleColor(2);
+        ImGui::SetItemTooltip("Stop and keep the take");
+        ImGui::SameLine();
+        // input level: green, amber near the top, red once it clipped
+        const ImVec2 o = ImGui::GetCursorScreenPos();
+        const ImVec2 size{unit * 5, ImGui::GetFrameHeight()};
+        ImGui::Dummy(size);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float level = static_cast<float>(std::clamp((t.recPeakDb + 60.0) / 60.0, 0.0, 1.0));
+        dl->AddRectFilled(o, {o.x + size.x, o.y + size.y}, ImGui::GetColorU32(ImGuiCol_FrameBg), 3);
+        const ImU32 col = t.recClipped ? IM_COL32(230, 60, 60, 255) : t.recPeakDb > -6 ? IM_COL32(230, 180, 60, 255) : IM_COL32(80, 200, 110, 255);
+        dl->AddRectFilled({o.x + 2, o.y + 3}, {o.x + 2 + (size.x - 4) * level, o.y + size.y - 3}, col, 2);
+        ImGui::SetItemTooltip(t.recClipped ? "It clipped: turn the input down and record again" : "Input level");
+        if (stop) {
+            t.recording = false;
+            if (!t.recProject.empty()) session_.run("audio.stop", {});
+            Result r = run("audio.record_stop", {});
+            if (!r.ok) return;
+            const std::string take = stringField(r, "doc");
+            if (!t.recProject.empty() && session_.workspace().get(t.recProject) && !take.empty()) {
+                // onto the picked track, else a new one
+                std::int64_t track = -1;
+                if (!timeline_.selTrack.empty() && timeline_.doc == t.recProject) track = std::atoi(timeline_.selTrack.c_str());
+                if (track < 0) {
+                    Result added = run("audio.track_add", {{"project", t.recProject}, {"name", std::string("Recording")}});
+                    if (!added.ok) return;
+                    track = static_cast<std::int64_t>(numberField(added, "track"));
+                }
+                run("audio.clip_add", {{"project", t.recProject}, {"track", track}, {"doc", take}, {"at", t.recAt}});
+                currentDoc_ = t.recProject;
+                canvas_.dirty = true;
+            }
+        }
+        return;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 80, 80, 255));
+    const bool start = ImGui::Button("Rec");
+    ImGui::PopStyleColor();
+    const bool project = doc && doc->kind() == "audio project";
+    ImGui::SetItemTooltip(project ? "Record onto the picked track at the cursor, with the project playing along" : "Record from the microphone into a new clip");
+    if (!start) return;
+    Result r = run("audio.record_start", {});
+    if (!r.ok) return;
+    t.recording = true;
+    t.recClipped = false;
+    t.recSeconds = 0;
+    t.recProject = project ? currentDoc_ : std::string();
+    t.recAt = project ? (timeline_.doc == currentDoc_ ? timeline_.cursor : 0.0) : 0.0;
+    if (project) {
+        TimelineLayout layout;
+        double end = 0;
+        if (doc->timeline(layout))
+            for (const auto& tr : layout.tracks)
+                for (const auto& c : tr.clips) end = std::max(end, c.start + c.length);
+        if (end > t.recAt + 0.05) startPlaying(t.recAt);
+    }
 }
 
 }  // namespace wetwaresuite::gui

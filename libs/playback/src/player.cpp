@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
@@ -194,6 +195,33 @@ bool Player::play(const PlayRequest& rq, std::string& error) {
     return true;
 }
 
+bool Player::replace(std::shared_ptr<const audio::Buffer> buffer, std::string& error) {
+    if (!buffer || buffer->empty() || buffer->channelCount() == 0) {
+        error = "nothing to play (empty audio)";
+        return false;
+    }
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->buffer || (!impl_->playing.load() && !impl_->paused.load())) {
+        error = "nothing is playing";
+        return false;
+    }
+    const audio::Buffer& old = *impl_->buffer;
+    const double oldRate = old.rate > 0 ? old.rate : 1;
+    const double at = static_cast<double>(impl_->cursor.load()) / oldRate;
+    const double from = static_cast<double>(impl_->begin) / oldRate;
+    const bool toEnd = impl_->end >= old.frames();
+    const double until = static_cast<double>(impl_->end) / oldRate;
+    const int channels = std::min(std::max(buffer->channelCount(), 2), kMaxDeviceChannels);
+    if (!impl_->openDevice(buffer->rate, channels, error)) return false;
+    const std::size_t frames = buffer->frames();
+    impl_->buffer = std::move(buffer);
+    const audio::Buffer& b = *impl_->buffer;
+    impl_->begin = std::min(b.toFrame(from), frames);
+    impl_->end = toEnd ? frames : std::clamp(b.toFrame(until), impl_->begin, frames);
+    impl_->cursor.store(std::clamp(b.toFrame(at), impl_->begin, impl_->end));
+    return true;
+}
+
 void Player::pause() {
     std::lock_guard lock(impl_->mutex);  // an audio callback in flight finishes first, so the playhead holds still
     if (impl_->playing.load()) impl_->paused.store(true);
@@ -297,6 +325,206 @@ bool Player::selectDevice(const std::string& name, std::string& error) {
         impl_->deviceReady = false;
     }
     return true;
+}
+
+// ---- recording ----------------------------------------------------------------
+
+struct Recorder::Impl {
+    mutable std::mutex mutex;
+    std::vector<float> samples;  // interleaved
+    int rate = 44100, channels = 1;
+    std::size_t maxFrames = 0;
+    std::atomic<bool> recording{false};
+    std::atomic<float> peak{0}, maxPeak{0};
+    std::atomic<double> phase{0};
+    bool tone = false;
+    std::string deviceName;
+    bool silent = false;
+
+    ma_context context{};
+    bool contextReady = false;
+    bool contextSilent = false;
+    ma_device device{};
+    bool deviceReady = false;
+
+    ~Impl() {
+        closeDevice();
+        if (contextReady) ma_context_uninit(&context);
+    }
+
+    void closeDevice() {
+        if (deviceReady) ma_device_uninit(&device);
+        deviceReady = false;
+    }
+
+    static void callback(ma_device* dev, void*, const void* in, ma_uint32 frameCount) {
+        auto* self = static_cast<Impl*>(dev->pUserData);
+        if (!self->recording.load()) return;
+        const int ch = self->channels;
+        const std::size_t n = static_cast<std::size_t>(frameCount) * static_cast<std::size_t>(ch);
+        std::vector<float> block(n, 0.0f);
+        if (self->tone) {
+            double ph = self->phase.load();
+            const double step = 2 * 3.141592653589793 * 440.0 / self->rate;
+            for (ma_uint32 i = 0; i < frameCount; ++i) {
+                const float v = static_cast<float>(0.5 * std::sin(ph));
+                ph += step;
+                for (int c = 0; c < ch; ++c) block[static_cast<std::size_t>(i) * ch + c] = v;
+            }
+            self->phase.store(std::fmod(ph, 2 * 3.141592653589793));
+        } else if (in) {
+            const auto* src = static_cast<const float*>(in);
+            std::copy(src, src + n, block.begin());
+        }
+        float pk = 0;
+        for (float v : block) pk = std::max(pk, std::fabs(v));
+        self->peak.store(pk);
+        if (pk > self->maxPeak.load()) self->maxPeak.store(pk);
+        std::lock_guard lock(self->mutex);
+        const std::size_t room = self->maxFrames * static_cast<std::size_t>(ch) - std::min(self->samples.size(), self->maxFrames * static_cast<std::size_t>(ch));
+        self->samples.insert(self->samples.end(), block.begin(), block.begin() + static_cast<std::ptrdiff_t>(std::min(room, n)));
+        if (room <= n) self->recording.store(false);  // the take is full
+    }
+
+    bool ensureContext(bool wantSilent, std::string& error) {
+        if (contextReady && contextSilent == wantSilent) return true;
+        closeDevice();
+        if (contextReady) ma_context_uninit(&context);
+        contextReady = false;
+        if (!wantSilent && ma_context_init(nullptr, 0, nullptr, &context) == MA_SUCCESS) {
+            contextReady = true;
+            contextSilent = false;
+            return true;
+        }
+        ma_backend nullBackend = ma_backend_null;
+        if (ma_context_init(&nullBackend, 1, nullptr, &context) != MA_SUCCESS) {
+            error = "no audio input available";
+            return false;
+        }
+        contextReady = true;
+        contextSilent = true;
+        return true;
+    }
+};
+
+Recorder& Recorder::instance() {
+    static Recorder r;
+    return r;
+}
+
+Recorder::Recorder() : impl_(std::make_unique<Impl>()) {}
+Recorder::~Recorder() = default;
+
+bool Recorder::start(int rate, int channels, const std::string& device, double maxSeconds, std::string& error) {
+    Impl& m = *impl_;
+    if (m.recording.load()) {
+        error = "already recording (stop first)";
+        return false;
+    }
+    rate = std::clamp(rate, 8000, 192000);
+    channels = std::clamp(channels, 1, 2);
+    m.closeDevice();
+    m.tone = device == "tone";
+    const bool wantSilent = m.tone || forcedSilent() || noSoundHere();
+    if (!m.ensureContext(wantSilent, error)) return false;
+    ma_device_id id{};
+    bool hasId = false;
+    if (!m.contextSilent && !device.empty() && device != "default" && !m.tone) {
+        ma_device_info* infos = nullptr;
+        ma_uint32 count = 0;
+        if (ma_context_get_devices(&m.context, nullptr, nullptr, &infos, &count) == MA_SUCCESS) {
+            for (ma_uint32 i = 0; i < count; ++i) {
+                if (device == infos[i].name) {
+                    id = infos[i].id;
+                    hasId = true;
+                }
+            }
+        }
+        if (!hasId) {
+            error = "no input device called '" + device + "' (see the record devices list)";
+            return false;
+        }
+    }
+    {
+        std::lock_guard lock(m.mutex);
+        m.samples.clear();
+        m.rate = rate;
+        m.channels = channels;
+        m.maxFrames = static_cast<std::size_t>(std::clamp(maxSeconds, 0.1, 6 * 3600.0) * rate);
+        m.samples.reserve(std::min<std::size_t>(m.maxFrames, static_cast<std::size_t>(rate) * 60) * static_cast<std::size_t>(channels));
+    }
+    m.peak.store(0);
+    m.maxPeak.store(0);
+    m.phase.store(0);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+        cfg.capture.format = ma_format_f32;
+        cfg.capture.channels = static_cast<ma_uint32>(channels);
+        cfg.sampleRate = static_cast<ma_uint32>(rate);
+        cfg.dataCallback = &Impl::callback;
+        cfg.pUserData = &m;
+        if (hasId && !m.contextSilent) cfg.capture.pDeviceID = &id;
+        m.recording.store(true);
+        if (ma_device_init(&m.context, &cfg, &m.device) == MA_SUCCESS) {
+            m.deviceReady = true;
+            if (ma_device_start(&m.device) == MA_SUCCESS) {
+                m.silent = m.contextSilent;
+                m.deviceName = m.tone ? "test tone (440 Hz)" : m.contextSilent ? "silent (no input device)" : m.device.capture.name;
+                return true;
+            }
+            m.closeDevice();
+        }
+        m.recording.store(false);
+        // a real backend that can't open the input: record silence instead
+        if (m.contextSilent || !m.ensureContext(true, error)) break;
+        hasId = false;
+    }
+    if (error.empty()) error = "could not open an audio input device";
+    return false;
+}
+
+audio::Buffer Recorder::stop() {
+    Impl& m = *impl_;
+    m.recording.store(false);
+    m.closeDevice();  // waits for a callback in flight
+    std::lock_guard lock(m.mutex);
+    const std::size_t frames = m.samples.size() / static_cast<std::size_t>(std::max(1, m.channels));
+    audio::Buffer b(m.channels, frames, m.rate);
+    for (std::size_t i = 0; i < frames; ++i)
+        for (int c = 0; c < m.channels; ++c) b.channels[static_cast<std::size_t>(c)][i] = m.samples[i * static_cast<std::size_t>(m.channels) + c];
+    m.samples.clear();
+    m.samples.shrink_to_fit();
+    return b;
+}
+
+RecordStatus Recorder::status() const {
+    const Impl& m = *impl_;
+    RecordStatus s;
+    s.recording = m.recording.load();
+    {
+        std::lock_guard lock(m.mutex);
+        s.seconds = m.rate > 0 ? static_cast<double>(m.samples.size()) / std::max(1, m.channels) / m.rate : 0;
+    }
+    s.peakDb = audio::gainToDb(m.peak.load());
+    s.maxPeakDb = audio::gainToDb(m.maxPeak.load());
+    s.rate = m.rate;
+    s.channels = m.channels;
+    s.device = m.deviceReady || s.seconds > 0 ? m.deviceName : std::string("not opened yet");
+    s.silent = m.silent;
+    return s;
+}
+
+std::vector<std::string> Recorder::devices() {
+    std::vector<std::string> out = {"default", "tone"};
+    Impl& m = *impl_;
+    if (m.recording.load()) return out;
+    std::string error;
+    if (forcedSilent() || noSoundHere() || !m.ensureContext(false, error) || m.contextSilent) return out;
+    ma_device_info* infos = nullptr;
+    ma_uint32 count = 0;
+    if (ma_context_get_devices(&m.context, nullptr, nullptr, &infos, &count) != MA_SUCCESS) return out;
+    for (ma_uint32 i = 0; i < count; ++i) out.push_back(infos[i].name);
+    return out;
 }
 
 void finishBeforeExit() {

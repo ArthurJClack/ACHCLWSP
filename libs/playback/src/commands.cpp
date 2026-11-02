@@ -79,9 +79,25 @@ Result startPlayback(std::shared_ptr<const audio::Buffer> buffer, const std::str
     return statusResult("");
 }
 
-void registerTransportCommands(Session& session, const std::string& tool) {
+void registerTransportCommands(Session& session, const std::string& tool, Renderer render) {
     auto& reg = session.registry();
     const std::string t = tool + ".";
+    if (render) {
+        reg.add({t + "refresh", "Hear edits while playing",
+                 "Swap the latest version of what's playing into playback without stopping, so an edit made while it "
+                 "plays (an EQ tweak, a moved note, a new clip) is heard straight away from the same spot. The window "
+                 "does this after every edit; scripts call it after theirs.",
+                 {}, false, true},
+                simple([render](const Params&) {
+                    const Status st = Player::instance().status();
+                    if (!st.playing && !st.paused) return statusResult("nothing is playing");
+                    std::string error;
+                    auto buffer = render(st.source, error);
+                    if (!buffer) return error.empty() ? statusResult("not a live source") : Result::failure(error);
+                    if (!Player::instance().replace(std::move(buffer), error)) return Result::failure(error);
+                    return statusResult("refreshed");
+                }));
+    }
 
     reg.add({t + "pause", "Pause playback", "Pause what's playing (any tool's playback); resume carries on from the same spot.", {}, false, true},
             simple([](const Params&) {

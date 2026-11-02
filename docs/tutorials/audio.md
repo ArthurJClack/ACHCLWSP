@@ -630,6 +630,30 @@ Open a project (or a song) in the sound app and the right panel gets an **Effect
 
 The timeline below the waveform still moves, trims and splits clips by dragging (see [the window](gui.md#the-timeline)).
 
+## Task 8: record, overdub and share a reverb
+
+**Recording.** `audio.record_start` listens to the default microphone (or `device=` from `audio.record_devices`; `device=tone` is a 440 Hz test tone for checking levels), `audio.record_status` gives the time and level, and `audio.record_stop` opens the take as a new audio document. `audio.record seconds=5` does all three in one blocking step for scripts. With no sound card it records silence in real time, so scripts behave the same on a server.
+
+```text
+# take.txt: a 5-second take onto a project track, with a shared reverb
+audio.record seconds=5 channels=1 -> take
+audio.project_new -> p
+audio.track_add project=$p name=Vocal
+audio.clip_add project=$p track=0 doc=$take at=1 fade_in=0.05 fade_out=0.3
+audio.bus_add project=$p fx=reverb name=Hall
+audio.send project=$p track=0 bus=0 level=-8
+audio.fx_add project=$p bus=0 type=eq values="bands=highpass 300"
+audio.sends project=$p
+```
+
+`audio.bus_add` makes a shared effects bus (a reverb bus starts all wet); `audio.send` feeds part of a track into it after the track's volume and pan, and `off=true` removes the send. A bus's rack takes the usual `audio.fx_*` and `audio.automate` commands with `bus=`; `audio.bus_set` changes its level or mutes it.
+
+**In the window.** **Rec** on the play bar records into a new clip. In a project it records onto the picked track (or a new "Recording" track) at the timeline cursor, with the project playing along so you can overdub; the meter goes amber near the top and red once it clipped. On a clip in the timeline, drag the white squares on its top edge to fade in or out and the yellow line to change its gain. On a single waveform, the corner squares fade the selection (or the whole file) and the yellow knob changes its volume. In the Effects panel, **+ Reverb bus** and **+ Delay bus** add buses; pick a track to get a send slider per bus (far left is off), or pick a bus for its level, mute and rack.
+
+![recording, fade handles and a send to a reverb bus](images/sound-record-buses.png)
+
+**Hear edits while it plays.** Every change made while a clip or project plays (an EQ tweak, a moved clip, a fade) is swapped into playback at the same spot. Scripts do the same with `audio.refresh`.
+
 ## More editing
 
 Everyday edits in one script (`edit.txt`):
@@ -804,12 +828,12 @@ See [playback](playback.md) for the details.
 
 ## Limitations
 
-- **No recording yet.** Playback is live (`audio.play`, see [playback](playback.md)), but it plays a copy taken when it starts, so edits are heard on the next play.
+- **Recording** is one input at a time, mono or stereo, up to six hours per take, with no monitoring through effects and no latency compensation when overdubbing (nudge the clip if it lands late). Playback re-renders the whole mix after an edit, so a long project can hiccup for a moment on a slow PC.
 - **Undo keeps a full copy** of the document for every step, so very long files (an hour of stereo is about 1.3 GB as float) use a lot of memory over many edits. Close documents you've saved, or work on parts.
 - **Effects on a range** only process that range: a reverb or echo tail stops at `end` (blended over 5 ms). Use `tail=` on whole-file edits, or leave room after the range.
 - **Noise reduction** is spectral gating, good on steady noise (hiss, hum, fans, room tone). It doesn't remove wind, reverb or a TV in the background, and pushed hard it sounds watery. Clicks have `audio.declick` and hum `audio.dehum`. The click repair rebuilds up to a few milliseconds from the sound on both sides, which is clean on speech and sustained music. Sharp attacks (drums, plucks) can be taken for clicks, so limit it to a range there, and long scratches are left alone.
 - **Time stretching and pitch shifting** are WSOLA-based: clean on speech and steady material within about 0.5x-2x and a few semitones; extreme settings smear transients, and pitch shifting moves formants (no formant preservation).
 - **Loudness** follows ITU-R BS.1770-4 (K-weighting, 400 ms gated blocks); true peak is 4x oversampled near the loudest samples. Surround channel weights assume the L R C LFE Ls Rs order.
-- **Multitrack**: clips are copies made when added (later edits to the document don't reach the project). Effects are per track and on the master, not per clip, and there are no sends or buses. Ducking listens to one track. Automation points are joined by straight lines (no curves). In the sound app the project gets a timeline you drag clips around on (see [the window](gui.md#the-timeline)), and an effects rack and envelope editor in the right panel.
+- **Multitrack**: clips are copies made when added (later edits to the document don't reach the project). Effects are per track, per bus and on the master, not per clip; sends are post-fader only. Ducking listens to one track. Automation points are joined by straight lines (no curves). In the sound app the project gets a timeline you drag clips around on (see [the window](gui.md#the-timeline)), and an effects rack and envelope editor in the right panel.
 - **Formats**: without ffmpeg only WAV, MP3, FLAC and Ogg Vorbis open and only WAV saves. WAV files are limited to 4 GB (no RF64); AIFF is written through ffmpeg as 16- or 24-bit. Metadata (tags, cover art) isn't kept, and markers live in project files only (they aren't written into WAV cue chunks).
 - **Batch and split** write files and can't be undone; they never change their input folder.

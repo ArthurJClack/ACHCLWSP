@@ -2,6 +2,7 @@
 // presets, plus the helpers every beats command shares.
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -659,6 +660,7 @@ void registerSongCommands(Session& session) {
 void registerOutputCommands(Session& session) {
     auto& reg = session.registry();
     Session* s = &session;
+    auto played = std::make_shared<std::map<std::string, RenderOptions>>();  // how each song was last played
 
     reg.add({"beats.play",
              "Play song",
@@ -674,16 +676,23 @@ void registerOutputCommands(Session& session) {
              false, true},
             songCommand(
                 session,
-                [](SongDoc& d, const Params& p) {
+                [played](SongDoc& d, const Params& p) {
                     RenderOptions o;
                     std::string error;
                     if (!renderArgs(d.song, p, o, error)) return failed(error);
                     auto mix = std::make_shared<const audio::Buffer>(render(d.song, o));
                     const std::string source = p.count("song") ? stringParam(p, "song") : d.song.name.empty() ? std::string("song") : d.song.name;
+                    (*played)[source] = o;
                     return playback::startPlayback(std::move(mix), source, p);
                 },
                 false));
-    playback::registerTransportCommands(session, "beats");
+    // live playback: the song re-rendered (same part, same track) after an edit
+    playback::registerTransportCommands(session, "beats", [s, played](const std::string& source, std::string&) -> std::shared_ptr<const audio::Buffer> {
+        auto doc = s->workspace().getAs<SongDoc>(source);
+        if (!doc) return nullptr;
+        const auto it = played->find(source);
+        return std::make_shared<const audio::Buffer>(render(doc->song, it != played->end() ? it->second : RenderOptions{}));
+    });
 
     reg.add({"beats.render",
              "Render song",

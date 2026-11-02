@@ -814,9 +814,72 @@ void Shell::audioCanvas(ImDrawList* dl, ImVec2 p0, ImVec2 p1, bool hovered, bool
     if (sel.length <= 0 || p1.x - p0.x < 4) return;
     ImGuiIO& io = ImGui::GetIO();
     auto timeAt = [&](float x) { return std::clamp((x - p0.x) / (p1.x - p0.x), 0.0f, 1.0f) * sel.length; };
+    // fade handles in the top corners (of the selection, else the whole clip) and a gain knob
+    // in the middle, like Audacity's clip handles: drag, and the release applies it
+    const double ra = sel.any() ? sel.a : 0.0, rb = sel.any() ? sel.b : sel.length;
+    auto xAt = [&](double t) { return p0.x + static_cast<float>(t / sel.length) * (p1.x - p0.x); };
+    const float hs = ImGui::GetFontSize() * 0.45f;
+    const float top = std::max(p0.y, canvas_.viewMin.y) + 2;
+    const ImVec2 fiPos{xAt(ra) + (sel.handle == 1 ? static_cast<float>(sel.handleValue / sel.length) * (p1.x - p0.x) : 0) + hs, top + hs};
+    const ImVec2 foPos{xAt(rb) - (sel.handle == 2 ? static_cast<float>(sel.handleValue / sel.length) * (p1.x - p0.x) : 0) - hs, top + hs};
+    const ImVec2 gPos{(xAt(ra) + xAt(rb)) / 2, top + hs};
+    auto overHandle = [&](ImVec2 c) { return std::fabs(io.MousePos.x - c.x) <= hs * 1.6f && std::fabs(io.MousePos.y - c.y) <= hs * 1.6f; };
     if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsKeyDown(ImGuiKey_Space)) {
-        sel.dragging = true;
-        sel.a = sel.b = timeAt(io.MousePos.x);
+        sel.handle = overHandle(fiPos) ? 1 : overHandle(foPos) ? 2 : overHandle(gPos) ? 3 : 0;
+        sel.handleValue = 0;
+        sel.grabY = io.MousePos.y;
+        if (!sel.handle) {
+            sel.dragging = true;
+            sel.a = sel.b = timeAt(io.MousePos.x);
+        }
+    }
+    if (sel.handle) {
+        const double span = rb - ra;
+        if (sel.handle == 1) sel.handleValue = std::clamp(timeAt(io.MousePos.x) - ra, 0.0, span);
+        else if (sel.handle == 2) sel.handleValue = std::clamp(rb - timeAt(io.MousePos.x), 0.0, span);
+        else sel.handleValue = std::clamp(std::round(static_cast<double>(sel.grabY - io.MousePos.y) / 4.0 * 2) / 2, -24.0, 24.0);  // 0.5 dB per 2 px
+        const ImU32 ghost = ImGui::ColorConvertFloat4ToU32({accent_.x, accent_.y, accent_.z, 0.35f});
+        if (sel.handle == 1 && sel.handleValue > 0) dl->AddTriangleFilled({xAt(ra), p0.y}, {xAt(ra + sel.handleValue), p0.y}, {xAt(ra), p1.y}, ghost);
+        if (sel.handle == 2 && sel.handleValue > 0) dl->AddTriangleFilled({xAt(rb - sel.handleValue), p0.y}, {xAt(rb), p0.y}, {xAt(rb), p1.y}, ghost);
+        if (sel.handle == 3) {
+            const float mid = (p0.y + p1.y) / 2, half = (p1.y - p0.y) / 2 * static_cast<float>(std::min(1.0, std::pow(10.0, sel.handleValue / 20) * 0.5));
+            dl->AddRect({xAt(ra), mid - half}, {xAt(rb), mid + half}, ImGui::ColorConvertFloat4ToU32(accent_), 0, 0, 1.5f);
+        }
+        ImGui::SetTooltip(sel.handle == 3 ? "gain %+.1f dB" : sel.handle == 1 ? "fade in %.2f s" : "fade out %.2f s", sel.handleValue);
+        if (!active) {
+            const int h = sel.handle;
+            sel.handle = 0;
+            Params p{{"doc", currentDoc_}};
+            if (sel.any()) p["start"] = sel.a, p["end"] = sel.b;
+            if (h == 3 && std::fabs(sel.handleValue) > 0.01) {
+                p["db"] = sel.handleValue;
+                Result r = run("audio.gain", p);
+                resultFor_ = "Gain";
+                r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+                result_ = std::move(r);
+            } else if (h != 3 && sel.handleValue > 0.005) {
+                p[h == 1 ? "in" : "out"] = sel.handleValue;
+                p["curve"] = std::string("s_curve");
+                Result r = run("audio.fade", p);
+                resultFor_ = "Fade";
+                r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+                result_ = std::move(r);
+            }
+        }
+    }
+    {
+        const ImU32 knob = IM_COL32(255, 255, 255, 220), edge = IM_COL32(0, 0, 0, 160);
+        for (const ImVec2& c : {fiPos, foPos}) {
+            dl->AddRectFilled({c.x - hs, c.y - hs}, {c.x + hs, c.y + hs}, knob, 2);
+            dl->AddRect({c.x - hs, c.y - hs}, {c.x + hs, c.y + hs}, edge, 2);
+        }
+        dl->AddCircleFilled(gPos, hs, IM_COL32(255, 230, 120, 230));
+        dl->AddCircle(gPos, hs, edge);
+        if (hovered && !sel.handle && !sel.dragging) {
+            if (overHandle(fiPos)) ImGui::SetTooltip("Drag right to fade in%s", sel.any() ? " the selection" : "");
+            else if (overHandle(foPos)) ImGui::SetTooltip("Drag left to fade out%s", sel.any() ? " the selection" : "");
+            else if (overHandle(gPos)) ImGui::SetTooltip("Drag up or down to change the volume%s", sel.any() ? " of the selection" : "");
+        }
     }
     static double anchor = 0;
     if (sel.dragging) {

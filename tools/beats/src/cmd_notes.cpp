@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "common.hpp"
+#include "wetwaresuite/playback/midi_in.hpp"
 
 namespace wetwaresuite::beats::tool {
 
@@ -82,6 +83,48 @@ Result changed(const std::string& what, SongDoc& d, Pattern& pat, const NumberLi
     Result r = patternResult(what, d, pat, p);
     r.with("notes", now).with("count", static_cast<std::int64_t>(pat.notes.size()));
     return r;
+}
+
+// MIDI input to notes. live: as played, from `at` (beats) for the first note (or for the
+// input time `since`, when given), at the song's
+// tempo; step: each chord (keys down within 80 ms) takes the next `step` beats.
+std::vector<Note> takeNotes(const std::vector<playback::MidiEvent>& events, bool live, double grid, double at, double step, double bpm, double now, double since) {
+    struct Held {
+        int pitch, velocity;
+        double on, off;
+    };
+    std::vector<Held> played;
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        const auto& e = events[i];
+        if (!e.on) continue;
+        double off = -1;
+        for (std::size_t j = i + 1; j < events.size() && off < 0; ++j)
+            if (events[j].pitch == e.pitch) off = events[j].time;  // its release, or the same key again
+        played.push_back({e.pitch, e.velocity, e.time, off >= 0 ? off : std::max(now, e.time)});
+    }
+    std::vector<Note> out;
+    if (played.empty()) return out;
+    auto snap = [&](double b) { return grid > 0 ? std::round(b / grid) * grid : b; };
+    const double perSecond = bpm / 60.0;
+    if (live) {
+        const double t0 = since >= 0 ? since : played.front().on;
+        for (const auto& h : played) {
+            Note n;
+            n.pitch = h.pitch;
+            n.velocity = h.velocity;
+            n.start = std::max(0.0, snap(at + (h.on - t0) * perSecond));
+            n.length = std::max(grid > 0 ? grid : 0.0625, snap((h.off - h.on) * perSecond));
+            out.push_back(n);
+        }
+    } else {
+        double cursor = at, groupStart = -1;
+        for (const auto& h : played) {
+            if (groupStart >= 0 && h.on - groupStart > 0.08) cursor += step;  // a new chord
+            if (groupStart < 0 || h.on - groupStart > 0.08) groupStart = h.on;
+            out.push_back({h.pitch, cursor, step, h.velocity});
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -317,6 +360,107 @@ void registerNoteCommands(Session& session) {
                 for (std::size_t i : sel) pat->notes.erase(pat->notes.begin() + static_cast<std::ptrdiff_t>(i));
                 return changed("removed " + std::to_string(sel.size()) + (sel.size() == 1 ? " note" : " notes"), d, *pat, {}, p);
             }));
+
+    // ---- MIDI input ----
+    using playback::MidiInput;
+    Session* s = &session;
+    reg.add({"beats.midi_devices", "MIDI inputs",
+             "List the MIDI keyboards and controllers that are plugged in. \"keyboard\" is the built-in virtual one "
+             "(the window's computer-keyboard piano and beats.midi_key).",
+             {}, false, true},
+            [](const Params&) {
+                return std::make_unique<FunctionAction>([] {
+                    const auto list = MidiInput::instance().devices();
+                    std::string text;
+                    for (const auto& d : list) text += (text.empty() ? "" : "\n") + d;
+                    Result r = Result::success(text);
+                    r.with("count", static_cast<std::int64_t>(list.size()));
+                    for (std::size_t i = 0; i < list.size(); ++i) r.with("device_" + std::to_string(i), list[i]);
+                    return r;
+                });
+            });
+    reg.add({"beats.midi_open", "Open MIDI input",
+             "Start listening to a MIDI input (default: the first one plugged in, else the virtual keyboard). Notes wait "
+             "until beats.midi_take turns them into piano-roll notes, or beats.midi_read lists them.",
+             {{"device", ParamType::String, "a name from beats.midi_devices", false, {}, std::string("default")}}, false, true},
+            [](const Params& p) {
+                return std::make_unique<FunctionAction>([p] {
+                    std::string error;
+                    if (!MidiInput::instance().open(stringParam(p, "device", "default"), error)) return failed(error);
+                    return Result::success("listening to " + MidiInput::instance().device()).with("device", MidiInput::instance().device());
+                });
+            });
+    reg.add({"beats.midi_close", "Close MIDI input", "Stop listening to the MIDI input.", {}, false, true}, [](const Params&) {
+        return std::make_unique<FunctionAction>([] {
+            MidiInput::instance().close();
+            return Result::success("MIDI input closed");
+        });
+    });
+    reg.add({"beats.midi_key", "Press a key",
+             "Play a note on the virtual MIDI keyboard: on=true presses, on=false lets go. time= (seconds since "
+             "midi_open) places it exactly, for scripts; otherwise it's now.",
+             {{"pitch", ParamType::String, "note, e.g. C4 or 60", true}, {"on", ParamType::Bool, "press (true) or release", false, {}, true},
+              {"velocity", ParamType::Int, "1..127", false, {}, std::int64_t{100}}, {"time", ParamType::Number, "seconds since midi_open", false}},
+             false, true},
+            [](const Params& p) {
+                return std::make_unique<FunctionAction>([p] {
+                    const int pitch = parseNote(stringParam(p, "pitch"));
+                    if (pitch < 0 || pitch > 127) return failed("pitch is a note like C4 or a MIDI number 0..127");
+                    if (!MidiInput::instance().isOpen()) return failed("open an input first (beats.midi_open device=keyboard)");
+                    const bool on = boolParam(p, "on", true);
+                    MidiInput::instance().press(pitch, static_cast<int>(intParam(p, "velocity", 100)), on, p.count("time") ? numberParam(p, "time") : -1.0);
+                    return Result::success(std::string(on ? "pressed " : "released ") + noteName(pitch));
+                });
+            });
+    reg.add({"beats.midi_read", "Read MIDI input",
+             "The notes played since the last read (or take), and empties the queue. rows: on/off, MIDI pitch, name, "
+             "velocity, seconds since midi_open.",
+             {}, false, true},
+            [](const Params&) {
+                return std::make_unique<FunctionAction>([] {
+                    const auto events = MidiInput::instance().read();
+                    std::string rows;
+                    for (const auto& e : events)
+                        rows += std::string(e.on ? "on" : "off") + "\t" + std::to_string(e.pitch) + "\t" + noteName(e.pitch) + "\t" + std::to_string(e.velocity) +
+                                "\t" + num(e.time, 8) + "\n";
+                    Result r = Result::success(std::to_string(events.size()) + " MIDI events");
+                    r.with("rows", rows).with("count", static_cast<std::int64_t>(events.size())).with("time", MidiInput::instance().now());
+                    return r;
+                });
+            });
+    reg.add({"beats.midi_take", "Record MIDI into a pattern",
+             "Turn what was played on the MIDI input since the last read into piano-roll notes, as one undo step. "
+             "mode=live keeps the timing (at the song's tempo, from beat at=, snapped to grid=); mode=step puts each "
+             "note or chord step= beats after the last, ignoring timing, for entering parts slowly.",
+             {songParam(), patternParam(), {"mode", ParamType::String, "how to place the notes", false, {"live", "step"}, std::string("live")},
+              {"at", ParamType::Number, "beat of the first note", false, {}, 0.0},
+              {"grid", ParamType::Number, "live: snap to this many beats (0 = off)", false, {}, 0.25},
+              {"step", ParamType::Number, "step: beats per note or chord", false, {}, 0.5},
+              {"since", ParamType::Number, "live: the input time (seconds since midi_open) that lands on beat at= (default: the first note)", false},
+              previewParam("the piano roll")},
+             true},
+            [s](const Params& p) -> std::unique_ptr<Action> {
+                const auto events = MidiInput::instance().read();  // taken now, so redo puts back the same notes
+                const double now = MidiInput::instance().now();
+                return songCommand(*s, [events, now](SongDoc& d, const Params& q) {
+                    std::string error;
+                    Pattern* pat = patternArg(d.song, q, error);
+                    if (!pat) return failed(error);
+                    const bool live = stringParam(q, "mode", "live") != "step";
+                    const double step = numberParam(q, "step", 0.5), grid = numberParam(q, "grid", 0.25), at = numberParam(q, "at", 0.0);
+                    if (!(step > 0) || grid < 0 || at < 0) return failed("step must be > 0, grid and at 0 or more");
+                    const auto notes = takeNotes(events, live, grid, at, step, d.song.bpm, now, q.count("since") ? numberParam(q, "since") : -1.0);
+                    if (notes.empty()) return failed("nothing was played (open an input with beats.midi_open, then play)");
+                    const std::size_t first = pat->notes.size();
+                    pat->notes.insert(pat->notes.end(), notes.begin(), notes.end());
+                    std::vector<std::size_t> added;
+                    for (std::size_t i = first; i < pat->notes.size(); ++i) added.push_back(i);
+                    const NumberList nowIdx = resort(*pat, added);
+                    fit(*pat, d.song);
+                    return changed("recorded " + std::to_string(notes.size()) + (notes.size() == 1 ? " note" : " notes") + " into \"" + pat->name + "\"", d, *pat,
+                                   nowIdx, q);
+                })(p);
+            });
 }
 
 }  // namespace wetwaresuite::beats::tool

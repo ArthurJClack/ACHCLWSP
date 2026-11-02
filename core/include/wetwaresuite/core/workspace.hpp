@@ -66,6 +66,11 @@ struct TimelineClip {
     double sourceIn = 0;  // source seconds at the clip's start
     double speed = 1;     // source seconds per timeline second (negative: plays backwards)
     bool picture = false, sound = false;  // what clipMedia can show for it
+    // fade and gain handles drawn on the clip (audio): dragging one runs SetProperty
+    // "fade_in" / "fade_out" (seconds) or "gain" (dB). < 0 fades = no handles.
+    double fadeIn = -1, fadeOut = -1;
+    double gainDb = 0;
+    bool gainHandle = false;
 };
 
 // A switch at the head of a track (lock, mute, solo, hide). Clicking it runs the document's

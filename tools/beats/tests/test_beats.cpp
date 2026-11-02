@@ -388,6 +388,36 @@ int main() {
         CHECK(rj["isError"] == false && fs::exists(dir / "mcp.wav"));
     }
 
+    // ---- MIDI input: the virtual keyboard into a pattern, live and step by step ----
+    {
+        Session m;
+        beats::registerCommands(m);
+        const std::string song = str(m.run("beats.new", {{"bpm", 120.0}}), "song");
+        CHECK(m.run("beats.pattern_add", {{"song", song}, {"name", S("keys")}}).ok);
+        CHECK(str(m.run("beats.midi_devices", {}), "device_0") == "keyboard");
+        CHECK(!m.run("beats.midi_open", {{"device", S("no such synth")}}).ok);
+        CHECK(m.run("beats.midi_open", {{"device", S("keyboard")}}).ok);
+        // live at 120 bpm: a beat is 0.5 s. C4 at 1.0 s for 0.5 s, E4 at 1.5 s for 0.24 s (snapped to a half beat)
+        auto key = [&](const char* pitch, bool on, double t) { return m.run("beats.midi_key", {{"pitch", S(pitch)}, {"on", on}, {"time", t}}).ok; };
+        CHECK(key("C4", true, 1.0) && key("C4", false, 1.5) && key("E4", true, 1.5) && key("E4", false, 1.74));
+        Result took = m.run("beats.midi_take", {{"song", song}, {"pattern", S("keys")}, {"since", 0.0}, {"at", 0.0}});
+        CHECK(took.ok && numField(took, "count") == 2);
+        Result notes = m.run("beats.notes", {{"song", song}, {"pattern", S("keys")}});
+        const std::string rows = str(notes, "rows");
+        CHECK(rows.find("60\tC4\t2\t1\t") != std::string::npos && rows.find("64\tE4\t3\t0.5\t") != std::string::npos);
+        // step entry: a chord (two keys 20 ms apart) then a single note, half a beat each
+        CHECK(key("C4", true, 5.0) && key("G4", true, 5.02) && key("C4", false, 5.3) && key("G4", false, 5.3) && key("A4", true, 6.0) && key("A4", false, 9.0));
+        took = m.run("beats.midi_take", {{"song", song}, {"pattern", S("keys")}, {"mode", S("step")}, {"at", 4.0}, {"step", 0.5}});
+        CHECK(took.ok);
+        const std::string rows2 = str(m.run("beats.notes", {{"song", song}, {"pattern", S("keys")}}), "rows");
+        CHECK(rows2.find("60\tC4\t4\t0.5") != std::string::npos && rows2.find("67\tG4\t4\t0.5") != std::string::npos &&
+              rows2.find("69\tA4\t4.5\t0.5") != std::string::npos);
+        CHECK(!m.run("beats.midi_take", {{"song", song}, {"pattern", S("keys")}}).ok);  // nothing new played
+        CHECK(m.run("beats.midi_read", {}).ok);
+        CHECK(m.run("beats.midi_close", {}).ok);
+        CHECK(!m.run("beats.midi_key", {{"pitch", S("C4")}}).ok);  // closed
+    }
+
     fs::remove_all(dir);
     return check::summary("beats");
 }
