@@ -490,6 +490,33 @@ void registerTone(Session& session) {
 void registerTransform(Session& session) {
     auto& reg = session.registry();
 
+    reg.add({"photo.transform_box",
+             "Transform box",
+             "The box photo.transform works on: the selection's bounds, or the visible pixels of the layer when nothing is "
+             "selected. The window draws its free-transform handles on it.",
+             {docParam(), layerParam()},
+             false,
+             true},
+            imageCommand(
+                session,
+                [](ImageDoc& doc, const Params& p) {
+                    std::string error;
+                    const int idx = pixelLayerIndex(doc, p, error);
+                    if (idx < 0) return Result::failure(error);
+                    const PixelRect b = sourceBox(doc, doc.image.layers[static_cast<std::size_t>(idx)]);
+                    Result r = Result::success("box " + std::to_string(b.x0) + "," + std::to_string(b.y0) + " to " + std::to_string(b.x1) + "," +
+                                               std::to_string(b.y1));
+                    r.with("doc", stringParam(p, "doc"))
+                        .with("x0", static_cast<std::int64_t>(b.x0))
+                        .with("y0", static_cast<std::int64_t>(b.y0))
+                        .with("x1", static_cast<std::int64_t>(b.x1))
+                        .with("y1", static_cast<std::int64_t>(b.y1))
+                        .with("layer", static_cast<std::int64_t>(idx))
+                        .with("selection", doc.hasSelection());
+                    return r;
+                },
+                false));
+
     reg.add({"photo.transform",
              "Free transform",
              "Rotate (any angle), scale, skew, move or distort the selected pixels, or the whole layer when nothing is "

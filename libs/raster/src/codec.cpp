@@ -1,12 +1,16 @@
 #include "wetwaresuite/raster/codec.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cctype>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
 
+#include "wetwaresuite/raster/color_profile.hpp"
 #include "wetwaresuite/raster/ops.hpp"
+#include "wetwaresuite/raster/raw.hpp"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -85,7 +89,7 @@ std::string encodePpm(const Image& img) {
 
 const std::vector<std::string>& readableExtensions() {
     static const std::vector<std::string> list = [] {
-        std::vector<std::string> l = {"png", "jpg", "jpeg", "bmp", "tga", "gif", "psd", "hdr", "pic", "ppm", "pgm", "pnm", "tif", "tiff"};
+        std::vector<std::string> l = {"png", "jpg", "jpeg", "bmp", "tga", "gif", "psd", "hdr", "pic", "ppm", "pgm", "pnm", "tif", "tiff", "dng"};
         if (webpSupported()) l.push_back("webp");
         return l;
     }();
@@ -104,7 +108,8 @@ const std::vector<std::string>& writableExtensions() {
 bool canRead(const std::filesystem::path& path) { return contains(readableExtensions(), ext(path)); }
 bool canWrite(const std::filesystem::path& path) { return contains(writableExtensions(), ext(path)); }
 
-Image decode(const std::string& bytes) {
+namespace {
+Image decodeRaw(const std::string& bytes) {
     if (bytes.size() >= 4 && (bytes.compare(0, 4, "II*\0", 4) == 0 || bytes.compare(0, 4, "MM\0*", 4) == 0 ||
                               bytes.compare(0, 4, "II+\0", 4) == 0 || bytes.compare(0, 4, "MM\0+", 4) == 0)) {
         return decodeTiff(bytes);
@@ -114,6 +119,90 @@ Image decode(const std::string& bytes) {
     auto* data = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()), static_cast<int>(bytes.size()),
                                        &w, &h, &n, 4);
     return fromStb(data, w, h);
+}
+
+std::uint32_t crc32(const std::string& data, std::size_t from) {
+    static const auto table = [] {
+        std::array<std::uint32_t, 256> t{};
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            std::uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[i] = c;
+        }
+        return t;
+    }();
+    std::uint32_t c = 0xFFFFFFFFu;
+    for (std::size_t i = from; i < data.size(); ++i) c = table[(c ^ static_cast<unsigned char>(data[i])) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+void putBe32(std::string& s, std::uint32_t v) {
+    for (int i = 3; i >= 0; --i) s += static_cast<char>((v >> (8 * i)) & 0xFF);
+}
+
+void pngChunk(std::string& out, const char* type, const std::string& data) {
+    putBe32(out, static_cast<std::uint32_t>(data.size()));
+    const std::size_t start = out.size();
+    out += type;
+    out += data;
+    putBe32(out, crc32(out, start));
+}
+}  // namespace
+
+Image decode(const std::string& bytes) {
+    if (isDng(bytes)) return developDng(bytes);  // developed straight to sRGB
+    Image img = decodeRaw(bytes);
+    // wide-gamut files (Display P3 phone photos, Adobe RGB, ProPhoto) are shown and edited as sRGB
+    convertToSrgb(img, parseIccProfile(findIccProfile(bytes)));
+    return img;
+}
+
+std::string encodePng16(const Image& img) {
+    if (img.empty()) throw std::runtime_error("image is empty");
+    const int W = img.width(), H = img.height();
+    bool opaque = true;
+    for (int y = 0; y < H && opaque; ++y)
+        for (int x = 0; x < W; ++x)
+            if (img.pixel(x, y)[3] != 255) {
+                opaque = false;
+                break;
+            }
+    const int ch = opaque ? 3 : 4, bpp = ch * 2;
+    const std::size_t rowBytes = static_cast<std::size_t>(W) * static_cast<std::size_t>(bpp);
+    std::string raw;
+    raw.reserve((rowBytes + 1) * static_cast<std::size_t>(H));
+    std::string row(rowBytes, '\0');
+    for (int y = 0; y < H; ++y) {
+        const std::uint8_t* p = img.pixel(0, y);
+        for (int x = 0; x < W; ++x)
+            for (int c = 0; c < ch; ++c) {
+                const std::size_t at = static_cast<std::size_t>(x) * static_cast<std::size_t>(bpp) + static_cast<std::size_t>(c) * 2;
+                row[at] = row[at + 1] = static_cast<char>(p[x * 4 + c]);  // v * 257, big-endian
+            }
+        raw += '\1';  // Sub filter: smaller files for smooth pictures
+        for (std::size_t i = 0; i < rowBytes; ++i) {
+            const unsigned char left = i >= static_cast<std::size_t>(bpp) ? static_cast<unsigned char>(row[i - static_cast<std::size_t>(bpp)]) : 0;
+            raw += static_cast<char>(static_cast<unsigned char>(row[i]) - left);
+        }
+    }
+    std::string out = "\x89PNG\r\n\x1a\n";
+    std::string ihdr;
+    putBe32(ihdr, static_cast<std::uint32_t>(W));
+    putBe32(ihdr, static_cast<std::uint32_t>(H));
+    ihdr += static_cast<char>(16);
+    ihdr += static_cast<char>(opaque ? 2 : 6);
+    ihdr += std::string(3, '\0');
+    pngChunk(out, "IHDR", ihdr);
+    pngChunk(out, "sRGB", std::string(1, '\0'));
+    pngChunk(out, "IDAT", deflateZlib(raw, 6));
+    pngChunk(out, "IEND", "");
+    return out;
+}
+
+bool savesBits(const std::filesystem::path& path, int bits) {
+    if (bits == 8) return true;
+    const std::string e = ext(path);
+    return bits == 16 && (e == "png" || e == "tif" || e == "tiff");
 }
 
 Image load(const std::filesystem::path& path) {
@@ -140,12 +229,13 @@ std::string encodeJpeg(const Image& img, int quality) {
     return out;
 }
 
-void save(const Image& img, const std::filesystem::path& path, int quality) {
+void save(const Image& img, const std::filesystem::path& path, int quality, int bits) {
     if (img.empty()) throw std::runtime_error("image is empty");
     const std::string e = ext(path);
+    const bool deep = bits == 16 && savesBits(path, 16);
     std::string bytes;
     if (e == "png") {
-        bytes = encodePng(img);
+        bytes = deep ? encodePng16(img) : encodePng(img);
     } else if (e == "jpg" || e == "jpeg") {
         bytes = encodeJpeg(img, quality);
     } else if (e == "bmp") {
@@ -159,7 +249,7 @@ void save(const Image& img, const std::filesystem::path& path, int quality) {
     } else if (e == "ppm") {
         bytes = encodePpm(img);
     } else if (e == "tif" || e == "tiff") {
-        bytes = encodeTiff(img);
+        bytes = encodeTiff(img, deep ? 16 : 8);
     } else if (e == "webp") {
         bytes = encodeWebp(img, quality);
     } else {

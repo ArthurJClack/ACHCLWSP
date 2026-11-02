@@ -116,6 +116,14 @@ void testSelections(const fs::path& dir) {
     CHECK(px(s, id, 35, 25, 1) == Color{255, 0, 0, 255} && px(s, id, 22, 25, 1).a == 0);
     CHECK(s.history().undo());
     CHECK(!s.run("photo.transform", P({{"doc", id}, {"scale", 0.0}})).ok);
+    // the box the window's free-transform handles sit on: the layer's visible pixels (no selection now)
+    {
+        const std::size_t steps = s.history().labels().size();
+        Result box = s.run("photo.transform_box", P({{"doc", id}}));
+        CHECK(box.ok && box.field("x0") && std::get<std::int64_t>(*box.field("x0")) == 20 && std::get<std::int64_t>(*box.field("x1")) == 30);
+        CHECK(std::get<std::int64_t>(*box.field("y0")) == 20 && std::get<std::int64_t>(*box.field("y1")) == 30);
+        CHECK(s.history().labels().size() == steps);  // not an undo step
+    }
 
     // layer masks and clipping
     CHECK(s.run("photo.select", P({{"doc", id}, {"shape", std::string("rect")}, {"x", 0.0}, {"y", 0.0}, {"width", 25.0}, {"height", 80.0}})).ok);
@@ -264,6 +272,12 @@ int main() {
     CHECK(!s.run("photo.new", {{"width", std::int64_t{10}}, {"height", std::int64_t{10}}, {"background", std::string("blurple")}}).ok);
     CHECK(s.run("photo.close", {{"doc", std::string("img2")}}).ok);
     CHECK(!s.run("photo.info", {{"doc", std::string("img2")}}).ok);
+    CHECK(s.run("photo.save", {{"doc", id}, {"path", (dir / "out16.png").string()}, {"bits", std::int64_t{16}}}).ok);
+    CHECK(!s.run("photo.save", {{"doc", id}, {"path", (dir / "out12.png").string()}, {"bits", std::int64_t{12}}}).ok);
+    Result deep = s.run("photo.open", {{"path", (dir / "out16.png").string()}});
+    CHECK(deep.ok && intField(deep, "bits") == 16);
+    Result notRaw = s.run("photo.develop_raw", {{"doc", id}, {"exposure", 1.0}});
+    CHECK(!notRaw.ok && notRaw.message.find(".dng") != std::string::npos);
 
     Result batch = s.run("photo.batch", {{"input_dir", (dir / "in").string()}, {"output_dir", (dir / "out").string()},
                                          {"format", std::string("png")}, {"max_size", std::int64_t{50}}});

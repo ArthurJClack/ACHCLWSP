@@ -4,9 +4,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 
 #include "commands.hpp"
 #include "wetwaresuite/raster/filters.hpp"
+#include "wetwaresuite/raster/ops.hpp"
+#include "wetwaresuite/raster/raw.hpp"
 #include "wetwaresuite/raster/selection.hpp"
 
 namespace wetwaresuite::photo {
@@ -169,6 +173,59 @@ void registerFilterCommands(Session& session) {
                 if (mode == Blend::Normal && numberParam(p, "opacity", 100) >= 100) img = std::move(clouds);
                 else blendOnto(img, clouds, 0, 0, mode, std::clamp(numberParam(p, "opacity", 100), 0.0, 100.0) / 100);
                 return std::string("clouds rendered");
+            }));
+
+    reg.add({"photo.develop_raw",
+             "Develop raw",
+             "Develop the camera raw (.dng) this image was opened from again with new settings: exposure in stops, white "
+             "balance (as_shot, auto, a preset, or custom with temperature in kelvin and tint -100 green..100 magenta), "
+             "highlights and shadows -100..100 (negative highlights pull bright areas back, positive shadows lift dark ones), "
+             "contrast and saturation -100..100, half_size for a quick 4x faster look. Replaces the bottom layer's pixels; "
+             "layers you added on top stay.",
+             {docParam(), numberSpec("exposure", "stops, -5..5", 0),
+              {"white_balance", ParamType::String, "white balance", false,
+               {"as_shot", "auto", "daylight", "cloudy", "shade", "tungsten", "fluorescent", "flash", "custom"}, std::string("as_shot")},
+              numberSpec("temperature", "custom: kelvin 2000..12000", 5500), numberSpec("tint", "custom: -100 green .. 100 magenta", 0),
+              numberSpec("highlights", "-100..100", 0), numberSpec("shadows", "-100..100", 0), numberSpec("contrast", "-100..100", 0),
+              numberSpec("saturation", "-100..100", 0), {"half_size", ParamType::Bool, "half the size, 4x faster", false, {}, false},
+              previewParam()},
+             true},
+            imageCommand(session, [](ImageDoc& doc, const Params& p) {
+                std::ifstream in(doc.path, std::ios::binary);
+                const std::string bytes = in ? std::string((std::istreambuf_iterator<char>(in)), {}) : std::string();
+                if (!isDng(bytes)) return Result::failure("this image wasn't opened from a camera raw (.dng) file");
+                RawDevelop set;
+                set.exposure = std::clamp(numberParam(p, "exposure", 0), -5.0, 5.0);
+                set.whiteBalance = stringParam(p, "white_balance", "as_shot");
+                set.temperature = std::clamp(numberParam(p, "temperature", 5500), 2000.0, 12000.0);
+                set.tint = numberParam(p, "tint", 0);
+                set.highlights = numberParam(p, "highlights", 0);
+                set.shadows = numberParam(p, "shadows", 0);
+                set.contrast = numberParam(p, "contrast", 0);
+                set.saturation = numberParam(p, "saturation", 0);
+                set.halfSize = boolParam(p, "half_size", false);
+                Image img;
+                try {
+                    img = developDng(bytes, set);
+                } catch (const std::exception& e) {
+                    return Result::failure(e.what());
+                }
+                if (doc.image.layers.empty()) return Result::failure("the image has no layers");
+                if ((img.width() != doc.image.width || img.height() != doc.image.height)) {
+                    for (auto& l : doc.image.layers) {  // other layers keep their place, scaled with the canvas
+                        if (&l != &doc.image.layers.front() && !l.image.empty()) l.image = resize(l.image, img.width(), img.height());
+                        if (!l.mask.empty()) l.mask = Mask();
+                    }
+                    doc.image.width = img.width();
+                    doc.image.height = img.height();
+                    doc.selection = Mask();
+                }
+                doc.image.layers.front().image = std::move(img);
+                const RawInfo info = dngInfo(bytes);
+                Result r = Result::success("developed " + info.camera + " raw (" + info.layout + ", " + std::to_string(info.bits) + "-bit), white balance " +
+                                           set.whiteBalance + ", exposure " + num(set.exposure));
+                r.with("doc", stringParam(p, "doc")).with("width", static_cast<std::int64_t>(doc.image.width)).with("height", static_cast<std::int64_t>(doc.image.height));
+                return maybePreview(r, doc, p);
             }));
 }
 

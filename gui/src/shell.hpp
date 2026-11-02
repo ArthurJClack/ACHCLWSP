@@ -60,7 +60,7 @@ struct Texture {
     ImTextureID id() const { return static_cast<ImTextureID>(reinterpret_cast<std::intptr_t>(tex)); }
 };
 
-enum class CanvasTool { Move, Select, Brush, Eraser, Fill, Heal, Remove, Clone, Dodge, Burn, Sponge, Smudge, Blur, Pick, Anchor, VecRect, VecEllipse, VecLine, VecPen, VecText };
+enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal, Remove, Clone, Dodge, Burn, Sponge, Smudge, Blur, Pick, Anchor, VecRect, VecEllipse, VecLine, VecPen, VecText };
 enum class SelectShape { Rect, Ellipse, Lasso, Wand };
 
 // Click tools for game levels (levels.*) and pixel-art sprites (forge.sprite_*), game_view.cpp.
@@ -909,6 +909,31 @@ private:
         bool dragging = false, dragCopy = false, scrubbing = false;
         int dragRow = -1, dragTo = 0;
     } dope_;
+    // free transform handles on a picture (transform_view.cpp)
+    struct FreeTransform {
+        bool active = false;
+        std::string doc;
+        ImVec2 base[4], quad[4], startQuad[4];  // picture px: where the box was, where its corners are now
+        ImVec2 startMouse;
+        float startAngle = 0;
+        int drag = -1;
+        double lastTry = 0;
+    } xform_;
+    // typing a text layer on a picture (transform_view.cpp)
+    struct ImageText {
+        bool open = false, focus = false, bold = false;
+        std::string doc, words;
+        ImVec2 at;
+        float size = 32;
+    } imgText_;
+    void imageTextInput(ImVec2 p0, bool hovered);
+    Params imageTextParams() const;
+    void imageTextFinish(bool keep);
+    Params transformParams() const;
+    void transformStart();
+    void transformFinish(bool keep);
+    void transformToolbar();
+    void transformInput(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
     void dopeSheetView();
     float dopeSheetHeight() const;
     void dopeSheetRefresh(bool force);

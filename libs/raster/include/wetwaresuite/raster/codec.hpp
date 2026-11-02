@@ -12,7 +12,7 @@
 namespace wetwaresuite::raster {
 
 // Lowercase extensions without the dot.
-const std::vector<std::string>& readableExtensions();  // png jpg jpeg bmp tga gif psd hdr pic ppm pgm pnm tif tiff webp
+const std::vector<std::string>& readableExtensions();  // png jpg jpeg bmp tga gif psd hdr pic ppm pgm pnm tif tiff dng webp
 const std::vector<std::string>& writableExtensions();  // png jpg jpeg bmp tga ppm tif tiff webp
 
 bool canRead(const std::filesystem::path& path);
@@ -23,14 +23,20 @@ Image load(const std::filesystem::path& path);
 Image decode(const std::string& bytes);
 
 // Format is picked from the extension. quality applies to JPEG and WebP (1..100; WebP at 100 is lossless).
-void save(const Image& image, const std::filesystem::path& path, int quality = 90);
+// bits = 16 writes 16 bits per channel for .png and .tif (other formats stay 8-bit; see savesBits).
+// Files with an embedded colour profile are converted to sRGB as they load (color_profile.hpp).
+void save(const Image& image, const std::filesystem::path& path, int quality = 90, int bits = 8);
+// Whether save() can write that many bits per channel to this extension.
+bool savesBits(const std::filesystem::path& path, int bits);
 
 std::string encodePng(const Image& image);
+// 16 bits per channel PNG (RGB when fully opaque, else RGBA), tagged sRGB.
+std::string encodePng16(const Image& image);
 std::string encodeJpeg(const Image& image, int quality = 85);
 
-// TIFF: the first page of baseline files (see tiff.cpp); written as 8-bit RGB(A), Deflate.
+// TIFF: the first page of baseline files (see tiff.cpp); written as 8- or 16-bit RGB(A), Deflate.
 Image decodeTiff(const std::string& bytes);
-std::string encodeTiff(const Image& image);
+std::string encodeTiff(const Image& image, int bits = 8);
 
 // WebP (still images). webpSupported() is false when the build has no libwebp; then these throw.
 bool webpSupported();

@@ -260,7 +260,7 @@ If the window says the spot to copy from is too close to the edge, Alt+click a s
 
 Tick **Remove when I let go** to skip step 4: it removes as soon as you finish painting.
 
-Remove works on small and medium areas (about 60000 pixels, roughly 245 by 245). If you paint a bigger area, the window tells you so in plain words; remove the thing in a few smaller parts instead.
+Remove works on anything up to 4 million pixels (a whole person or car in a 12-megapixel photo). Areas up to about 60000 pixels (245 by 245) are filled patch by patch, most structured edges first; bigger ones are filled on a smaller copy of the photo and then refined back up to full size, which takes a few seconds.
 
 **Every heal stroke and every Remove is one step.** Press **Ctrl+Z** to take back just the last one, and **Ctrl+Y** to redo it.
 
@@ -312,7 +312,7 @@ Claude calls `photo_open`, `photo_preview` to find the spot and the wire, `photo
 ### Tips and limits
 
 - **Healing brush** works on any size (up to about 2000x2000 pixels), and brush-sized areas take a few milliseconds. It keeps the edges of the area exactly as they were, so the borrowed texture can't leave a seam. If the result looks blotchy, the spot you borrowed from had a different texture; pick another `from_x`/`from_y`.
-- **Remove object** is for small and medium things: up to 60000 pixels (about 245x245). Bigger areas would take too long, so you get a plain message asking you to select less. Remove a big object in a few overlapping parts instead. A 100x100 pixel area takes a fraction of a second.
+- **Remove object** fills up to 4 million pixels. A 100x100 pixel area takes a fraction of a second; a 600x600 person a few seconds. Very big holes get plausible texture rather than perfect structure, so a long straight edge crossing the hole may wobble: draw it back with the Clone tool if it matters.
 - `patch` (default 9) is the size of the pieces Remove object copies. Use 5 to 7 for fine detail, 13 to 21 for coarse textures like gravel or foliage.
 - All three work on the active layer (or `layer=`), and `preview=true` attaches a picture of the result.
 - Each result says how many pixels changed (`pixels`); the healing brush and seamless clone also report `iterations` and `converged` (whether the blending finished fully; it practically always does).
@@ -352,6 +352,18 @@ photo.clip doc=$p layer=2
 ```
 
 **Curves** take points as input,output pairs from 0 to 255: `points=0,0,64,48,192,210,255,255` is a gentle S that adds contrast. `channel=red` (or green, blue) bends one colour only. Presets: `contrast`, `strong_contrast`, `brighten`, `darken`, `fade`, `invert`.
+
+**Free transform in the window.** Pick **Transform** on the tool rail (or press **Ctrl+T**). A box with handles goes round the selection, or round the whole layer when nothing is selected:
+
+- drag a **corner** to scale evenly (hold **Shift** to scale freely);
+- drag an **edge** handle to stretch one side;
+- **Ctrl+drag** a corner for perspective: only that corner moves;
+- drag **inside** the box to move it;
+- drag **outside** the box to rotate (hold **Shift** to snap to 15 degrees).
+
+The picture previews as you drag. **Enter** or **Apply** keeps it as one undo step; **Esc** or **Cancel** puts it back.
+
+**Type on the picture.** Pick **Type** (T) on the rail, choose a colour and click where the text should go. Type straight onto the picture: the text appears as you type, Ctrl+Enter starts a new line, and Enter (or clicking away) makes it a text layer you can edit later from the Layers panel.
 
 **Free transform** (`photo.transform`) rotates by any angle, scales, skews and moves the selected pixels, or the whole layer when nothing is selected. `corners=` gives perspective instead: where the top-left, top-right, bottom-right and bottom-left corners of the selection's box go, and `from=` says where those corners are now. Straighten a poster photographed at an angle by giving its four corners as `from` and a rectangle as `corners`, then crop to it:
 
@@ -438,6 +450,14 @@ photo.save doc=$p path=graded.ora
 
 Claude calls `photo_open`, `photo_adjustment_layer` three times (`curves`, `color_balance` with `shadows`, `vibrance` or `hue_saturation`), `photo_preview`, maybe `photo_adjustment_edit` to fine-tune, and `photo_save`.
 
+**Smart filters.** Blur, sharpen and a few other filters come as adjustment-layer types too, so you can change or remove them later instead of baking them in: `gaussian_blur` (radius), `motion_blur` (angle, distance), `sharpen` (radius, amount %, threshold), `high_pass` (radius), `median` (radius), `noise` (amount %, gaussian, monochrome, seed), `oil_paint` (radius) and `find_edges`. Turn on `clip=true` (or **Clip to below**) and the filter only works on the layer right under it, like Photoshop's smart filters; without clip it works on everything below.
+
+```text
+# soften the background layer only, and change your mind later
+photo.adjustment_layer doc=$p type=gaussian_blur radius=6 clip=true name="Soft background"
+photo.adjustment_edit doc=$p layer=1 radius=3
+```
+
 **In the window.** In the **Layers** section on the right, pick a type from **Add adjustment...**. It's added above the active layer (only inside the selection, if there is one) and its settings appear below the layer list: drag a slider or change a box and the picture updates when you let go. Use the layer's **Blend**, **Opacity**, **Clip to below** and eye box like any other layer's.
 
 ## Task 10: filters (blur, sharpen, noise, stylize, render, distort)
@@ -521,11 +541,25 @@ The extension of `path` picks the format:
 | --- | --- | --- |
 | `.ora` | yes, everything | OpenRaster; keeps groups, masks, clipping, styles and editable text, shape and adjustment layers. Opens in the suite, Krita, GIMP and MyPaint |
 | `.psd` | yes | Photoshop; keeps layers, groups, masks, blend modes, opacity and clipping (also opens in GIMP, Krita and Photopea). Styles are drawn into the pixels, text and shape layers become pixels and adjustment layers become empty hidden layers: the result lists each as a `note:` |
-| `.png` | no | lossless, keeps transparency |
+| `.png` | no | lossless, keeps transparency; 8- or 16-bit |
 | `.jpg` / `.jpeg` | no | `quality` 1..100 (default 90); transparency becomes white |
 | `.webp` | no | `quality` 1..99 is lossy, `quality=100` is lossless; keeps transparency |
-| `.tif` / `.tiff` | no | lossless (Deflate), 8-bit RGB or RGBA |
+| `.tif` / `.tiff` | no | lossless (Deflate), 8- or 16-bit RGB or RGBA |
 | `.bmp`, `.tga`, `.ppm` | no | |
+
+**16-bit files.** Images opened from 16-bit PNG, TIFF or PSD files save back as 16 bits per channel when you save to `.png` or `.tif`; `bits=8` or `bits=16` on `photo.save` picks it yourself. Edits run at 8 bits per channel (the suite picks speed over depth), so a 16-bit save matters for tools further down the line that want 16-bit files, not for extra precision from the edits.
+
+**Colour profiles.** Photos tagged with a colour profile (iPhone and Pixel photos in Display P3, Adobe RGB from cameras, ProPhoto from raw developers) are converted to sRGB as they open, so they look the same here as in a browser instead of washed out. `photo.open` and `photo.info` say which profile the file had. PNG, JPEG, TIFF and WebP profiles are read; printer (CMYK/LUT) profiles are named but not converted. Saves are sRGB.
+
+**Camera raw.** `.dng` files open developed "as shot": the camera's white balance, colour matrix, crop and orientation. That covers phones shooting raw (iPhone ProRAW, Pixel, Samsung), cameras that write DNG (Leica, Pentax, Ricoh, DJI drones) and any camera's raw after Adobe's free DNG Converter. Then develop it again with your own settings:
+
+```text
+photo.open path=IMG_0420.dng -> r
+photo.develop_raw doc=$r exposure=0.7 white_balance=custom temperature=4800 tint=8 highlights=-60 shadows=40
+photo.save doc=$r path=IMG_0420.jpg
+```
+
+`white_balance` is `as_shot`, `auto` (grey world), `daylight`, `cloudy`, `shade`, `tungsten`, `fluorescent`, `flash` or `custom` (with `temperature` in kelvin and `tint`). `half_size=true` develops at half the size, 4 times faster, for a quick look. Develop replaces the bottom layer, so layers you added on top stay. Lossless and uncompressed DNGs with a 2x2 Bayer sensor or linear (already demosaiced) data develop; Fuji X-Trans and lossy DNGs don't yet, and other raw formats (.cr2, .cr3, .nef, .arw, .raf) need converting to DNG first.
 
 Opening also reads TIFFs from scanners and cameras (1 to 16-bit and float, gray, RGB, palette or CMYK, uncompressed, LZW, PackBits or Deflate, strips or tiles; the first page of a multi-page file) and still WebP. JPEG-compressed TIFFs and animated WebP aren't read. Other formats (AVIF, HEIC) go through [convert](convert.md): save a PNG, then `wetwaresuite convert.file input=out.png output=out.avif`.
 
@@ -540,9 +574,9 @@ Open an image file as a new document and return its id. Not undoable.
 
 | Parameter | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `path` | string | yes | | image file: png, jpg, bmp, tga, gif, psd, hdr, pnm/ppm/pgm, ora |
+| `path` | string | yes | | image file: png, jpg, bmp, tga, gif, psd, hdr, pnm/ppm/pgm, tif, webp, dng, svg, ora |
 
-Returns `doc`, `width`, `height`, `layers`.
+Returns `doc`, `width`, `height`, `layers`, `bits` (8 or 16) and `profile` (the file's colour profile, "" when none).
 
 ### photo.new
 Create a blank image. Not undoable.
@@ -578,8 +612,26 @@ Save to a file; the extension picks the format. Not undoable.
 | `doc` | string | yes | | image id |
 | `path` | string | yes | | output file (`.ora`, `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tga`, `.ppm`); the folder must exist |
 | `quality` | integer | no | 90 | JPEG quality 1..100 |
+| `bits` | integer | no | what the file had | 8 or 16 bits per channel for `.png` and `.tif` |
 
 Returns `path`, `bytes`.
+
+### photo.develop_raw
+Develop the `.dng` the image was opened from again. Undoable.
+
+| Parameter | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `doc` | string | yes | | image id |
+| `exposure` | number | no | 0 | stops, -5..5 |
+| `white_balance` | string | no | `as_shot` | `as_shot`, `auto`, `daylight`, `cloudy`, `shade`, `tungsten`, `fluorescent`, `flash`, `custom` |
+| `temperature` | number | no | 5500 | custom white balance, kelvin 2000..12000 |
+| `tint` | number | no | 0 | custom white balance, -100 green..100 magenta |
+| `highlights` | number | no | 0 | -100..100; negative pulls bright areas back |
+| `shadows` | number | no | 0 | -100..100; positive lifts dark areas |
+| `contrast` | number | no | 0 | -100..100 |
+| `saturation` | number | no | 0 | -100..100 |
+| `half_size` | boolean | no | false | half the size, 4x faster |
+| `preview` | boolean | no | false | attach a picture of the result |
 
 ### photo.close
 Close a document; unsaved changes are lost.
@@ -796,6 +848,9 @@ Clip `layer` to the layer below it (`on=false` unclips).
 | `smooth` | boolean | no | true | bilinear; false = nearest (pixel art) |
 | `layer` | integer | no | active | layer to transform |
 | `preview` | boolean | no | false | attach a preview |
+
+### photo.transform_box
+The box free transform starts from: the selection's bounds, or the layer's non-transparent pixels when nothing is selected. Read-only; returns `x0`, `y0`, `x1`, `y1`, `layer` and `selection` (true when it came from the selection). The window's transform handles use it; use it to work out `from=` for `photo.transform`.
 
 ### photo.adjustment_layer
 Add an adjustment layer above `layer` (default the active one). Takes `type` (required), `name`, `clip`, `opacity` and the settings for that type (see Task 9). With a selection, the layer is masked to it. Undoable.

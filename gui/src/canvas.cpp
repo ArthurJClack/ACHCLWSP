@@ -87,6 +87,8 @@ bool Shell::toolAvailable(CanvasTool tool) const {
         case CanvasTool::Heal: return find("photo.heal") != nullptr;
         case CanvasTool::Remove: return find("photo.remove_object") != nullptr;
         case CanvasTool::Select: return find("photo.select") != nullptr;
+        case CanvasTool::Type: return find("paint.text") != nullptr;
+        case CanvasTool::Transform: return find("photo.transform") != nullptr && find("photo.transform_box") != nullptr;
         case CanvasTool::Clone: return find("paint.clone") != nullptr;
         case CanvasTool::Dodge:
         case CanvasTool::Burn:
@@ -224,6 +226,10 @@ const CanvasToolDef kCanvasTools[] = {
     {"Select", CanvasTool::Select, "M",
      "Choose the part of the picture to change: drag a box, oval or lasso, or click with the wand. Shift adds, "
      "Alt takes away. Edits then only change inside it"},
+    {"Transform", CanvasTool::Transform, "^T",
+     "Free transform: handles around the selection (or the layer). Drag corners to scale, edges to stretch, outside to "
+     "rotate, Ctrl+corner for perspective; Enter keeps it"},
+    {"Type", CanvasTool::Type, "T", "Click on the picture and type: a text layer appears as you write. Enter keeps it"},
     {"Brush", CanvasTool::Brush, "B", "Paint with the mouse or a pen (pressure works)"},
     {"Eraser", CanvasTool::Eraser, "E", "Rub out paint on the current layer"},
     {"Fill", CanvasTool::Fill, "G", "Click to fill an area with the colour, like a paint bucket"},
@@ -245,7 +251,7 @@ const CanvasToolDef kCanvasTools[] = {
 }  // namespace
 
 void Shell::canvasTools() {
-    const CanvasTool editing[] = {CanvasTool::Pick, CanvasTool::Anchor, CanvasTool::Select, CanvasTool::Brush, CanvasTool::Eraser, CanvasTool::Fill, CanvasTool::Heal,
+    const CanvasTool editing[] = {CanvasTool::Pick, CanvasTool::Anchor, CanvasTool::Select, CanvasTool::Transform, CanvasTool::Type, CanvasTool::Brush, CanvasTool::Eraser, CanvasTool::Fill, CanvasTool::Heal,
                                   CanvasTool::Remove, CanvasTool::Clone, CanvasTool::Dodge, CanvasTool::Smudge, CanvasTool::Blur};
     if (std::none_of(std::begin(editing), std::end(editing), [this](CanvasTool t) { return toolAvailable(t); })) return;
     for (const auto& t : kCanvasTools) {
@@ -262,6 +268,12 @@ void Shell::railTools() {
     if (mapsDoc()) return mapsTools();
     if (gameActive()) return gameTools();
     canvasTools();
+    // Ctrl+T: free transform, as in Photoshop
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_T, false) && toolAvailable(CanvasTool::Transform)) {
+        canvas_.tool = CanvasTool::Transform;
+        if (!xform_.active) transformStart();
+    }
 }
 
 void Shell::canvasToolbar() {
@@ -320,6 +332,17 @@ void Shell::canvasToolbar() {
     }
     if (canvas_.tool == CanvasTool::Select) {
         selectSettings();
+        return;
+    }
+    if (canvas_.tool == CanvasTool::Transform) {
+        transformToolbar();
+        return;
+    }
+    if (canvas_.tool == CanvasTool::Type) {
+        barLabel("Colour");
+        ImGui::ColorEdit4("##typecolour", canvas_.color, ImGuiColorEditFlags_NoInputs);
+        ImGui::SameLine();
+        ImGui::TextDisabled("click where the words go and type; Paint > Edit text changes them later");
         return;
     }
     if (brushTool(canvas_.tool)) {
@@ -614,6 +637,13 @@ void Shell::canvasArea() {
         if (canvas_.selecting && active) selectDrag(io.MousePos);
         if (canvas_.selecting && !active) selectRelease(io.MousePos);
     }
+    if (canvas_.tool == CanvasTool::Transform && toolAvailable(CanvasTool::Transform) && !ImGui::IsKeyDown(ImGuiKey_Space)) {
+        transformInput(dl, p0, hovered, active);
+    } else if (xform_.active) {
+        transformFinish(false);  // another tool: the handles go
+    }
+    if (canvas_.tool == CanvasTool::Type && toolAvailable(CanvasTool::Type)) imageTextInput(p0, hovered && painting);
+    else if (imgText_.open) imageTextFinish(false);
     const bool vectorTool = canvas_.tool == CanvasTool::Pick || canvas_.tool == CanvasTool::Anchor || vectorDrawTool(canvas_.tool);
     if (painting && vectorTool) {
         if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) vectorPress(io.MousePos);

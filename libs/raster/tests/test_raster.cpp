@@ -1,12 +1,17 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <functional>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "wetwaresuite/raster/codec.hpp"
+#include "wetwaresuite/raster/color_profile.hpp"
 #include "wetwaresuite/raster/document.hpp"
 #include "wetwaresuite/raster/ops.hpp"
 #include "wetwaresuite/raster/ora.hpp"
@@ -125,6 +130,131 @@ void testSimd() {
 }
 
 #include "tiff_samples.inc"
+
+// --- colour profiles ---------------------------------------------------------------------
+void be32(std::string& s, std::uint32_t v) {
+    for (int i = 3; i >= 0; --i) s += static_cast<char>((v >> (8 * i)) & 0xFF);
+}
+std::string xyzTag(double x, double y, double z) {
+    std::string t = "XYZ ";
+    be32(t, 0);
+    for (double v : {x, y, z}) be32(t, static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(v * 65536))));
+    return t;
+}
+// sRGB's own curve as an ICC parametric curve (type 3)
+std::string srgbCurve() {
+    std::string t = "para";
+    be32(t, 0);
+    t += std::string("\0\x03\0\0", 4);
+    for (double v : {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045}) be32(t, static_cast<std::uint32_t>(std::lround(v * 65536)));
+    return t;
+}
+// A tiny RGB matrix/TRC profile with these D50 primaries and the sRGB tone curve.
+std::string makeProfile(const std::string& name, const double prim[9]) {
+    std::vector<std::pair<std::string, std::string>> tags;
+    std::string desc = "desc";
+    be32(desc, 0);
+    be32(desc, static_cast<std::uint32_t>(name.size() + 1));
+    desc += name;
+    desc += '\0';
+    tags.push_back({"desc", desc});
+    tags.push_back({"rXYZ", xyzTag(prim[0], prim[1], prim[2])});
+    tags.push_back({"gXYZ", xyzTag(prim[3], prim[4], prim[5])});
+    tags.push_back({"bXYZ", xyzTag(prim[6], prim[7], prim[8])});
+    for (const char* t : {"rTRC", "gTRC", "bTRC"}) tags.push_back({t, srgbCurve()});
+    std::string head(128, '\0');
+    head.replace(16, 4, "RGB ");
+    head.replace(20, 4, "XYZ ");
+    head.replace(36, 4, "acsp");
+    std::string table, data;
+    be32(table, static_cast<std::uint32_t>(tags.size()));
+    const std::size_t dataStart = 128 + 4 + tags.size() * 12;
+    for (const auto& [sig, body] : tags) {
+        table += sig;
+        be32(table, static_cast<std::uint32_t>(dataStart + data.size()));
+        be32(table, static_cast<std::uint32_t>(body.size()));
+        data += body;
+        while (data.size() % 4) data += '\0';
+    }
+    std::string icc = head + table + data;
+    icc[0] = static_cast<char>(icc.size() >> 24), icc[1] = static_cast<char>(icc.size() >> 16);
+    icc[2] = static_cast<char>(icc.size() >> 8), icc[3] = static_cast<char>(icc.size());
+    return icc;
+}
+std::uint32_t crc(const std::string& d) {
+    std::uint32_t c = 0xFFFFFFFFu;
+    for (unsigned char ch : d) {
+        c ^= ch;
+        for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+// The PNG with an iCCP chunk added right after IHDR.
+std::string withIccp(const std::string& png, const std::string& icc) {
+    std::string body = "iCCP";
+    body += std::string("test\0\0", 6);
+    body += deflateZlib(icc);
+    std::string chunk;
+    be32(chunk, static_cast<std::uint32_t>(body.size() - 4));
+    chunk += body;
+    be32(chunk, crc(body));
+    return png.substr(0, 33) + chunk + png.substr(33);
+}
+
+void testColorProfiles(const fs::path& dir) {
+    const double p3[9] = {0.5151, 0.2412, -0.0011, 0.2920, 0.6922, 0.0419, 0.1571, 0.0666, 0.7841};
+    const double srgb[9] = {0.4361, 0.2225, 0.0139, 0.3851, 0.7169, 0.0971, 0.1431, 0.0606, 0.7141};
+    const std::string p3icc = makeProfile("Display P3", p3);
+    const ColorProfile prof = parseIccProfile(p3icc);
+    CHECK(prof.present && prof.convertible && !prof.srgbLike && prof.description == "Display P3");
+    CHECK(parseIccProfile(makeProfile("sRGB IEC61966-2.1", srgb)).srgbLike);
+    CHECK(!parseIccProfile("junk").present);
+
+    Image img(4, 4, {200, 100, 50, 255});
+    img.set(0, 0, {255, 255, 255, 255});
+    img.set(1, 0, {0, 0, 0, 255});
+    const std::string png = withIccp(encodePng(img), p3icc);
+    CHECK(findIccProfile(png) == p3icc);
+    const Image got = decode(png);
+    // P3 orange is more saturated than the same numbers in sRGB; white and black stay put
+    CHECK(got.at(2, 2).r > 210 && got.at(2, 2).b < 50 && got.at(0, 0) == (Color{255, 255, 255, 255}) && got.at(1, 0) == (Color{0, 0, 0, 255}));
+    CHECK(decode(encodePng(img)).at(2, 2) == (Color{200, 100, 50, 255}));  // untagged files are left alone
+    const FileColorInfo info = describeColor(png);
+    CHECK(info.profile == "Display P3" && info.converted && info.bits == 8);
+
+    // JPEG: the profile rides in APP2 segments
+    std::string jpg = encodeJpeg(img, 95);
+    std::string app2 = std::string("\xFF\xE2", 2);
+    const std::string seg = std::string("ICC_PROFILE\0", 12) + std::string("\x01\x01", 2) + p3icc;
+    app2 += static_cast<char>((seg.size() + 2) >> 8);
+    app2 += static_cast<char>((seg.size() + 2) & 0xFF);
+    app2 += seg;
+    jpg.insert(2, app2);
+    CHECK(findIccProfile(jpg) == p3icc && decode(jpg).at(2, 2).r > decode(encodeJpeg(img, 95)).at(2, 2).r + 5);
+
+    // 16-bit saves round-trip and say they're 16-bit
+    Image grad(64, 8);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 64; ++x) grad.set(x, y, {static_cast<std::uint8_t>(x * 4), 7, 200, static_cast<std::uint8_t>(y == 0 ? 128 : 255)});
+    const std::string p16 = encodePng16(grad);
+    CHECK(fileBitDepth(p16) == 16 && decode(p16).at(33, 3) == grad.at(33, 3) && decode(p16).at(5, 0).a == 128);
+    save(grad, dir / "deep.tif", 90, 16);
+    CHECK(load(dir / "deep.tif").at(40, 4) == grad.at(40, 4));
+    {
+        std::ifstream in(dir / "deep.tif", std::ios::binary);
+        CHECK(fileBitDepth(std::string((std::istreambuf_iterator<char>(in)), {})) == 16);
+    }
+    CHECK(savesBits("a.png", 16) && savesBits("a.TIF", 16) && !savesBits("a.jpg", 16));
+    // a doc opened from a 16-bit file saves 16-bit unless told otherwise
+    save(grad, dir / "deep.png", 90, 16);
+    auto doc = openImage(dir / "deep.png");
+    CHECK(doc->sourceBits == 16);
+    saveImage(*doc, dir / "again.png");
+    std::vector<std::string> notes;
+    saveImage(*doc, dir / "again.jpg", 90, &notes);
+    std::ifstream again(dir / "again.png", std::ios::binary);
+    CHECK(fileBitDepth(std::string((std::istreambuf_iterator<char>(again)), {})) == 16 && notes.size() == 1);
+}
 
 void testTiffAndWebp(const fs::path& dir) {
     for (const auto& t : tiffSamples()) {
@@ -285,6 +415,7 @@ int main() {
     auto dir = fs::temp_directory_path() / "wetwaresuite_test_raster";
     fs::create_directories(dir);
     testTiffAndWebp(dir);
+    testColorProfiles(dir);
     save(grad, dir / "grad.png");
     Image back = load(dir / "grad.png");
     CHECK(back.width() == 40 && back.at(7, 3) == grad.at(7, 3));
