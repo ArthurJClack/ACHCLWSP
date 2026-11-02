@@ -75,7 +75,29 @@ enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal
 enum class SelectShape { Rect, Ellipse, Lasso, Wand };
 
 // Click tools for game levels (levels.*) and pixel-art sprites (forge.sprite_*), game_view.cpp.
-enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket };
+enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket, Select, Translate, Rotate, Scale };
+
+// A Godot-style scene open on the canvas (scene_view.cpp): the tree, the selected node's
+// inspector, and the fixed 2D view (or 3D orbit) the picture was drawn with.
+struct SceneCanvas {
+    std::vector<std::string> paths, types;
+    int dims = 2;
+    std::string selected = ".";
+    bool viewSet = false;               // 2D: the world view stays put once fitted, so dragging doesn't jump
+    double originX = 0, originY = 0, scale = 1;
+    int viewW = 0, viewH = 0;
+    bool haveBox = false;               // the selected node's world box
+    double box[4] = {0, 0, 0, 0};
+    double angle = 35, tilt = 25;       // 3D orbit
+    bool camera = false, helpers = true;
+    // inspector
+    std::string inspectedFor;           // node + change count it was read at
+    std::string type, script, groups;
+    std::vector<std::string> names, values, kinds, sections, choices, edits;
+    char rename[128] = {};
+    int addClass = 0, scriptKind = 0;
+    std::vector<std::string> classes2, classes3;
+};
 
 struct GameCanvas {
     std::string doc, kind;       // the document the state is for; kind "level" or "sprite"
@@ -103,6 +125,8 @@ struct GameCanvas {
     float color[4] = {0, 0, 0, 1};
     std::vector<std::uint8_t> picture;  // the frame on the canvas, RGBA, for the colour picker
     int pictureW = 0, pictureH = 0;
+    // scene
+    SceneCanvas scene;
 };
 
 // A cad sketch open for drawing with the mouse (sketch_view.cpp). Geometry comes from
@@ -790,6 +814,14 @@ private:
     void gameSpriteSide();
     void gameLevelRelease();
     void gameSpriteRelease();
+    // Godot-style scenes on the canvas (scene_view.cpp)
+    void sceneSync(bool newDoc);
+    std::string scenePicture();
+    void sceneTools();
+    void sceneToolbar();
+    void sceneSide();
+    void sceneInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active);
+    void sceneSelect(const std::string& path);
 
     // actions (shell.cpp)
     Result run(const std::string& id, const Params& params);

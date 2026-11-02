@@ -31,7 +31,7 @@ MIME = {
     ".fbx": "application/x-fbx",
     ".kicad_sch": "application/x-kicad-schematic", ".kicad_pcb": "application/x-kicad-pcb", ".kicad_pro": "application/x-kicad-project",
     ".world": "application/x-tiled-world", ".aseprite": "image/x-aseprite", ".ase": "image/x-aseprite",
-    ".tmx": "application/x-tiled-tmx", ".tmj": "application/x-tiled-tmj", ".ldtk": "application/x-ldtk",
+    ".tscn": "application/x-godot-scene", ".tmx": "application/x-tiled-tmx", ".tmj": "application/x-tiled-tmj", ".ldtk": "application/x-ldtk",
     ".stl": "model/stl", ".3mf": "model/3mf", ".dxf": "image/vnd.dxf", ".step": "model/step", ".stp": "model/step",
     ".wav": "audio/x-wav", ".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/opus",
     ".m4a": "audio/mp4", ".aac": "audio/aac", ".aiff": "audio/x-aiff", ".aif": "audio/x-aiff",

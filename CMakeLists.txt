@@ -70,7 +70,7 @@ set(WETWARESUITE_ALL_APPS image draw model game cad electronics sound video offi
 set(WETWARESUITE_APP_TOOLS_image photo paint)
 set(WETWARESUITE_APP_TOOLS_draw vector type board)
 set(WETWARESUITE_APP_TOOLS_model model sculpt render animate)
-set(WETWARESUITE_APP_TOOLS_game forge levels)
+set(WETWARESUITE_APP_TOOLS_game scene forge levels)
 set(WETWARESUITE_APP_TOOLS_cad cad blueprint slicer fit)
 set(WETWARESUITE_APP_TOOLS_electronics circuit flash)
 set(WETWARESUITE_APP_TOOLS_sound audio beats)

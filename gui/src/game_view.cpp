@@ -70,12 +70,14 @@ bool Shell::gameActive() const {
     if (!doc) return false;
     if (doc->kind() == "level") return find("levels.preview") && find("levels.paint");
     if (doc->kind() == "sprite") return find("forge.sprite_preview") && find("forge.draw");
+    if (doc->kind() == "scene") return find("scene.preview") && find("scene.transform");
     return false;
 }
 
 bool Shell::gamePainting() const {
     const GameCanvas& g = canvas_.game;
     if (g.tool == GameTool::Move) return false;
+    if (g.kind == "scene") return true;
     return g.kind == "level" ? isLevelTool(g.tool) : isSpriteTool(g.tool);
 }
 
@@ -93,6 +95,7 @@ void Shell::gameSync() {
     }
     g.seen = changes_;
     g.error.clear();
+    if (g.kind == "scene") return sceneSync(newDoc);
     if (g.kind == "level") {
         Result r = query("levels.info", {{"doc", currentDoc_}});
         if (!r.ok) return;
@@ -150,6 +153,7 @@ std::string Shell::gamePicture() {
     if (!gameActive()) return {};
     gameSync();
     GameCanvas& g = canvas_.game;
+    if (g.kind == "scene") return scenePicture();
     Result r = g.kind == "level"
                    ? query("levels.preview", {{"doc", currentDoc_}, {"scale", 1.0}, {"max_size", std::int64_t{8192}}})
                    : query("forge.sprite_preview", {{"doc", currentDoc_},
@@ -179,6 +183,7 @@ void Shell::gameRun(const std::string& id, Params params, const std::string& tit
 void Shell::gameTools() {
     GameCanvas& g = canvas_.game;
     gameSync();
+    if (g.kind == "scene") return sceneTools();
     struct Item {
         const char* name;
         GameTool tool;
@@ -218,6 +223,7 @@ void Shell::gameTools() {
 void Shell::gameToolbar() {
     GameCanvas& g = canvas_.game;
     gameSync();
+    if (g.kind == "scene") return sceneToolbar();
     const bool isLevel = g.kind == "level";
     if (!isLevel && (g.tool == GameTool::Box || g.tool == GameTool::Ellipse)) {
         ImGui::SameLine();
@@ -231,6 +237,7 @@ void Shell::gameToolbar() {
 
 void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) {
     GameCanvas& g = canvas_.game;
+    if (g.kind == "scene") return sceneInput(dl, origin, hovered, active);
     ImGuiIO& io = ImGui::GetIO();
     const float z = canvas_.zoom;
     const bool isLevel = g.kind == "level";
@@ -425,7 +432,8 @@ void Shell::gameSpriteRelease() {
 
 void Shell::gameSide() {
     gameSync();
-    if (canvas_.game.kind == "level") gameLevelSide();
+    if (canvas_.game.kind == "scene") sceneSide();
+    else if (canvas_.game.kind == "level") gameLevelSide();
     else gameSpriteSide();
     if (!canvas_.game.error.empty()) {
         ImGui::Spacing();

@@ -6,6 +6,8 @@
 - **Animated pixel art**: Aseprite-style sprites with frames, durations, layers, animation tags and a palette (optionally indexed colour). Open and save `.aseprite`/`.ase`, draw pixels, and export sprite sheets with Aseprite JSON, Godot SpriteFrames and animated GIFs.
 - **Textures and 2D art**: pack sprite sheets with a JSON atlas engines can read, cut sheets back into frames, make normal maps, make textures tile, reduce pictures to pixel-art palettes, outline sprites, resize to powers of two, pack greyscale maps into one texture's channels (ORM maps) and trim transparent borders.
 
+Sprites and meshes made here go straight into Godot scenes with [scenes](scene.md) (`scene.add type=Sprite2D props="texture=..."`, `mesh=model.glb`).
+
 In the window, an open sprite gets pixel tools on the canvas (Pencil, Eraser, Line, Box, Ellipse, Bucket, Pick) with frames, onion skin, playback, layers and palette swatches beside it; every click runs the same commands shown here. Meshes and textures have no canvas tools yet. Each task below is shown three ways:
 
 - **CLI**: single `wetwaresuite` commands that read files and write files.

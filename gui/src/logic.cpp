@@ -575,6 +575,7 @@ std::string toolBlurb(const std::string& tool) {
         {"sculpt", "Shape 3D models like clay."},
         {"render", "Make pictures of 3D scenes with light and materials."},
         {"animate", "Make things move: 2D and 3D animation."},
+        {"scene", "Godot-style scenes: a node tree, inspector and viewport, saved as .tscn for Godot."},
         {"levels", "Build maps and levels for games."},
         {"beats", "Make music with drums, synths and samples."},
         {"circuit", "Draw electronic circuits and design boards."},

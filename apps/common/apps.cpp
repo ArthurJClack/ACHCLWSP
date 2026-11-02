@@ -14,7 +14,7 @@ const std::vector<App>& all() {
         {"image", "edit photos, paint pictures and make textures", {"photo", "paint"}, 0xe0559a},
         {"draw", "vector art and logos, fonts, whiteboards and diagrams", {"vector", "type", "board"}, 0x2fb37a},
         {"model", "3D modeling and sculpting, rendered pictures, animation", {"model", "sculpt", "render", "animate"}, 0xf08c2e},
-        {"game", "game assets (meshes, sprites, textures) and game levels", {"forge", "levels"}, 0x5bbf3a},
+        {"game", "game scenes (Godot .tscn), assets (meshes, sprites, textures) and levels", {"scene", "forge", "levels"}, 0x5bbf3a},
         {"cad", "precise parts, technical drawings and floor plans, 3D printing, parts that fit 3D scans", {"cad", "blueprint", "slicer", "fit"}, 0x2f8fd6},
         {"electronics", "circuit diagrams, circuit boards and flashing microcontrollers", {"circuit", "flash"}, 0x14a89a},
         {"sound", "record and clean up audio, make music", {"audio", "beats"}, 0x9b6bff},
@@ -69,7 +69,7 @@ const std::map<std::string, OpenRoute>& extensionTable() {
         {".glb", {"model", "sculpt.open"}}, {".gltf", {"model", "sculpt.open"}}, {".fbx", {"model", "model.open"}}, {".wwmodel", {"model", "model.open"}},
         {".scene.json", {"model", "render.open"}}, {".anim.json", {"model", "animate.open"}},
         // game
-        {".tmx", {"game", "levels.open"}}, {".tmj", {"game", "levels.open"}}, {".ldtk", {"game", "levels.open"}},
+        {".tscn", {"game", "scene.open"}}, {".tmx", {"game", "levels.open"}}, {".tmj", {"game", "levels.open"}}, {".ldtk", {"game", "levels.open"}},
         {".world", {"game", "levels.world_open"}}, {".aseprite", {"game", "forge.sprite_open"}}, {".ase", {"game", "forge.sprite_open"}},
         // cad
         {".stl", {"cad", "slicer.load"}}, {".3mf", {"cad", "slicer.load"}}, {".dxf", {"cad", "blueprint.open"}},
@@ -256,6 +256,7 @@ std::string toolGuide(const std::string& tool) {
         {"render", "render_* builds 3D scenes and path-traces them (render_new returns scene1; render_model renders a model file in one go; render_render without output returns the image)."},
         {"animate", "animate_* keyframes 2D layers, cels, bone rigs and 3D meshes and exports GIF, sprite sheets or video."},
         {"forge", "forge_* prepares game assets: meshes (forge_mesh_open, LODs, scale, up axis), sprite sheets and atlases, tileable textures and normal maps."},
+        {"scene", "scene_* builds Godot 4 scenes (.tscn) like Godot's editor: scene_new returns scn1; scene_add adds nodes (scene_classes lists them), scene_set/scene_inspect edit properties, scene_transform moves/turns/scales, scene_instance and scene_add_level bring in scenes and tilemaps, scene_script attaches GDScript, scene_project writes project.godot; scene_preview shows the viewport and scene_hit turns a 2D point into a node."},
         {"levels", "levels_* edits tilemaps and generates caves and dungeons from a seed (Tiled TMX/TMJ, LDtk)."},
         {"cad", "cad_* builds parametric parts in mm with z up (cad_new returns cad1; numeric fields take expressions over cad_param_set parameters; cad_save exports STL/3MF)."},
         {"blueprint", "blueprint_* makes technical drawings and floor plans in real units (mm, m, ft) with y up, drawn to a scale such as 1:50 (blueprint_new returns bp1; blueprint_export writes PDF/SVG/PNG to scale)."},

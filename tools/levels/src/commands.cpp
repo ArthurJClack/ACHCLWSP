@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include "wetwaresuite/levels/levels.hpp"
+#include "wetwaresuite/levels/scene.hpp"
 #include "wetwaresuite/raster/codec.hpp"
 #include "wetwaresuite/raster/paint.hpp"
 
@@ -2428,7 +2429,7 @@ void registerCommands(Session& session) {
     registerObjectCommands(session);
     registerQueryCommands(session);
     registerTerrainCommands(session);
-    registerWorldCommands(session);
+    registerWorldCommands(session);  // Godot-style scenes travel with levels
 }
 
 }  // namespace wetwaresuite::levels

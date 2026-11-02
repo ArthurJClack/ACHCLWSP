@@ -587,7 +587,8 @@ void Shell::canvasView() {
     }
     // a level or sprite: the canvas, with its layers, tiles, frames and colours beside it
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const float side = std::min(ImGui::GetFontSize() * 16, avail.x * 0.4f);
+    // a scene's tree and inspector want more room than layers and tiles
+    const float side = std::min(ImGui::GetFontSize() * (canvas_.game.kind == "scene" ? 21.0f : 16.0f), avail.x * 0.4f);
     const ImGuiWindowFlags still = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
     ImGui::BeginChild("game_canvas", {std::max(32.0f, avail.x - side - ImGui::GetStyle().ItemSpacing.x), avail.y}, ImGuiChildFlags_None, still);
     canvasArea();
@@ -671,7 +672,26 @@ void Shell::canvasArea() {
         showLevel(renderer_, canvas_.texture, it->second, canvas_.zoom, false);  // zoom changed: maybe another level
     }
     const ImVec2 p0{v0.x + canvas_.pan.x, v0.y + canvas_.pan.y}, p1{p0.x + w * canvas_.zoom, p0.y + h * canvas_.zoom};
-    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 255));
+    if (game && canvas_.game.kind == "sprite") {
+        // a transparency checkerboard, like Aseprite: squares of a few sprite pixels, only where it shows
+        const float cell = std::max(8.0f, canvas_.zoom * (canvas_.zoom >= 8 ? 1.0f : 4.0f));
+        const ImVec2 c0{std::max(p0.x, v0.x), std::max(p0.y, v0.y)}, c1{std::min(p1.x, v0.x + size.x), std::min(p1.y, v0.y + size.y)};
+        dl->AddRectFilled(c0, c1, IM_COL32(204, 204, 204, 255));
+        if (c1.x > c0.x && c1.y > c0.y) {
+            const int i0 = static_cast<int>(std::floor((c0.x - p0.x) / cell)), j0 = static_cast<int>(std::floor((c0.y - p0.y) / cell));
+            const int i1 = static_cast<int>(std::ceil((c1.x - p0.x) / cell)), j1 = static_cast<int>(std::ceil((c1.y - p0.y) / cell));
+            if (static_cast<long long>(i1 - i0) * (j1 - j0) < 40000) {
+                for (int j = j0; j < j1; ++j)
+                    for (int i = i0 + ((i0 + j) & 1); i < i1; i += 2) {
+                        const ImVec2 a{std::max(c0.x, p0.x + i * cell), std::max(c0.y, p0.y + j * cell)};
+                        const ImVec2 b{std::min(c1.x, p0.x + (i + 1) * cell), std::min(c1.y, p0.y + (j + 1) * cell)};
+                        if (b.x > a.x && b.y > a.y) dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 255));
+                    }
+            }
+        }
+    } else {
+        dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 255));
+    }
     dl->AddImage(t.id(), p0, p1);
     dl->AddRect({p0.x - 1, p0.y - 1}, {p1.x + 1, p1.y + 1}, ImGui::GetColorU32(ImGuiCol_Border));
     if (glyphTool(canvas_.tool) && toolAvailable(canvas_.tool)) {  // the glyph editor covers the overview

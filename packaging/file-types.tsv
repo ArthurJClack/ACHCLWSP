@@ -28,6 +28,7 @@
 .gltf	model	model/gltf+json	no
 .fbx	model	application/x-fbx	no
 .wwmodel	model	application/x-wetwaresuite-wwmodel	yes
+.tscn	game	application/x-godot-scene	no
 .tmx	game	application/x-tiled-tmx	no
 .tmj	game	application/x-tiled-tmj	no
 .ldtk	game	application/x-ldtk	no
