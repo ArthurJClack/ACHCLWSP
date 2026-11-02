@@ -49,7 +49,7 @@ bool parseHex(const std::string& text, float out[4]) {
 
 bool isLevelTool(GameTool t) {
     return t == GameTool::Paint || t == GameTool::Rect || t == GameTool::Erase || t == GameTool::Fill || t == GameTool::Object ||
-           t == GameTool::Pick || t == GameTool::Move;
+           t == GameTool::Pick || t == GameTool::Move || t == GameTool::Terrain || t == GameTool::Stamp || t == GameTool::ObjSelect;
 }
 
 bool isSpriteTool(GameTool t) {
@@ -60,7 +60,7 @@ bool isSpriteTool(GameTool t) {
 // Drag tools act on the rectangle between press and release; the others on each point.
 bool dragsShape(GameTool t) {
     return t == GameTool::Rect || t == GameTool::Erase || t == GameTool::Object || t == GameTool::Line || t == GameTool::Box ||
-           t == GameTool::Ellipse;
+           t == GameTool::Ellipse || t == GameTool::Stamp;
 }
 
 }  // namespace
@@ -117,6 +117,36 @@ void Shell::gameSync() {
         g.layer = std::clamp(g.layer, 0, std::max(0, static_cast<int>(g.layers.size()) - 1));
         g.tileset = std::clamp(g.tileset, 0, std::max(0, static_cast<int>(g.tilesets.size()) - 1));
         g.tilesetFor.clear();  // tiles may have been redrawn
+        // objects, for picking them on the canvas
+        g.objects.clear();
+        Result ol = query("levels.object_list", {{"doc", currentDoc_}});
+        if (ol.ok) {
+            const auto ids = splitComma(tp::text(ol, "ids"));
+            const auto boxes = splitComma(tp::text(ol, "boxes"));
+            std::vector<std::string> names, types, lays;
+            auto bar = [](const std::string& t) {
+                std::vector<std::string> out;
+                std::stringstream ss(t);
+                std::string item;
+                while (std::getline(ss, item, '|')) out.push_back(item);
+                if (!t.empty() && t.back() == '|') out.emplace_back();
+                return out;
+            };
+            names = bar(tp::text(ol, "names"));
+            types = bar(tp::text(ol, "types"));
+            lays = bar(tp::text(ol, "layers"));
+            for (std::size_t i = 0; i < ids.size() && (i + 1) * 4 <= boxes.size(); ++i) {
+                GameCanvas::LevelObject o;
+                o.id = std::atoi(ids[i].c_str());
+                for (int k = 0; k < 4; ++k) o.box[k] = std::atof(boxes[i * 4 + static_cast<std::size_t>(k)].c_str());
+                if (i < names.size()) o.name = names[i];
+                if (i < types.size()) o.type = types[i];
+                if (i < lays.size()) o.layer = lays[i];
+                g.objects.push_back(o);
+            }
+        }
+        if (std::none_of(g.objects.begin(), g.objects.end(), [&](const auto& o) { return o.id == g.selObject; })) g.selObject = 0;
+        g.objFor = -1;
         return;
     }
     Result r = query("forge.sprite_info", {{"doc", currentDoc_}});
@@ -197,7 +227,10 @@ void Shell::gameTools() {
         {"Rect", GameTool::Rect, "R", "Drag a rectangle of the chosen tile"},
         {"Erase", GameTool::Erase, "E", "Drag over cells to clear them"},
         {"Fill", GameTool::Fill, "G", "Click to flood-fill the area with the chosen tile"},
+        {"Terrain", GameTool::Terrain, "T", "Paint terrain: edges and corners fix themselves (Shift erases)"},
+        {"Stamp", GameTool::Stamp, "C", "Drag to copy a block of the map, then click to stamp it (Esc picks again)"},
         {"Object", GameTool::Object, "O", "Drag a box (or click for a point) on the object layer"},
+        {"Select", GameTool::ObjSelect, "S", "Click an object to select it, drag to move (Ctrl snaps to cells), drag its corner to resize, Delete removes"},
         {"Pick", GameTool::Pick, "I", "Click a cell to choose its tile"}};
     static const Item sprite[] = {
         {"Move", GameTool::Move, "V", "Drag to move around, scroll to zoom"},
@@ -259,6 +292,9 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
         for (int y = 0; y <= rows; ++y) dl->AddLine(screenOf(0, y * ch), screenOf(cols * cw, y * ch), line);
     }
 
+    if (isLevel && g.tool == GameTool::ObjSelect) return gameObjectInput(dl, origin, hovered, active, shrinkX, shrinkY);
+    if (isLevel && g.tool == GameTool::Stamp && g.haveStamp && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) g.haveStamp = false;
+
     const ImVec2 img = toImage(io.MousePos);
     const int cx = static_cast<int>(std::floor(img.x / cw)), cy = static_cast<int>(std::floor(img.y / ch));
     const bool inside = cx >= 0 && cy >= 0 && cx < cols && cy < rows;
@@ -274,7 +310,7 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
     if (g.dragging) {
         const int ex = std::clamp(cx, 0, std::max(0, cols - 1)), ey = std::clamp(cy, 0, std::max(0, rows - 1));
         g.dragTo = {static_cast<float>(ex), static_cast<float>(ey)};
-        const bool path = g.tool == GameTool::Paint || g.tool == GameTool::Pencil || g.tool == GameTool::Eraser;
+        const bool path = g.tool == GameTool::Paint || g.tool == GameTool::Pencil || g.tool == GameTool::Eraser || g.tool == GameTool::Terrain;
         if (path && inside && (g.points.size() < 2 || g.points[g.points.size() - 2] != cx || g.points.back() != cy)) {
             // tiles: fill in the cells a fast drag jumped over (the pencil joins its dots itself)
             if (isLevel && g.points.size() >= 2) {
@@ -299,7 +335,7 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
 
     // what the tool will do
     const ImU32 fill = IM_COL32(255, 255, 255, 70);
-    if (g.dragging && dragsShape(g.tool)) {
+    if (g.dragging && dragsShape(g.tool) && !(g.tool == GameTool::Stamp && g.haveStamp)) {
         const float x0 = std::min(g.dragFrom.x, g.dragTo.x), y0 = std::min(g.dragFrom.y, g.dragTo.y);
         const float x1 = std::max(g.dragFrom.x, g.dragTo.x) + 1, y1 = std::max(g.dragFrom.y, g.dragTo.y) + 1;
         if (g.tool == GameTool::Line) {
@@ -322,11 +358,19 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
     }
     if (hovered && inside && !g.dragging) {
         const ImVec2 a = screenOf(cx * cw, cy * ch), b = screenOf((cx + 1) * cw, (cy + 1) * ch);
-        // a ghost of the tile about to go down
+        // a ghost of the tile (or block of tiles) about to go down
+        const bool block = g.tool == GameTool::Paint && (g.brushW > 1 || g.brushH > 1);
         if (isLevel && (g.tool == GameTool::Paint || g.tool == GameTool::Rect || g.tool == GameTool::Fill) && g.tilesetTex.tex && g.tsTiles > 0) {
             const int c = std::max(1, g.tsColumns), r = std::max(1, (g.tsTiles + c - 1) / c);
+            const int bw = block ? g.brushW : 1, bh = block ? g.brushH : 1;
             const float u0 = static_cast<float>(g.tile % c) / c, v0 = static_cast<float>(g.tile / c) / r;
-            dl->AddImage(g.tilesetTex.id(), a, b, {u0, v0}, {u0 + 1.0f / c, v0 + 1.0f / r}, IM_COL32(255, 255, 255, 170));
+            const ImVec2 b2 = screenOf((cx + bw) * cw, (cy + bh) * ch);
+            dl->AddImage(g.tilesetTex.id(), a, b2, {u0, v0}, {u0 + static_cast<float>(bw) / c, v0 + static_cast<float>(bh) / r}, IM_COL32(255, 255, 255, 170));
+            if (block) dl->AddRect(a, b2, accent, 0, 0, 1.5f);
+        }
+        if (isLevel && g.tool == GameTool::Stamp && g.haveStamp) {
+            dl->AddRectFilled(a, screenOf((cx + g.stampW) * cw, (cy + g.stampH) * ch), IM_COL32(255, 255, 255, 50));
+            dl->AddRect(a, screenOf((cx + g.stampW) * cw, (cy + g.stampH) * ch), accent, 0, 0, 2);
         }
         dl->AddRect(a, b, accent, 0, 0, 1.5f);
     }
@@ -347,9 +391,36 @@ void Shell::gameLevelRelease() {
     }
     switch (g.tool) {
         case GameTool::Paint: {
+            if ((g.brushW > 1 || g.brushH > 1) && g.tsColumns > 0) {  // a block of tiles goes down where you click
+                Params p{{"layer", layer}, {"x", static_cast<std::int64_t>(g.dragFrom.x)}, {"y", static_cast<std::int64_t>(g.dragFrom.y)}};
+                if (tile.count("tileset")) p["tileset"] = tile["tileset"];
+                p["tileset_rect"] = NumberList{static_cast<double>(g.tile % g.tsColumns), static_cast<double>(g.tile / g.tsColumns),
+                                               static_cast<double>(g.brushW), static_cast<double>(g.brushH)};
+                p["skip_empty"] = false;
+                gameRun("levels.stamp", p, "Stamp tiles");
+                break;
+            }
             Params p = tile;
             p["cells"] = g.points;
             gameRun("levels.paint", p, "Paint tiles");
+            break;
+        }
+        case GameTool::Terrain: {
+            Params p{{"layer", layer}, {"cells", g.points}, {"erase", ImGui::GetIO().KeyShift}};
+            if (tile.count("tileset")) p["tileset"] = tile["tileset"];
+            gameRun("levels.terrain", p, ImGui::GetIO().KeyShift ? "Erase terrain" : "Paint terrain");
+            break;
+        }
+        case GameTool::Stamp: {
+            if (!g.haveStamp) {
+                g.haveStamp = true;
+                g.stampX = x0, g.stampY = y0, g.stampW = w, g.stampH = h, g.stampLayer = layer;
+                break;
+            }
+            gameRun("levels.stamp", {{"layer", layer}, {"x", static_cast<std::int64_t>(g.dragTo.x)}, {"y", static_cast<std::int64_t>(g.dragTo.y)},
+                                     {"from_layer", g.stampLayer}, {"from_x", static_cast<std::int64_t>(g.stampX)}, {"from_y", static_cast<std::int64_t>(g.stampY)},
+                                     {"width", static_cast<std::int64_t>(g.stampW)}, {"height", static_cast<std::int64_t>(g.stampH)}},
+                    "Stamp");
             break;
         }
         case GameTool::Rect: {
@@ -460,6 +531,8 @@ void Shell::gameLevelSide() {
     ImGui::SameLine();
     if (ImGui::SmallButton("+ Objects")) addLayer("objects", "Objects");
 
+    if (g.tool == GameTool::ObjSelect || g.selObject) gameObjectPanel();
+
     ImGui::Spacing();
     tp::title("Tiles", 1.05f);
     if (g.tilesets.empty()) {
@@ -495,6 +568,7 @@ void Shell::gameLevelSide() {
     }
     g.tile = std::clamp(g.tile, 0, std::max(0, g.tsTiles - 1));
     ImGui::Text("Tile %d", g.tile);
+    if (g.tool == GameTool::Terrain) tp::muted("Terrain uses the tileset's edge tiles (its Wang set, or a 16/47-tile auto-tile sheet).");
     if (!g.tilesetTex.tex || g.tsTiles == 0) return;
     // the tileset, scaled to the panel's width (whole steps when it fits), each tile a click target
     const int rows = (g.tsTiles + g.tsColumns - 1) / g.tsColumns;
@@ -507,13 +581,30 @@ void Shell::gameLevelSide() {
     dl->AddRectFilled(at, {at.x + size.x, at.y + size.y}, IM_COL32(60, 60, 60, 255));
     dl->AddImage(g.tilesetTex.id(), at, {at.x + size.x, at.y + size.y});
     const float tw = g.tsTileW * scale, th = g.tsTileH * scale;
-    if (ImGui::IsItemClicked()) {
+    // click a tile, or drag over several for a block brush (a tree, a house) like Tiled
+    {
         const ImVec2 m = ImGui::GetIO().MousePos;
-        const int c = static_cast<int>((m.x - at.x) / tw), r = static_cast<int>((m.y - at.y) / th);
-        const int id = r * g.tsColumns + c;
-        if (c >= 0 && c < g.tsColumns && id >= 0 && id < g.tsTiles) {
-            g.tile = id;
-            if (g.tool == GameTool::Move || g.tool == GameTool::Pick || g.tool == GameTool::Erase || g.tool == GameTool::Object) g.tool = GameTool::Paint;
+        const int c = std::clamp(static_cast<int>((m.x - at.x) / tw), 0, g.tsColumns - 1);
+        const int r = std::clamp(static_cast<int>((m.y - at.y) / th), 0, std::max(0, rows - 1));
+        if (ImGui::IsItemActivated()) {
+            g.tsDragging = true;
+            g.tsFrom = r * g.tsColumns + c;
+        }
+        if (g.tsDragging) {
+            const int fc = g.tsFrom % g.tsColumns, fr = g.tsFrom / g.tsColumns;
+            const int c0 = std::min(fc, c), r0 = std::min(fr, r);
+            const int id = r0 * g.tsColumns + c0;
+            if (id >= 0 && id < g.tsTiles) {
+                g.tile = id;
+                g.brushW = std::abs(c - fc) + 1;
+                g.brushH = std::abs(r - fr) + 1;
+            }
+            if (!ImGui::IsItemActive()) {
+                g.tsDragging = false;
+                if (g.tool == GameTool::Move || g.tool == GameTool::Pick || g.tool == GameTool::Erase || g.tool == GameTool::Object ||
+                    g.tool == GameTool::ObjSelect || g.tool == GameTool::Stamp || g.tool == GameTool::Terrain)
+                    g.tool = GameTool::Paint;
+            }
         }
     }
     if (ImGui::IsItemHovered()) {
@@ -522,7 +613,8 @@ void Shell::gameLevelSide() {
         if (r * g.tsColumns + c < g.tsTiles) ImGui::SetTooltip("tile %d", r * g.tsColumns + c);
     }
     const ImVec2 s0{at.x + (g.tile % g.tsColumns) * tw, at.y + static_cast<float>(g.tile / g.tsColumns) * th};
-    dl->AddRect(s0, {s0.x + tw, s0.y + th}, ImGui::ColorConvertFloat4ToU32(accent_), 0, 0, 2.5f);
+    dl->AddRect(s0, {s0.x + tw * g.brushW, s0.y + th * g.brushH}, ImGui::ColorConvertFloat4ToU32(accent_), 0, 0, 2.5f);
+    if (g.brushW > 1 || g.brushH > 1) ImGui::Text("Block %d x %d: Paint stamps it", g.brushW, g.brushH);
 }
 
 void Shell::gameSpriteSide() {
@@ -628,6 +720,122 @@ void Shell::gameSpriteSide() {
         ImGui::PopID();
     }
     if (g.palette.empty()) tp::muted("Sprite palette (ribbon) loads others: db16, db32, gameboy...");
+}
+
+// Objects: click to select, drag to move, drag the corner to resize, Delete removes.
+void Shell::gameObjectInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active, float sx, float sy) {
+    GameCanvas& g = canvas_.game;
+    ImGuiIO& io = ImGui::GetIO();
+    const float z = canvas_.zoom;
+    const ImU32 accent = ImGui::ColorConvertFloat4ToU32(accent_);
+    auto screenOf = [&](double x, double y) { return ImVec2{origin.x + static_cast<float>(x) * sx * z, origin.y + static_cast<float>(y) * sy * z}; };
+    const ImVec2 img = toImage(io.MousePos);
+    const double mx = img.x / sx, my = img.y / sy;  // map px
+    const double slop = 5.0 / std::max(0.01f, z * sx);
+    auto selected = [&]() -> GameCanvas::LevelObject* {
+        for (auto& o : g.objects)
+            if (o.id == g.selObject) return &o;
+        return nullptr;
+    };
+    // every object's outline, the selection brighter with a resize handle
+    for (const auto& o : g.objects) {
+        const bool sel = o.id == g.selObject;
+        dl->AddRect(screenOf(o.box[0], o.box[1]), screenOf(o.box[2], o.box[3]), sel ? accent : IM_COL32(255, 255, 255, 90), 0, 0, sel ? 2.0f : 1.0f);
+    }
+    GameCanvas::LevelObject* so = selected();
+    if (so) {
+        const ImVec2 h = screenOf(so->box[2], so->box[3]);
+        dl->AddRectFilled({h.x - 4, h.y - 4}, {h.x + 4, h.y + 4}, accent);
+    }
+    if (!io.WantTextInput && so && (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
+        gameRun("levels.object_remove", {{"id", static_cast<std::int64_t>(so->id)}}, "Delete object");
+        g.selObject = 0;
+        return;
+    }
+    if (hovered && ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        g.objDrag = 0;
+        if (so && std::abs(mx - so->box[2]) <= slop * 1.5 && std::abs(my - so->box[3]) <= slop * 1.5) {
+            g.objDrag = 2;
+        } else {
+            g.selObject = 0;
+            for (auto it = g.objects.rbegin(); it != g.objects.rend(); ++it) {  // topmost first
+                if (mx >= it->box[0] - slop && mx <= it->box[2] + slop && my >= it->box[1] - slop && my <= it->box[3] + slop) {
+                    g.selObject = it->id;
+                    g.objDrag = 1;
+                    break;
+                }
+            }
+            g.objFor = -1;
+        }
+        g.objFrom = {static_cast<float>(mx), static_cast<float>(my)};
+    }
+    so = selected();
+    if (!g.objDrag || !so) return;
+    double dx = std::round(mx - g.objFrom.x), dy = std::round(my - g.objFrom.y);  // whole pixels
+    if (io.KeyCtrl) {  // whole cells
+        dx = std::round(dx / g.tileW) * g.tileW;
+        dy = std::round(dy / g.tileH) * g.tileH;
+    }
+    double b[4] = {so->box[0], so->box[1], so->box[2], so->box[3]};
+    if (g.objDrag == 1) {
+        b[0] += dx, b[2] += dx, b[1] += dy, b[3] += dy;
+    } else {
+        b[2] = std::max(b[0] + 1, b[2] + dx);
+        b[3] = std::max(b[1] + 1, b[3] + dy);
+    }
+    dl->AddRectFilled(screenOf(b[0], b[1]), screenOf(b[2], b[3]), IM_COL32(255, 255, 255, 50));
+    dl->AddRect(screenOf(b[0], b[1]), screenOf(b[2], b[3]), accent, 0, 0, 2);
+    if (active) return;
+    const int mode = g.objDrag;
+    g.objDrag = 0;
+    if (std::abs(dx) + std::abs(dy) < 0.5) return;
+    if (mode == 1) {
+        gameRun("levels.object_move", {{"id", static_cast<std::int64_t>(so->id)}, {"dx", dx}, {"dy", dy}}, "Move object");
+    } else {
+        gameRun("levels.object_set", {{"id", static_cast<std::int64_t>(so->id)}, {"width", b[2] - b[0]}, {"height", b[3] - b[1]}}, "Resize object");
+    }
+}
+
+void Shell::gameObjectPanel() {
+    GameCanvas& g = canvas_.game;
+    ImGui::Spacing();
+    tp::title("Object", 1.05f);
+    const GameCanvas::LevelObject* so = nullptr;
+    for (const auto& o : g.objects)
+        if (o.id == g.selObject) so = &o;
+    if (!so) {
+        tp::muted(g.objects.empty() ? "No objects yet: draw one with Object (O)." : "Click an object on the map to edit it.");
+        return;
+    }
+    if (g.objFor != so->id) {
+        g.objFor = so->id;
+        std::snprintf(g.objName, sizeof g.objName, "%s", so->name.c_str());
+        std::snprintf(g.objType, sizeof g.objType, "%s", so->type.c_str());
+        g.objKey[0] = g.objValue[0] = 0;
+    }
+    const auto id = static_cast<std::int64_t>(so->id);
+    ImGui::TextDisabled("#%d on %s, %g x %g px at %g, %g", so->id, so->layer.c_str(), so->box[2] - so->box[0], so->box[3] - so->box[1], so->box[0], so->box[1]);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##oname", "name", g.objName, sizeof g.objName, ImGuiInputTextFlags_EnterReturnsTrue) || ImGui::IsItemDeactivatedAfterEdit())
+        if (so->name != g.objName) gameRun("levels.object_set", {{"id", id}, {"name", std::string(g.objName)}}, "Rename object");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##otype", "type (spawn, enemy, door...)", g.objType, sizeof g.objType, ImGuiInputTextFlags_EnterReturnsTrue) ||
+        ImGui::IsItemDeactivatedAfterEdit())
+        if (so->type != g.objType) gameRun("levels.object_set", {{"id", id}, {"type", std::string(g.objType)}}, "Set object type");
+    // custom properties, one at a time (empty value removes it)
+    const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
+    ImGui::SetNextItemWidth(half);
+    ImGui::InputTextWithHint("##okey", "property", g.objKey, sizeof g.objKey);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(half);
+    if (ImGui::InputTextWithHint("##oval", "value", g.objValue, sizeof g.objValue, ImGuiInputTextFlags_EnterReturnsTrue) && g.objKey[0]) {
+        gameRun("levels.object_set", {{"id", id}, {"key", std::string(g.objKey)}, {"value", std::string(g.objValue)}}, "Set property");
+        g.objKey[0] = g.objValue[0] = 0;
+    }
+    if (ImGui::SmallButton("Delete object")) {
+        gameRun("levels.object_remove", {{"id", id}}, "Delete object");
+        g.selObject = 0;
+    }
 }
 
 }  // namespace wetwaresuite::gui

@@ -840,6 +840,29 @@ void testGodotAndWorld(const fs::path& dir) {
     CHECK(run(s, "levels.layer_add doc=lvl1 name=deco").ok);
     CHECK(run(s, "levels.fill_rect doc=lvl1 layer=deco x=0 y=0 width=3 height=2 tile=0 tileset=blob").ok);
     CHECK(run(s, "levels.autotile doc=lvl1 layer=deco mode=blob tileset=blob edges=empty").ok);
+    // the terrain brush: paint and fix edges in one undoable step
+    {
+        Session t;
+        registerCommands(t);
+        CHECK(run(t, "levels.new width=8 height=6").ok);
+        CHECK(run(t, "levels.tileset_placeholder doc=lvl1 path=" + q(dir / "art" / "auto.png") + " style=autotile").ok);
+        CHECK(run(t, "levels.terrain doc=lvl1 cells=2,2,3,2,4,2").ok);
+        const Map& tm = mapOf(t, "lvl1");
+        const std::uint32_t first = tm.tilesets[0].firstGid;
+        CHECK(tm.at(tm.layers[0], 3, 2) == first + 2 + 8);  // east and west neighbours
+        CHECK(tm.at(tm.layers[0], 2, 2) == first + 2);       // east only
+        CHECK(run(t, "levels.terrain doc=lvl1 cells=4,2 erase=true").ok);
+        CHECK(mapOf(t, "lvl1").at(mapOf(t, "lvl1").layers[0], 4, 2) == 0);
+        CHECK(mapOf(t, "lvl1").at(mapOf(t, "lvl1").layers[0], 3, 2) == first + 8);  // its neighbour's edge followed
+        CHECK(run(t, "undo").ok);
+        CHECK(mapOf(t, "lvl1").at(mapOf(t, "lvl1").layers[0], 4, 2) != 0);
+        // objects report where they are, for clicking
+        CHECK(run(t, "levels.layer_add doc=lvl1 name=things kind=objects").ok);
+        CHECK(run(t, "levels.object_add doc=lvl1 layer=things name=spawn x=16 y=32 width=16 height=8").ok);
+        Result ol = run(t, "levels.object_list doc=lvl1");
+        CHECK(ol.field("boxes") && std::get<std::string>(*ol.field("boxes")) == "16,32,32,40");
+        CHECK(std::get<std::string>(*ol.field("names")) == "spawn");
+    }
     const std::string lvl1 = "lvl1";
     const Map& m1 = mapOf(s, lvl1);
     CHECK(m1.at(m1.layers[1], 0, 0) == m1.tilesets[1].firstGid + static_cast<std::uint32_t>(blobIndex(4 | 8 | 16)));

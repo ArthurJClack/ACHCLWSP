@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <array>
 #include <set>
@@ -1086,6 +1087,79 @@ void registerPaintCommands(Session& session) {
             });
 }
 
+Result autotileEdit(LevelDoc& doc, const Params& p) {
+    Map& m = doc.map;
+    std::string error;
+    Layer* src = tileLayer(m, p, error);
+    if (!src) return Result::failure(error);
+    Layer* dst = has(p, "target") ? tileLayer(m, p, error, "target") : src;
+    if (!dst) {
+        if (m.layer(stringParam(p, "target"))) return Result::failure(error);
+        const int si = m.layerIndex(src->name);
+        dst = &m.addLayer(stringParam(p, "target"), LayerKind::Tiles, si + 1);
+        src = &m.layers[static_cast<std::size_t>(si)];
+    }
+    const std::string mode = stringParam(p, "mode", "4bit");
+    const std::uint32_t span = mode == "blob" ? 47 : 16;
+    std::uint32_t base = 0;
+    const Tileset* wangTs = nullptr;
+    const WangSet* wang = nullptr;
+    if (mode == "wang") {
+        if (m.tilesets.empty()) return Result::failure("the map has no tileset");
+        for (const auto& t : m.tilesets) {
+            if (has(p, "tileset") && &t != m.tileset(stringParam(p, "tileset"))) continue;
+            for (const auto& w : t.wangsets) {
+                if (!wang && (!has(p, "wangset") || w.name == stringParam(p, "wangset"))) {
+                    wang = &w;
+                    wangTs = &t;
+                }
+            }
+        }
+        if (!wang) {
+            return Result::failure(has(p, "wangset") ? "no Wang set called '" + stringParam(p, "wangset") + "' (levels.info lists them)"
+                                                     : "no Wang set in the tilesets; add one with levels.wangset");
+        }
+    } else {
+        if (!gidFor(m, intParam(p, "base", 0), p, base, error)) return Result::failure(error);
+        if (const Tileset* t = m.tilesetFor(base); t && !t->contains(base + span - 1)) {
+            return Result::failure("base " + std::to_string(intParam(p, "base", 0)) + " leaves fewer than " + std::to_string(span) + " tiles in " + t->name);
+        }
+    }
+    const int color = static_cast<int>(intParam(p, "color", 1));
+    std::set<std::uint32_t> wangTiles;  // tiles of the set that show the terrain stay terrain
+    if (wang) {
+        for (const auto& [tile, id] : wang->tiles) {
+            if (std::find(id.begin(), id.end(), color) != id.end()) wangTiles.insert(wangTs->firstGid + static_cast<std::uint32_t>(tile));
+        }
+    }
+    std::set<std::uint32_t> match;
+    std::vector<std::uint32_t> list;
+    if (!gidList(m, listParam(p, "match"), p, list, error)) return Result::failure(error);
+    match.insert(list.begin(), list.end());
+    auto isTerrain = [&](std::uint32_t g) {
+        g &= kGidMask;
+        if (!g) return false;
+        if (match.empty()) return true;
+        if (wang) return match.count(g) > 0 || wangTiles.count(g) > 0;
+        return match.count(g) > 0 || (g >= base && g < base + span);  // already auto-tiled cells stay terrain
+    };
+    const bool edges = stringParam(p, "edges", "solid") == "solid";
+    if (wang) {
+        int unmatched = 0;
+        const int n = autotileWang(m, *src, *dst, isTerrain, *wangTs, *wang, color, static_cast<int>(intParam(p, "other", 0)),
+                                   regionParam(m, p), edges, &unmatched);
+        Result r = edited("auto-tiled " + plural(static_cast<std::size_t>(n), "cell") + " on " + dst->name + " with Wang set " + wang->name +
+                              " (" + wang->type + ")" + (unmatched ? ", " + plural(static_cast<std::size_t>(unmatched), "cell") + " had no exact match" : ""),
+                          p, n);
+        return r.with("unmatched", static_cast<std::int64_t>(unmatched));
+    }
+    const int n = mode == "blob" ? autotileBlob(m, *src, *dst, isTerrain, base, regionParam(m, p), edges)
+                                 : autotile(m, *src, *dst, isTerrain, base, regionParam(m, p), edges);
+    return edited("auto-tiled " + plural(static_cast<std::size_t>(n), "cell") + " on " + dst->name + " with tiles " + tileName(m, base) +
+                      ".." + tileName(m, base + span - 1),
+                  p, n);
+}
+
 void registerGeneratorCommands(Session& session) {
     auto& reg = session.registry();
 
@@ -1112,79 +1186,75 @@ void registerGeneratorCommands(Session& session) {
                  "style=autotile/blob/corner draws templates. Paint rough terrain with any tile, then run this; the "
                  "result can go to another layer (target=).",
                  ps, true},
-                levelCommand(session, [](LevelDoc& doc, const Params& p) {
-                    Map& m = doc.map;
-                    std::string error;
-                    Layer* src = tileLayer(m, p, error);
-                    if (!src) return Result::failure(error);
-                    Layer* dst = has(p, "target") ? tileLayer(m, p, error, "target") : src;
-                    if (!dst) {
-                        if (m.layer(stringParam(p, "target"))) return Result::failure(error);
-                        const int si = m.layerIndex(src->name);
-                        dst = &m.addLayer(stringParam(p, "target"), LayerKind::Tiles, si + 1);
-                        src = &m.layers[static_cast<std::size_t>(si)];
-                    }
-                    const std::string mode = stringParam(p, "mode", "4bit");
-                    const std::uint32_t span = mode == "blob" ? 47 : 16;
-                    std::uint32_t base = 0;
-                    const Tileset* wangTs = nullptr;
-                    const WangSet* wang = nullptr;
-                    if (mode == "wang") {
-                        if (m.tilesets.empty()) return Result::failure("the map has no tileset");
-                        for (const auto& t : m.tilesets) {
-                            if (has(p, "tileset") && &t != m.tileset(stringParam(p, "tileset"))) continue;
-                            for (const auto& w : t.wangsets) {
-                                if (!wang && (!has(p, "wangset") || w.name == stringParam(p, "wangset"))) {
-                                    wang = &w;
-                                    wangTs = &t;
-                                }
+                levelCommand(session, autotileEdit));
+    }
+
+    reg.add({"levels.terrain", "Terrain Brush",
+             "Paint (or erase) terrain in cells and fix up the edges around them in one step, like Tiled's terrain "
+             "brush: the cells become terrain and they and their neighbours get the right edge and corner tiles. mode=auto "
+             "uses the tileset's Wang set when it has one, else blob for a 47-tile set, else 4bit.",
+             {docParam(), layerParam("tile layer holding the terrain (default: the top tile layer)"),
+              {"cells", ParamType::NumberList, "x,y pairs of the cells", true}, {"erase", ParamType::Bool, "take the terrain away instead", false, {}, false},
+              {"mode", ParamType::String, "how edges are chosen", false, {"auto", "4bit", "blob", "wang"}, std::string("auto")},
+              {"base", ParamType::Int, "4bit/blob: tile id of the first auto-tile", false, {}, std::int64_t{0}},
+              {"wangset", ParamType::String, "wang: the Wang set's name", false}, {"color", ParamType::Int, "wang: the terrain colour", false, {}, std::int64_t{1}},
+              tilesetParam(), {"edges", ParamType::String, "whether cells beyond the map count as terrain", false, {"solid", "empty"}, std::string("solid")},
+              previewParam()},
+             true},
+            levelCommand(session, [](LevelDoc& doc, const Params& p) {
+                Map& m = doc.map;
+                std::string error;
+                Layer* l = tileLayer(m, p, error);
+                if (!l) return Result::failure(error);
+                const NumberList cells = listParam(p, "cells");
+                if (cells.empty() || cells.size() % 2) return Result::failure("give cells=x1,y1,x2,y2,...");
+                if (m.tilesets.empty()) return Result::failure("the map has no tileset (levels.tileset_placeholder style=autotile draws one)");
+                const Tileset* ts = has(p, "tileset") ? m.tileset(stringParam(p, "tileset")) : &m.tilesets.front();
+                if (!ts) return Result::failure("no tileset '" + stringParam(p, "tileset") + "'");
+                std::string mode = stringParam(p, "mode", "auto");
+                if (mode == "auto") mode = !ts->wangsets.empty() ? "wang" : ts->tileCount >= 47 ? "blob" : "4bit";
+                // the tile a fresh terrain cell gets before its edges are worked out
+                std::uint32_t marker = ts->firstGid + static_cast<std::uint32_t>(intParam(p, "base", 0));
+                if (mode == "wang") {
+                    const int color = static_cast<int>(intParam(p, "color", 1));
+                    for (const auto& w : ts->wangsets) {
+                        if (has(p, "wangset") && w.name != stringParam(p, "wangset")) continue;
+                        bool found = false;
+                        for (const auto& [tile, id] : w.tiles) {
+                            if (std::all_of(id.begin(), id.end(), [&](int c) { return c == 0 || c == color; })) {
+                                marker = ts->firstGid + static_cast<std::uint32_t>(tile);
+                                found = true;
+                                break;
                             }
                         }
-                        if (!wang) {
-                            return Result::failure(has(p, "wangset") ? "no Wang set called '" + stringParam(p, "wangset") + "' (levels.info lists them)"
-                                                                     : "no Wang set in the tilesets; add one with levels.wangset");
-                        }
-                    } else {
-                        if (!gidFor(m, intParam(p, "base", 0), p, base, error)) return Result::failure(error);
-                        if (const Tileset* t = m.tilesetFor(base); t && !t->contains(base + span - 1)) {
-                            return Result::failure("base " + std::to_string(intParam(p, "base", 0)) + " leaves fewer than " + std::to_string(span) + " tiles in " + t->name);
-                        }
+                        if (found) break;
                     }
-                    const int color = static_cast<int>(intParam(p, "color", 1));
-                    std::set<std::uint32_t> wangTiles;  // tiles of the set that show the terrain stay terrain
-                    if (wang) {
-                        for (const auto& [tile, id] : wang->tiles) {
-                            if (std::find(id.begin(), id.end(), color) != id.end()) wangTiles.insert(wangTs->firstGid + static_cast<std::uint32_t>(tile));
-                        }
-                    }
-                    std::set<std::uint32_t> match;
-                    std::vector<std::uint32_t> list;
-                    if (!gidList(m, listParam(p, "match"), p, list, error)) return Result::failure(error);
-                    match.insert(list.begin(), list.end());
-                    auto isTerrain = [&](std::uint32_t g) {
-                        g &= kGidMask;
-                        if (!g) return false;
-                        if (match.empty()) return true;
-                        if (wang) return match.count(g) > 0 || wangTiles.count(g) > 0;
-                        return match.count(g) > 0 || (g >= base && g < base + span);  // already auto-tiled cells stay terrain
-                    };
-                    const bool edges = stringParam(p, "edges", "solid") == "solid";
-                    if (wang) {
-                        int unmatched = 0;
-                        const int n = autotileWang(m, *src, *dst, isTerrain, *wangTs, *wang, color, static_cast<int>(intParam(p, "other", 0)),
-                                                   regionParam(m, p), edges, &unmatched);
-                        Result r = edited("auto-tiled " + plural(static_cast<std::size_t>(n), "cell") + " on " + dst->name + " with Wang set " + wang->name +
-                                              " (" + wang->type + ")" + (unmatched ? ", " + plural(static_cast<std::size_t>(unmatched), "cell") + " had no exact match" : ""),
-                                          p, n);
-                        return r.with("unmatched", static_cast<std::int64_t>(unmatched));
-                    }
-                    const int n = mode == "blob" ? autotileBlob(m, *src, *dst, isTerrain, base, regionParam(m, p), edges)
-                                                 : autotile(m, *src, *dst, isTerrain, base, regionParam(m, p), edges);
-                    return edited("auto-tiled " + plural(static_cast<std::size_t>(n), "cell") + " on " + dst->name + " with tiles " + tileName(m, base) +
-                                      ".." + tileName(m, base + span - 1),
-                                  p, n);
-                }));
-    }
+                }
+                const bool erase = boolParam(p, "erase", false);
+                int x0 = m.width, y0 = m.height, x1 = -1, y1 = -1;
+                for (std::size_t i = 0; i + 1 < cells.size(); i += 2) {
+                    const int x = static_cast<int>(cells[i]), y = static_cast<int>(cells[i + 1]);
+                    if (!m.inside(x, y)) continue;
+                    if (erase) m.set(*l, x, y, 0);
+                    else if (!(m.at(*l, x, y) & kGidMask)) m.set(*l, x, y, marker);
+                    x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+                }
+                if (x1 < 0) return Result::failure("all the cells are outside the map");
+                Params q = p;
+                q.erase("cells");
+                q.erase("erase");
+                q["mode"] = mode;
+                q["layer"] = l->name;
+                if (!has(p, "tileset")) q["tileset"] = ts->name;
+                // the painted cells and one ring around them, whose edges change too
+                q["x"] = static_cast<std::int64_t>(std::max(0, x0 - 1));
+                q["y"] = static_cast<std::int64_t>(std::max(0, y0 - 1));
+                q["width"] = static_cast<std::int64_t>(std::min(m.width - 1, x1 + 1) - std::max(0, x0 - 1) + 1);
+                q["height"] = static_cast<std::int64_t>(std::min(m.height - 1, y1 + 1) - std::max(0, y0 - 1) + 1);
+                Result r = autotileEdit(doc, q);
+                if (r.ok) r.message = std::string(erase ? "erased" : "painted") + " terrain in " + plural(cells.size() / 2, "cell") + "; " + r.message;
+                return r;
+            }));
 
     {
         std::vector<ParamSpec> ps{docParam(), layerParam(),
@@ -1551,18 +1621,31 @@ void registerObjectCommands(Session& session) {
                 const Map& m = doc.map;
                 std::string lines;
                 std::size_t n = 0;
-                std::string ids;
+                std::string ids, boxes, names, types, layerNames;
                 for (const auto& l : m.layers) {
                     if (has(p, "layer") && m.layer(stringParam(p, "layer")) != &l) continue;
                     for (const auto& o : l.objects) {
                         if (has(p, "type") && o.type != stringParam(p, "type")) continue;
                         lines += "\n  " + objectLine(o, l.name);
                         ids += (ids.empty() ? "" : ",") + std::to_string(o.id);
+                        // where it is on the map, for clicking it in the window
+                        double x0 = o.x, y0 = o.y, x1 = o.x + o.width, y1 = o.y + o.height;
+                        for (const auto& pt : o.points) {
+                            x0 = std::min(x0, o.x + pt.x), y0 = std::min(y0, o.y + pt.y);
+                            x1 = std::max(x1, o.x + pt.x), y1 = std::max(y1, o.y + pt.y);
+                        }
+                        x0 += l.offsetX, x1 += l.offsetX, y0 += l.offsetY, y1 += l.offsetY;
+                        char box[160];
+                        std::snprintf(box, sizeof box, "%s%g,%g,%g,%g", boxes.empty() ? "" : ",", x0, y0, x1, y1);
+                        boxes += box;
+                        names += (names.empty() && n == 0 ? "" : "|") + o.name;
+                        types += (types.empty() && n == 0 ? "" : "|") + o.type;
+                        layerNames += (layerNames.empty() && n == 0 ? "" : "|") + l.name;
                         ++n;
                     }
                 }
                 Result r = edited(plural(n, "object") + lines, p);
-                return r.with("count", static_cast<std::int64_t>(n)).with("ids", ids);
+                return r.with("count", static_cast<std::int64_t>(n)).with("ids", ids).with("boxes", boxes).with("names", names).with("types", types).with("layers", layerNames);
             }, false));
 }
 

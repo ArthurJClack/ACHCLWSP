@@ -676,10 +676,27 @@ Claude calls `levels_world_new`, `levels_world_add` for each map (making the new
 Opening a `.tmx`, `.tmj` or `.ldtk` file in the game app's window (a `.world` file opens each of its maps) shows the level on the canvas with click tools above it and the layers and tiles beside it:
 
 - **Paint** (click or drag over cells), **Rect** (drag a rectangle), **Erase** (drag over cells), **Fill** (flood fill) and **Pick** (take the tile under the mouse) work on the tile layer chosen on the right; the tile goes down where a ghost of it shows under the mouse.
+- **Terrain (T)** paints terrain like Tiled's terrain brush: drag over cells and they, and the cells around them, get the right edge and corner tiles as you go (the tileset's Wang set if it has one, else its 16- or 47-tile auto-tile sheet). Hold **Shift** to erase terrain; the edges around the hole follow.
+- **Stamp (C)**: drag over a block of the map to copy it, then click to stamp copies anywhere (Esc to pick a new block).
 - **Object** drags a box on the chosen object layer (or the top one); `+ Tiles` and `+ Objects` add layers.
-- The tileset shows beside the canvas: click a tile to paint with it. The grid can be turned off.
+- **Select (S)** works on objects: click one to select it, drag it to move it (Ctrl snaps to whole cells), drag its corner handle to resize it, Delete removes it. The panel on the right edits its name, type and custom properties (type a property and a value, press Enter; an empty value removes it).
+- The tileset shows beside the canvas: click a tile to paint with it, or drag over several (a tree, a house) and Paint stamps the whole block where you click. The grid can be turned off.
 
-Each stroke is one `levels.paint`, `levels.fill_rect`, `levels.erase`, `levels.flood_fill` or `levels.object_add` command, so Undo takes back a whole stroke and the history panel names it.
+Each stroke is one `levels.paint`, `levels.terrain`, `levels.stamp`, `levels.fill_rect`, `levels.erase`, `levels.flood_fill`, `levels.object_add`, `levels.object_move` or `levels.object_set` command, so Undo takes back a whole stroke and the history panel names it.
+
+The terrain brush is a command too, for scripts and Claude:
+
+```text
+levels.new width=20 height=12 -> m
+levels.tileset_placeholder doc=$m path=art/auto.png style=autotile
+levels.terrain doc=$m cells=2,2,3,2,4,2,3,3
+levels.terrain doc=$m cells=3,3 erase=true
+```
+
+```text
+painted terrain in 4 cells; auto-tiled 4 cells on ground with tiles auto:0..auto:15
+erased terrain in 1 cell; auto-tiled 1 cell on ground with tiles auto:0..auto:15
+```
 
 ## 10. Auto-tiling in detail
 

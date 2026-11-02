@@ -75,7 +75,7 @@ enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal
 enum class SelectShape { Rect, Ellipse, Lasso, Wand };
 
 // Click tools for game levels (levels.*) and pixel-art sprites (forge.sprite_*), game_view.cpp.
-enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket, Select, Translate, Rotate, Scale };
+enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket, Select, Translate, Rotate, Scale, Terrain, Stamp, ObjSelect };
 
 // A Godot-style scene open on the canvas (scene_view.cpp): the tree, the selected node's
 // inspector, and the fixed 2D view (or 3D orbit) the picture was drawn with.
@@ -115,6 +115,23 @@ struct GameCanvas {
     std::string tilesetFor;  // doc/tileset/change the texture shows
     int tsColumns = 1, tsTiles = 0, tsTileW = 16, tsTileH = 16;
     bool grid = true;
+    int brushW = 1, brushH = 1;  // a block of tiles picked in the tileset: Paint stamps it
+    bool tsDragging = false;
+    int tsFrom = 0;
+    bool haveStamp = false;      // Stamp: the map region copied by the first drag
+    int stampX = 0, stampY = 0, stampW = 1, stampH = 1;
+    std::string stampLayer;
+    struct LevelObject {
+        int id = 0;
+        double box[4] = {0, 0, 0, 0};  // px on the map
+        std::string name, type, layer;
+    };
+    std::vector<LevelObject> objects;
+    int selObject = 0;               // object id, 0 = none
+    int objDrag = 0;                 // 1 move, 2 resize
+    ImVec2 objFrom{0, 0};
+    char objName[96] = {}, objType[96] = {}, objKey[64] = {}, objValue[128] = {};
+    int objFor = -1;
     // sprite
     int frame = 0, frames = 1, spriteLayer = 0, width = 0, height = 0;
     std::vector<std::string> spriteLayers, palette, tags, tagRanges;
@@ -813,6 +830,8 @@ private:
     void gameLevelSide();
     void gameSpriteSide();
     void gameLevelRelease();
+    void gameObjectInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active, float sx, float sy);
+    void gameObjectPanel();
     void gameSpriteRelease();
     // Godot-style scenes on the canvas (scene_view.cpp)
     void sceneSync(bool newDoc);
