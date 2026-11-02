@@ -77,6 +77,14 @@ struct DocData {
     std::map<std::string, std::string> values;  // form fields filled in here
     std::map<std::string, std::string> info;    // Title, Author, Subject, Keywords set here
     int nextMark = 1;
+    // password protection for saved copies (opened with a password: kept, so saving doesn't unlock it)
+    bool protect = false;
+    std::string userPassword, ownerPassword;
+    bool allowPrint = true, allowCopy = true, allowEdit = true;
+    // a digital signature added when it's saved (it has to be the last thing written)
+    bool digital = false;
+    std::string identityPath, reason, location, contact;
+    int signPage = 0;
 };
 
 class PdfDoc : public Document {
@@ -136,6 +144,10 @@ std::string saveBytes(const DocData& d, bool flatten, const std::vector<int>* pa
 fs::path pathFromUtf8(const std::string& s);
 std::string readBytes(const std::string& path);
 void writeBytes(const std::string& path, const std::string& bytes);
+// The signing identity's PEM file: identity= if given, else the suite's own (made on first use).
+std::filesystem::path defaultIdentityPath();
+// The finished file's bytes: password protection and the digital signature put on.
+std::string finishBytes(const DocData& d, std::string bytes);
 std::optional<Color> parseColor(const std::string& text);
 std::string colorText(Color c);
 std::string fmt(double v);  // short number text

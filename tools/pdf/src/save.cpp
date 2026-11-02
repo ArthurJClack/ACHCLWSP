@@ -220,6 +220,25 @@ void markOps(Writer& w, Ops& o, const Mark& m) {
             o.s += rgb(m.color) + " rg\n";
             textOps(w, o, m.text, Font{Family::Serif, false, true}, m.size, m.x, m.y + m.h * 0.75);
         }
+    } else if (m.kind == "ocr") {
+        // the words read off a scan, as invisible text over the picture: it can be searched, selected and copied
+        const Font font{Family::Sans, false, false};
+        const int fid = w.font(font);
+        const std::string fname = "WWF" + std::to_string(static_cast<int>(standardOf(font)));
+        o.font(fname, fid);
+        o.s += "BT 3 Tr\n";
+        std::size_t start = 0;
+        for (std::size_t i = 0; i < m.boxes.size(); ++i) {
+            const std::size_t nl = m.text.find('\n', start);
+            const std::string word = m.text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            start = nl == std::string::npos ? m.text.size() : nl + 1;
+            if (word.empty() || 2 * i + 1 >= m.points.size()) continue;
+            const auto& b = m.boxes[i];
+            const double size = std::max(1.0, m.points[2 * i + 1]), natural = textWidth(font, word, size);
+            const double scale = natural > 0 ? std::clamp(100.0 * b[2] / natural, 10.0, 1000.0) : 100.0;
+            o.s += "1 0 0 -1 " + num(b[0]) + " " + num(m.points[2 * i]) + " Tm /" + fname + " " + num(size) + " Tf " + num(scale) + " Tz " + pdfdoc::text(word) + " Tj\n";
+        }
+        o.s += "ET\n";
     } else if (m.kind == "note") {
         const double x = m.x, y = m.y, z = 18;
         o.s += rgb(m.color) + " rg 0.35 0.27 0 RG 0.75 w " + num(x) + " " + num(y) + " m " + num(x + z) + " " + num(y) + " l " + num(x + z) + " " +

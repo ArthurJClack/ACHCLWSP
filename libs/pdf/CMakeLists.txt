@@ -1,4 +1,4 @@
-add_library(wetwaresuite_pdf src/fonts.cpp src/glyphs.cpp src/writer.cpp src/render.cpp src/reader.cpp src/view.cpp src/edit.cpp)
+add_library(wetwaresuite_pdf src/fonts.cpp src/glyphs.cpp src/writer.cpp src/render.cpp src/reader.cpp src/view.cpp src/edit.cpp src/crypt.cpp src/security.cpp src/sign.cpp src/ocr.cpp)
 add_library(wetwaresuite::pdf ALIAS wetwaresuite_pdf)
 target_include_directories(wetwaresuite_pdf PUBLIC include PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 target_link_libraries(wetwaresuite_pdf PUBLIC wetwaresuite::core wetwaresuite::raster PRIVATE wetwaresuite::pdfdoc)

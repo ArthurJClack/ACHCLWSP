@@ -788,6 +788,43 @@ void Shell::askSavePopup() {
     ImGui::EndPopup();
 }
 
+// A password-protected file: type its password, Open tries again.
+void Shell::passwordPopup() {
+    if (!ImGui::BeginPopupModal("Password", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
+    PasswordAsk& a = passwordAsk_;
+    const float unit = ImGui::GetFontSize();
+    ImGui::Text("%s is locked with a password.", fileName(a.path).c_str());
+    if (a.focus) {
+        ImGui::SetKeyboardFocusHere();
+        a.focus = false;
+    }
+    ImGui::SetNextItemWidth(unit * 18);
+    bool go = ImGui::InputTextWithHint("##pw", "password", &a.text, ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+    if (!a.error.empty()) ImGui::TextColored({0.95f, 0.45f, 0.4f, 1}, "%s", a.error.c_str());
+    ImGui::Spacing();
+    go = accentButton("Open", {unit * 6, 0}) || go;
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Cancel", {unit * 6, 0}) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    if (go) {
+        Result r = run(a.command, {{"path", a.path}, {"password", a.text}});
+        if (r.ok) {
+            r.message = sentence(r.message);
+            result_ = std::move(r);
+            resultFor_ = "Open a file";
+            a = {};
+            ImGui::CloseCurrentPopup();
+        } else {
+            a.error = "That password doesn't open it.";
+            a.text.clear();
+            a.focus = true;
+        }
+    } else if (cancel) {
+        a = {};
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void Shell::closeDocNow(const std::string& id) {
     const std::string close = siblingCommand(docOpener(id), "close", commands_);
     if (close.empty() || !runOnDoc(close, id)) return;
@@ -881,6 +918,13 @@ void Shell::rootPopups() {
         openAskSave_ = false;
     }
     askSavePopup();
+    if (passwordAsk_.open) {
+        ImGui::OpenPopup("Password");
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, {0.5f, 0.5f});
+        passwordAsk_.open = false;
+        passwordAsk_.focus = true;
+    }
+    passwordPopup();
     if (openSettings_) {
         paletteStale_ = true;  // show what other apps may have saved meanwhile
         openSettings_ = false;

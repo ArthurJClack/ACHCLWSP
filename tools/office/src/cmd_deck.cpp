@@ -481,6 +481,13 @@ void registerDeckCommands(Session& session) {
                 Result r = Result::success(h.kind == "object" ? "object " + std::to_string(h.object) : h.kind);
                 r.with("kind", h.kind).with("text", h.text).with("x", h.x).with("y", h.y).with("w", h.w).with("h", h.h);
                 if (h.object) r.with("object", static_cast<std::int64_t>(h.object));
+                // how big its words are and the slide's colours, so a window can type over the part in place
+                double size = 0;
+                for (const auto& op : layoutSlide(d.data, i).ops)
+                    if (const auto* t = std::get_if<pdf::TextOp>(&op))
+                        if (t->x >= h.x - 1 && t->x <= h.x + h.w + 1 && t->y >= h.y - 1 && t->y <= h.y + h.h + t->size) size = std::max(size, t->size);
+                if (size <= 0) size = h.kind == "title" ? 40 : h.kind == "subtitle" ? 24 : 22;
+                r.with("font_size", size).with("background", "#" + lower(hexOf(d.data.theme.background))).with("text_color", "#" + lower(hexOf(d.data.theme.text)));
                 return r;
             }));
 

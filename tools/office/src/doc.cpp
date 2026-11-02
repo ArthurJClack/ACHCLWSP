@@ -406,6 +406,14 @@ std::string escapeMd(const std::string& t) {
     std::string out;
     for (std::size_t i = 0; i < t.size(); ++i) {
         char c = t[i];
+        if (t.compare(i, 2, "[[") == 0) {  // a notes [[wiki link]] stays as written
+            const auto close = t.find("]]", i + 2);
+            if (close != std::string::npos && t.find_first_of("[\n", i + 2) >= close) {
+                out += t.substr(i, close + 2 - i);
+                i = close + 1;
+                continue;
+            }
+        }
         if (c == '\\' || c == '`' || c == '*' || c == '[' || c == ']' || (c == '~' && i + 1 < t.size() && t[i + 1] == '~') ||
             (c == '^' && i + 1 < t.size() && t[i + 1] == '[') || (c == '<' && i + 1 < t.size() && std::isalpha(static_cast<unsigned char>(t[i + 1]))) ||
             (c == '_' && (i == 0 || !isAlnum(t[i - 1]) || i + 1 >= t.size() || !isAlnum(t[i + 1])))) {
@@ -1003,7 +1011,11 @@ std::string writeMarkdown(const TextDocument& doc, const std::string& mediaPrefi
                     const int lv = std::clamp(it.level, 0, 9);
                     for (int k = lv + 1; k < 10; ++k) counters[static_cast<std::size_t>(k)] = 0;
                     std::string marker = b.ordered ? std::to_string(++counters[static_cast<std::size_t>(lv)]) + ". " : "- ";
-                    out += std::string(static_cast<std::size_t>(lv) * 4, ' ') + marker + inlineMarkdown(it.runs) + "\n";
+                    std::string item = inlineMarkdown(it.runs);
+                    // task boxes go back to Markdown's own [ ] / [x]
+                    if (item.rfind("\xE2\x98\x90", 0) == 0) item = "[ ]" + item.substr(3);
+                    else if (item.rfind("\xE2\x98\x91", 0) == 0) item = "[x]" + item.substr(3);
+                    out += std::string(static_cast<std::size_t>(lv) * 4, ' ') + marker + item + "\n";
                 }
                 break;
             }

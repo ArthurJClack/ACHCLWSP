@@ -175,6 +175,7 @@ struct CellGrid {
     std::vector<std::string> sheets;
     int active = 0;
     int usedRows = 0, usedCols = 0;  // the used range, from A1
+    std::vector<std::pair<int, int>> frozen;  // per sheet: rows at the top and columns at the left that don't scroll
 };
 
 class Document {

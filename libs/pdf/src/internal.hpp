@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "wetwaresuite/pdf/reader.hpp"
 #include "wetwaresuite/pdfdoc/fonts.hpp"
 
 namespace wetwaresuite::pdf::detail {
@@ -27,6 +28,9 @@ struct Run {
 };
 // The text cut where it switches between the standard font and the Unicode one.
 std::vector<Run> splitRuns(const std::string& utf8);
+
+// One object in PDF syntax (strings as hex, refs as "n 0 R", streams with their data as they are).
+std::string writeObject(const Object& o);
 
 // Compact number text for PDF syntax: up to three decimals, no trailing zeros.
 std::string num(double v);

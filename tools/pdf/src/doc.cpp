@@ -334,6 +334,7 @@ void arrowHead(raster::Image& img, double x1, double y1, double x2, double y2, d
 }  // namespace
 
 void drawMark(raster::Image& img, const Mark& m, double s) {
+    if (m.kind == "ocr") return;  // invisible text: the scan shows the words already
     const double op = m.opacity;
     if (m.kind == "text") {
         const auto lines = markLines(m);
@@ -453,8 +454,30 @@ raster::Image renderPage(const DocData& d, int page, double scale) {
 
 std::vector<TextChar> charsOf(const DocData& d, int page) {
     const PageEntry& p = d.pages.at(static_cast<std::size_t>(page));
-    if (p.file < 0) return {};
-    return pageChars(*d.files[static_cast<std::size_t>(p.file)], p.index, p.content ? p.content.get() : nullptr);
+    std::vector<TextChar> out;
+    if (p.file >= 0) out = pageChars(*d.files[static_cast<std::size_t>(p.file)], p.index, p.content ? p.content.get() : nullptr);
+    // text read off a scan here: each word's letters spread evenly over its box
+    for (const auto& m : p.marks) {
+        if (m.kind != "ocr") continue;
+        std::size_t start = 0;
+        for (std::size_t i = 0; i < m.boxes.size(); ++i) {
+            const std::size_t nl = m.text.find('\n', start);
+            const std::string word = m.text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            start = nl == std::string::npos ? m.text.size() : nl + 1;
+            if (word.empty() || 2 * i + 1 >= m.points.size()) continue;
+            const auto& b = m.boxes[i];
+            const double cw = b[2] / static_cast<double>(word.size()), base = m.points[2 * i], size = m.points[2 * i + 1];
+            for (std::size_t k = 0; k <= word.size(); ++k) {
+                TextChar c;
+                c.text = k < word.size() ? std::string(1, word[k]) : std::string(" ");
+                c.x0 = b[0] + cw * static_cast<double>(k), c.x1 = k < word.size() ? c.x0 + cw : c.x0 + cw * 0.5;
+                c.y0 = base - size * 0.8, c.y1 = base + size * 0.2;
+                c.ox = c.x0, c.oy = base, c.size = size;
+                out.push_back(std::move(c));
+            }
+        }
+    }
+    return out;
 }
 
 // ---- the document ------------------------------------------------------------------------------

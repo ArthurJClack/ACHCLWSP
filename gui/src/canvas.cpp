@@ -5,7 +5,11 @@
 // quarter, ... size copy instead of the full picture, and after an edit only the
 // changed area is re-flattened and re-uploaded.
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
 
 #include "shell.hpp"
@@ -154,6 +158,7 @@ void Shell::refreshCanvas() {
     const bool game = !png.empty();
     // anything else: the document's own preview, else the tool's preview command
     if (png.empty() && deckDoc()) png = deckPicture();  // the slide shown big, not the sorter
+    if (png.empty() && layoutDoc()) png = layoutPicture();  // the page shown, sharp enough to work on
     if (png.empty() && doc->kind() == "audio" && find("audio.preview") && canvas_.viewSize.x > 64 && canvas_.viewSize.y > 64) {
         // drawn to fill the view, so the whole length is wide and easy to select in
         canvas_.waveSize = canvas_.viewSize;
@@ -654,9 +659,10 @@ void Shell::canvasArea() {
                                      !canvas_.pending;
     const bool waveform = shownDoc && shownDoc->kind() == "audio";  // left-drag picks a time range instead
     const bool slides = shownDoc && shownDoc->kind() == "deck" && deckDoc();  // left-drag moves objects, a click edits
+    const bool layoutPage = shownDoc && shownDoc->kind() == "layout" && layoutDoc();  // left-drag moves frames
     const bool dragPan = active && (ImGui::IsMouseDown(ImGuiMouseButton_Middle) || ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
                                     (ImGui::IsMouseDown(ImGuiMouseButton_Left) && !painting && !canvas_.stroking &&
-                                     ((!circuitEditing() && !mapsEditing() && !waveform && !slides) || ImGui::IsKeyDown(ImGuiKey_Space))));
+                                     ((!circuitEditing() && !mapsEditing() && !waveform && !slides && !layoutPage) || ImGui::IsKeyDown(ImGuiKey_Space))));
     if (dragPan) {
         canvas_.pan.x += io.MouseDelta.x;
         canvas_.pan.y += io.MouseDelta.y;
@@ -751,6 +757,7 @@ void Shell::canvasArea() {
     if (waveform) audioCanvas(dl, p0, p1, hovered, active);
     if (shownDoc && shownDoc->kind() == "doc" && !painting) docCanvas(dl, p0, hovered);
     if (slides) deckCanvas(dl, p0, hovered, active);
+    if (layoutPage) layoutCanvas(dl, p0, hovered, active);
     // the playhead over a waveform; a click (not a drag) moves it there
     if (playheadFraction_ >= 0) {
         const float x = p0.x + (p1.x - p0.x) * std::clamp(playheadFraction_, 0.0f, 1.0f);
@@ -832,96 +839,293 @@ void Shell::audioCanvas(ImDrawList* dl, ImVec2 p0, ImVec2 p1, bool hovered, bool
 
 // Word's way, roughly: click a paragraph on the page and type. The block is framed and its
 // text (inline Markdown for styles) opens in a box beside it; Save puts it back as one undo step.
+namespace {
+
+// Ctrl+B / I / U wrap the selection (or put empty markers at the caret); Enter asks to split.
+int docTextCallback(ImGuiInputTextCallbackData* data) {
+    auto* e = static_cast<DocEditAccess*>(data->UserData);
+    if (*e->caret >= 0) {
+        data->CursorPos = data->SelectionStart = data->SelectionEnd = std::clamp(*e->caret, 0, data->BufTextLen);
+        *e->caret = -1;
+    }
+    if (*e->pending) {
+        const char* open = *e->pending == 'b' ? "**" : *e->pending == 'i' ? "*" : "<u>";
+        const char* close = *e->pending == 'b' ? "**" : *e->pending == 'i' ? "*" : "</u>";
+        int a = std::min(data->SelectionStart, data->SelectionEnd), b = std::max(data->SelectionStart, data->SelectionEnd);
+        if (a == b) a = b = data->CursorPos;
+        data->InsertChars(b, close);
+        data->InsertChars(a, open);
+        data->SelectionStart = a + static_cast<int>(std::strlen(open));
+        data->SelectionEnd = b + static_cast<int>(std::strlen(open));
+        data->CursorPos = data->SelectionEnd;
+        *e->pending = 0;
+    }
+    *e->cursor = data->CursorPos;
+    return 0;
+}
+
+// The character a click lands on, laid out the way the box wraps it.
+int charAt(const std::string& text, float wrap, ImVec2 rel) {
+    ImFont* font = ImGui::GetFont();
+    const float size = ImGui::GetFontSize(), lineH = ImGui::GetTextLineHeight();
+    const char* s = text.c_str();
+    const char* end = s + text.size();
+    float y = 0;
+    while (s < end) {
+        const char* nl = std::find(s, end, '\n');
+        const char* lineEnd = font->CalcWordWrapPosition(size, s, nl, wrap);
+        if (lineEnd == s) lineEnd = std::min(nl, s + 1);
+        if (rel.y < y + lineH || (lineEnd >= nl && nl == end)) {
+            const char* best = s;
+            float bestD = 1e9f;
+            for (const char* c = s; c <= lineEnd; ++c) {
+                const float x = font->CalcTextSizeA(size, FLT_MAX, 0, s, c).x;
+                if (std::abs(x - rel.x) < bestD) bestD = std::abs(x - rel.x), best = c;
+            }
+            return static_cast<int>(best - text.c_str());
+        }
+        y += lineH;
+        s = lineEnd;
+        if (s < end && *s == '\n') ++s;
+        else while (s < end && *s == ' ') ++s;
+    }
+    return static_cast<int>(text.size());
+}
+
+}  // namespace
+
+// Notes-style [[links]]: the note is looked for next to the open file and in the folders under
+// it (and the folder above, for a vault); a new name makes the note.
+void Shell::followWikiLink(const std::string& name) {
+    auto doc = session_.workspace().get(currentDoc_);
+    if (!doc || doc->path.empty()) {
+        result_ = Result::failure("Save this note first, so [[links]] know which folder they point into.");
+        resultFor_ = "Open link";
+        return;
+    }
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path here = fs::absolute(fs::path(doc->path), ec).parent_path();
+    std::string want = name;
+    for (auto& ch : want) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (want.size() < 3 || want.compare(want.size() - 3, 3, ".md") != 0) want += ".md";
+    auto lower = [](std::string v) {
+        for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return v;
+    };
+    fs::path found;
+    for (const fs::path& root : {here, here.parent_path()}) {
+        if (fs::exists(root / fs::path(want), ec)) found = root / fs::path(want);
+        int seen = 0;
+        for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+             found.empty() && !ec && it != fs::recursive_directory_iterator() && ++seen < 5000; it.increment(ec)) {
+            if (it.depth() > 4) it.disable_recursion_pending();
+            const fs::path rel = fs::relative(it->path(), root, ec);
+            if (it->is_regular_file(ec) && (lower(it->path().filename().string()) == fs::path(want).filename().string() || lower(rel.generic_string()) == want)) {
+                found = it->path();
+            }
+        }
+        if (!found.empty()) break;
+    }
+    if (found.empty()) {
+        const bool hasExt = lower(name).size() > 3 && lower(name).compare(name.size() - 3, 3, ".md") == 0;
+        found = here / fs::path(hasExt ? name : name + ".md");
+        std::ofstream out(found, std::ios::binary);
+        out << "# " << name << "\n";
+    }
+    openFile(found.string());
+}
+
+void Shell::docCommit(bool close) {
+    DocBlockEdit& e = docEdit_;
+    if (e.block <= 0) return;
+    if (e.text != e.original) {
+        Result r = run("office.doc_edit", {{"doc", currentDoc_}, {"block", static_cast<std::int64_t>(e.block)}, {"text", e.text}});
+        resultFor_ = "Edit";
+        r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+        result_ = std::move(r);
+        canvas_.dirty = true;
+        e.original = e.text;
+    }
+    if (close) e.block = 0;
+}
+
+// Click on the page to type right there, like Word: the block turns into a text box in place with
+// the caret where you clicked. Ctrl+B/I/U format the selection, Enter starts a new paragraph,
+// Backspace on an empty one removes it, Esc or a click elsewhere keeps the words.
 void Shell::docCanvas(ImDrawList* dl, ImVec2 p0, bool hovered) {
     DocBlockEdit& e = docEdit_;
     if (e.doc != currentDoc_) e = {currentDoc_};
     ImGuiIO& io = ImGui::GetIO();
-    if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16 &&
-        !ImGui::IsKeyDown(ImGuiKey_Space) && find("office.doc_hit")) {
-        const ImVec2 img = toImage(io.MousePos);
-        Result r = query("office.doc_hit", {{"doc", currentDoc_}, {"sheet_y", static_cast<double>(img.y)}});
-        auto num = [&r](const char* key) {
+    auto openAt = [&](float sheetY, ImVec2 click) {
+        Params hp{{"doc", currentDoc_}, {"sheet_y", static_cast<double>(sheetY)}};
+        if (click.x >= 0) hp["sheet_x"] = static_cast<double>((click.x - p0.x) / canvas_.zoom);
+        Result r = query("office.doc_hit", hp);
+        auto num = [&r](const char* key, double fallback = 0.0) {
             const Value* v = r.field(key);
             if (auto d = v ? std::get_if<double>(v) : nullptr) return *d;
             if (auto i = v ? std::get_if<std::int64_t>(v) : nullptr) return static_cast<double>(*i);
-            return 0.0;
+            return fallback;
         };
         auto text = [&r](const char* key) {
             const Value* v = r.field(key);
             auto s = v ? std::get_if<std::string>(v) : nullptr;
             return s ? *s : std::string();
         };
+        if (r.ok && r.field("wiki") && io.KeyCtrl) {  // Ctrl+click a [[note]] link: open that note (made if it's new)
+            followWikiLink(text("wiki"));
+            return false;
+        }
+        if (r.ok && r.field("task")) {  // a task box: tick or untick it, no typing
+            std::string t = text("text");
+            const int item = static_cast<int>(num("task"));
+            std::size_t at = 0;
+            for (int k = 1; k < item && at != std::string::npos; ++k) at = t.find('\n', at), at = at == std::string::npos ? at : at + 1;
+            if (at != std::string::npos) at = t.find("\xE2\x98", at);
+            if (at != std::string::npos && at + 2 < t.size()) {
+                t[at + 2] = t[at + 2] == '\x90' ? '\x91' : '\x90';
+                Result done = run("office.doc_edit", {{"doc", currentDoc_}, {"block", static_cast<std::int64_t>(num("block"))}, {"text", t}});
+                resultFor_ = "Tick";
+                done.message = done.ok ? sentence(done.message) : friendlyError(done.message);
+                result_ = std::move(done);
+                canvas_.dirty = true;
+            }
+            return false;
+        }
         if (r.ok && text("kind") != "image" && text("kind") != "pagebreak" && text("kind") != "toc") {
             e.block = static_cast<int>(num("block"));
             e.kind = text("kind");
             e.text = text("text");
             while (!e.text.empty() && e.text.back() == '\n') e.text.pop_back();
+            e.original = e.text;
             e.top = static_cast<float>(num("sheet_top"));
             e.bottom = static_cast<float>(num("sheet_bottom"));
+            e.left = static_cast<float>(num("sheet_left", 0));
+            e.right = static_cast<float>(num("sheet_right", canvas_.texture.srcWidth));
+            e.fontPx = static_cast<float>(num("font_px", 14));
             e.focus = true;
-        } else {
-            e.block = 0;
-            if (r.ok) {
-                result_ = Result::success("That block can't be typed into here; use the " + text("kind") + " actions on the right.");
-                resultFor_ = "Edit";
+            e.caret = -1;
+            ++e.generation;  // a fresh text box: the old one's buffer mustn't write back over this block
+            e.cursor = static_cast<int>(e.text.size());
+            if (click.x >= 0 && r.field("char")) {  // the caret goes on the letter that was clicked
+                e.caret = std::clamp(static_cast<int>(num("char")), 0, static_cast<int>(e.text.size()));
+            } else if (click.x >= 0) {  // older office: guess from the box's own wrapping
+                const float px = std::max(6.0f, e.fontPx * canvas_.zoom);
+                pushFontPx(px);
+                const float wrap = (e.right - e.left) * canvas_.zoom - ImGui::GetStyle().FramePadding.x * 2;
+                const ImVec2 rel{click.x - (p0.x + e.left * canvas_.zoom) - ImGui::GetStyle().FramePadding.x,
+                                 click.y - (p0.y + e.top * canvas_.zoom) - ImGui::GetStyle().FramePadding.y};
+                e.caret = charAt(e.text, wrap, rel);
+                ImGui::PopFont();
             }
+            return true;
         }
+        if (r.ok) {
+            result_ = Result::success("That block can't be typed into here; use the " + text("kind") + " actions on the right.");
+            resultFor_ = "Edit";
+        }
+        return false;
+    };
+    // a click on the page outside the open box: keep its words, then open the block under the click
+    if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16 &&
+        !ImGui::IsKeyDown(ImGuiKey_Space) && find("office.doc_hit")) {
+        docCommit(true);
+        const ImVec2 img = toImage(io.MousePos);
+        openAt(img.y, io.MousePos);
     }
     if (e.block <= 0) return;
-    const Texture& t = canvas_.texture;
-    const ImVec2 a{p0.x - 4, p0.y + e.top * canvas_.zoom - 3}, b{p0.x + static_cast<float>(t.srcWidth) * canvas_.zoom + 4, p0.y + e.bottom * canvas_.zoom + 3};
-    const ImVec4 c = accent_;
-    dl->AddRectFilled(a, b, ImGui::ColorConvertFloat4ToU32({c.x, c.y, c.z, 0.08f}));
-    dl->AddRect(a, b, ImGui::ColorConvertFloat4ToU32(c), 3, 0, 2);
 
-    // the editor floats just under the block (above it near the bottom of the view)
-    const float unit = ImGui::GetFontSize();
-    const float boxW = std::min(unit * 34, canvas_.viewSize.x - unit * 2);
-    const float boxH = unit * 12;
-    float x = std::clamp(a.x + unit * 2, canvas_.viewMin.x + 8, canvas_.viewMin.x + canvas_.viewSize.x - boxW - 8);
-    float y = b.y + 6;
-    if (y + boxH > canvas_.viewMin.y + canvas_.viewSize.y) y = std::max(canvas_.viewMin.y + 8, a.y - boxH - 6);
-    ImGui::SetNextWindowPos({x, y}, e.focus ? ImGuiCond_Always : ImGuiCond_Appearing);  // a new block: move next to it
-    ImGui::SetNextWindowSize({boxW, 0}, ImGuiCond_Appearing);
-    bool open = true;
-    const std::string title = "Edit block " + std::to_string(e.block) + " (" + e.kind + ")###docblockedit";
-    if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+    const float zoom = canvas_.zoom;
+    const float px = std::max(6.0f, e.fontPx * zoom);
+    pushFontPx(px);
+    const ImVec2 pad = ImGui::GetStyle().FramePadding;
+    const float boxW = std::max(40.0f, (e.right - e.left) * zoom);
+    const float textH = ImGui::CalcTextSize(e.text.empty() ? " " : e.text.c_str(), nullptr, false, boxW - pad.x * 2).y;
+    const float boxH = std::max((e.bottom - e.top) * zoom, textH + ImGui::GetTextLineHeight() + pad.y * 2);
+    const ImVec2 at{p0.x + e.left * zoom - pad.x, p0.y + e.top * zoom - pad.y};
+    // the box looks like the page: white, dark words, a thin accent edge
+    const ImVec4 c = accent_;
+    dl->AddRectFilled({at.x - 2, at.y - 2}, {at.x + boxW + pad.x * 2 + 2, at.y + boxH + 2}, IM_COL32(255, 255, 255, 255));
+    ImGui::SetNextWindowPos(at);
+    ImGui::SetNextWindowSize({boxW + pad.x * 2, boxH});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(255, 255, 255, 255));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(255, 255, 255, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(20, 20, 24, 255));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImGui::ColorConvertFloat4ToU32({c.x, c.y, c.z, 0.8f}));
+    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImGui::ColorConvertFloat4ToU32({c.x, c.y, c.z, 0.35f}));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse;
+    bool commit = false, splitNow = false, removeNow = false;
+    if (ImGui::Begin("##docinplace", nullptr, flags)) {
         if (e.focus) {
             ImGui::SetKeyboardFocusHere();
             e.focus = false;
         }
-        ImGui::InputTextMultiline("##blocktext", &e.text, {-1, unit * 7}, ImGuiInputTextFlags_WordWrap);
-        const bool save = ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && io.KeyCtrl &&
-                                                    ImGui::IsKeyPressed(ImGuiKey_Enter));
-        ImGui::SetItemTooltip("Put the new text in (Ctrl+Enter)");
-        ImGui::SameLine();
-        const bool cancel = ImGui::Button("Cancel") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Escape));
-        ImGui::SameLine();
-        const bool remove = ImGui::Button("Delete block");
-        ImGui::SameLine();
-        ImGui::TextDisabled(e.kind == "list" || e.kind == "numbered" ? "one item per line"
-                            : e.kind == "table"                      ? "one row per line, cells split by |"
-                                                                     : "**bold**, *italic*, [link](url)");
-        if (save) {
-            Result r = run("office.doc_edit", {{"doc", currentDoc_}, {"block", static_cast<std::int64_t>(e.block)}, {"text", e.text}});
-            resultFor_ = "Edit";
-            r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
-            if (r.ok) e.block = 0;
-            result_ = std::move(r);
-            canvas_.dirty = true;
-        } else if (remove) {
-            Result r = run("office.doc_delete", {{"doc", currentDoc_}, {"block", static_cast<std::int64_t>(e.block)}});
-            resultFor_ = "Delete";
-            r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
-            e.block = 0;
-            result_ = std::move(r);
-            canvas_.dirty = true;
-        } else if (cancel) {
-            e.block = 0;
+        const bool typing = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        if (typing && io.KeyCtrl && !io.KeyShift) {
+            if (ImGui::IsKeyPressed(ImGuiKey_B, false)) e.pending = 'b';
+            if (ImGui::IsKeyPressed(ImGuiKey_I, false)) e.pending = 'i';
+            if (ImGui::IsKeyPressed(ImGuiKey_U, false)) e.pending = 'u';
         }
+        // paragraphs, headings and quotes: Enter starts the next paragraph; lists and tables keep Enter for new lines
+        const bool lines = e.kind == "list" || e.kind == "numbered" || e.kind == "table" || e.kind == "code";
+        const bool enter = typing && !lines && !io.KeyShift && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
+        const bool emptyBack = typing && e.text.empty() && ImGui::IsKeyPressed(ImGuiKey_Backspace, false);
+        DocEditAccess access{&e.caret, &e.pending, &e.cursor};
+        // Esc keeps the words: the box would put the old text back, so hold on to what's typed
+        const bool escape = typing && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const std::string typed = e.text;
+        ImGuiInputTextFlags tf = ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_CallbackAlways | ImGuiInputTextFlags_NoHorizontalScroll;
+        if (enter) tf |= ImGuiInputTextFlags_ReadOnly;  // the Enter goes to the split, not into the text
+        ImGui::PushID(e.generation);
+        ImGui::InputTextMultiline("##inplace", &e.text, {-1, -1}, tf, docTextCallback, &access);
+        ImGui::PopID();
+        if (escape) e.text = typed;
+        if (enter) splitNow = true, e.split = e.cursor;
+        else if (emptyBack) removeNow = true;
+        else if (escape || (typing && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false))) commit = true;
+        else if (ImGui::IsItemDeactivated() && !ImGui::IsWindowFocused()) commit = true;
     }
     ImGui::End();
-    if (!open) e.block = 0;
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(5);
+    ImGui::PopFont();
+
+    if (removeNow) {
+        Result r = run("office.doc_delete", {{"doc", currentDoc_}, {"block", static_cast<std::int64_t>(e.block)}});
+        resultFor_ = "Delete";
+        r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+        result_ = std::move(r);
+        canvas_.dirty = true;
+        e.block = 0;
+    } else if (splitNow) {
+        // the words after the caret move to a new paragraph under this one, and typing carries on there
+        const std::size_t at0 = static_cast<std::size_t>(std::clamp(e.split, 0, static_cast<int>(e.text.size())));
+        std::string rest = e.text.substr(at0);
+        e.text.erase(at0);
+        while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
+        const int block = e.block;
+        const float bottom = e.bottom;
+        docCommit(true);
+        Result r = run("office.doc_add", {{"doc", currentDoc_}, {"kind", std::string("paragraph")}, {"text", rest.empty() ? std::string(" ") : rest},
+                                          {"at", static_cast<std::int64_t>(block + 1)}});
+        resultFor_ = "New paragraph";
+        canvas_.dirty = true;
+        if (r.ok) {
+            refreshCanvas();
+            if (openAt(bottom + 2, {-1, -1})) {  // the new block sits right under the old one
+                if (rest.empty()) e.text.clear(), e.original = " ";
+                e.caret = 0;
+            }
+        } else {
+            r.message = friendlyError(r.message);
+            result_ = std::move(r);
+        }
+    } else if (commit) {
+        docCommit(true);
+    }
+    (void)dl;
 }
 
 }  // namespace wetwaresuite::gui

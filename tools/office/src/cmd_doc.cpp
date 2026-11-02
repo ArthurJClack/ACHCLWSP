@@ -426,6 +426,106 @@ Result exportTo(TextDocument& d, const Params& p, const std::string& path) {
 
 static void registerDocToolCommands(Session& session);
 
+
+namespace {
+
+// Which character of a block's editable text (inline Markdown and all) sits at a point on its page,
+// read off the same layout the page picture is drawn from, so a click puts the caret on that letter.
+// `beforeText`: the click was left of the line's first word (on a bullet or task box).
+int charAtPoint(const TextDocument& doc, const BlockBox& box, double x, double y, const std::string& editable, bool* beforeText = nullptr) {
+    const auto pages = layoutDocument(doc);
+    if (box.page < 1 || box.page > static_cast<int>(pages.size())) return static_cast<int>(editable.size());
+    struct Line { double y = 0, size = 0; std::vector<const pdf::TextOp*> ops; };
+    std::vector<Line> lines;
+    for (const auto& op : pages[static_cast<std::size_t>(box.page - 1)].ops) {
+        const auto* t = std::get_if<pdf::TextOp>(&op);
+        if (!t || t->text.empty() || t->y < box.y0 - 1 || t->y - t->size * 0.8 > box.y1 + 1) continue;
+        auto it = std::find_if(lines.begin(), lines.end(), [&](const Line& l) { return std::abs(l.y - t->y) < 0.5; });
+        if (it == lines.end()) lines.push_back({t->y, t->size, {}}), it = lines.end() - 1;
+        it->size = std::max(it->size, t->size);
+        it->ops.push_back(t);
+    }
+    if (lines.empty()) return static_cast<int>(editable.size());
+    std::sort(lines.begin(), lines.end(), [](const Line& a, const Line& b) { return a.y < b.y; });
+    // the click's line, then its letter: count plain characters before it
+    std::size_t li = 0;
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        if (y > lines[i].y - lines[i].size * 1.0) li = i;
+    auto utf8Len = [](const std::string& s) {
+        std::size_t n = 0;
+        for (unsigned char c : s) n += (c & 0xC0) != 0x80;
+        return n;
+    };
+    std::size_t plain = 0;
+    for (std::size_t i = 0; i < li; ++i) {
+        auto row = lines[i].ops;
+        std::sort(row.begin(), row.end(), [](const pdf::TextOp* a, const pdf::TextOp* b) { return a->x < b->x; });
+        double end = -1;
+        for (const auto* t : row) {
+            if (end >= 0 && t->x > end + 0.05) plain += 1;
+            plain += utf8Len(t->text);
+            end = t->x + pdf::textWidth(t->font, t->text, t->size);
+        }
+        plain += 1;  // the space the wrap ate
+    }
+    auto& ops = lines[li].ops;
+    std::sort(ops.begin(), ops.end(), [](const pdf::TextOp* a, const pdf::TextOp* b) { return a->x < b->x; });
+    if (beforeText) *beforeText = !ops.empty() && x < ops.front()->x - 1;
+    // words are separate runs; a gap between two runs is the space the layout left out
+    double prevEnd = -1;
+    for (const auto* t : ops) {
+        const bool gap = prevEnd >= 0 && t->x > prevEnd + 0.05;
+        if (x <= t->x) {
+            if (gap && x - prevEnd < (t->x - prevEnd) / 2) break;  // nearer the end of the last word
+            plain += gap ? 1 : 0;
+            break;
+        }
+        plain += gap ? 1 : 0;
+        // walk the run letter by letter to the nearest edge
+        std::size_t k = 0, best = 0;
+        double bestD = std::abs(x - t->x);
+        for (std::size_t pos = 0; pos <= t->text.size();) {
+            const double edge = t->x + pdf::textWidth(t->font, t->text.substr(0, pos), t->size);
+            if (std::abs(x - edge) < bestD) bestD = std::abs(x - edge), best = k;
+            if (pos == t->text.size()) break;
+            ++pos;
+            while (pos < t->text.size() && (static_cast<unsigned char>(t->text[pos]) & 0xC0) == 0x80) ++pos;
+            ++k;
+        }
+        plain += best;
+        const std::size_t len = utf8Len(t->text);
+        if (best < len) break;
+        prevEnd = t->x + pdf::textWidth(t->font, t->text, t->size);
+    }
+    // plain letters -> the editable text, stepping over Markdown markers
+    std::size_t i = 0, seen = 0;
+    while (i < editable.size()) {
+        if (i == 0 || editable[i - 1] == '\n') {  // a list line: its indent isn't drawn, nor a task's "- [ ] " (a box is)
+            while (i < editable.size() && editable[i] == ' ') ++i;
+            if (editable.compare(i, 6, "- \xE2\x98\x90 ") == 0 || editable.compare(i, 6, "- \xE2\x98\x91 ") == 0) i += 6;
+            if (i >= editable.size()) break;
+        }
+        if (editable.compare(i, 3, "<u>") == 0) { i += 3; continue; }
+        if (editable.compare(i, 4, "</u>") == 0) { i += 4; continue; }
+        if (editable.compare(i, 2, "~~") == 0) { i += 2; continue; }
+        const char c = editable[i];
+        const bool wiki = c == '[' && (editable.compare(i, 2, "[[") == 0 || (i > 0 && editable[i - 1] == '['));  // [[note]] is drawn as is
+        if (c == '*' || c == '`' || (c == '[' && !wiki)) { ++i; continue; }
+        if (c == ']' && i + 1 < editable.size() && editable[i + 1] == '(') {
+            const auto close = editable.find(')', i);
+            i = close == std::string::npos ? editable.size() : close + 1;
+            continue;
+        }
+        if (seen == plain) break;
+        ++i;
+        while (i < editable.size() && (static_cast<unsigned char>(editable[i]) & 0xC0) == 0x80) ++i;
+        ++seen;
+    }
+    return static_cast<int>(i);
+}
+
+}  // namespace
+
 void registerDocCommands(Session& session) {
     auto& reg = session.registry();
 
@@ -850,7 +950,8 @@ static void registerDocToolCommands(Session& session) {
              "Which block is at a spot on a page (x, y in points from the top left, as doc_preview draws it): its number, kind and "
              "its text the way doc_edit text= takes it. Lets a click on the page edit that block.",
              {doc(), integer("page", "page number", false, std::int64_t{1}), number("x", "points from the left"), number("y", "points from the top"),
-              number("sheet_y", "instead of page and y: pixels down the document's picture (its pages one under another)")},
+              number("sheet_y", "instead of page and y: pixels down the document's picture (its pages one under another)"),
+              number("sheet_x", "instead of x: pixels across the document's picture; with x or sheet_x, char= says which character of text is there")},
              false, true},
             read(session, [](TextDoc& d, const Params& p, const std::string&) -> Result {
                 int pg = static_cast<int>(intParam(p, "page", 1));
@@ -881,6 +982,38 @@ static void registerDocToolCommands(Session& session) {
                 r.with("block", static_cast<std::int64_t>(best->block)).with("kind", kind).with("text", text)
                  .with("page", static_cast<std::int64_t>(pg)).with("top", best->y0).with("bottom", best->y1)
                  .with("sheet_top", (pg - 1) * pageStep + best->y0 * kSheetScale).with("sheet_bottom", (pg - 1) * pageStep + best->y1 * kSheetScale);
+                // where the text column is and how big its words are, so a window can type over the block in place
+                double size = d.data.page.fontSize;
+                if (b.kind == Block::Heading) size *= b.level <= 1 ? 2.0 : b.level == 2 ? 1.6 : b.level == 3 ? 1.3 : 1.1;
+                r.with("sheet_left", d.data.page.left * kSheetScale).with("sheet_right", (d.data.page.width - d.data.page.right) * kSheetScale)
+                 .with("font_px", size * kSheetScale).with("level", static_cast<std::int64_t>(b.level));
+                if (has(p, "sheet_x") || has(p, "x")) {
+                    const double x = has(p, "sheet_x") ? numberParam(p, "sheet_x") / kSheetScale : numberParam(p, "x");
+                    bool before = false;
+                    const int at = charAtPoint(d.data, *best, x, y, text, &before);
+                    r.with("char", static_cast<std::int64_t>(at));
+                    // on a notes [[link]]: its name, so a window can follow it
+                    {
+                        const std::size_t a = static_cast<std::size_t>(at);
+                        const auto open = text.rfind("[[", a);
+                        const auto close = text.find("]]", open == std::string::npos ? a : open);
+                        if (open != std::string::npos && close != std::string::npos && close + 2 >= a && text.find('\n', open) > close) {
+                            std::string name = text.substr(open + 2, close - open - 2);
+                            name = name.substr(0, name.find_first_of("|#"));
+                            if (!name.empty()) r.with("wiki", name);
+                        }
+                    }
+                    // a click on a task box: which item, so a window can tick it
+                    if (b.kind == Block::List && before) {
+                        const std::size_t ls = text.rfind('\n', at > 0 ? static_cast<std::size_t>(at - 1) : 0);
+                        std::size_t start = at == 0 || ls == std::string::npos ? 0 : ls + 1;
+                        while (start < text.size() && text[start] == ' ') ++start;
+                        if (text.compare(start, 5, "- \xE2\x98\x90") == 0 || text.compare(start, 5, "- \xE2\x98\x91") == 0) {
+                            const auto item = std::count(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(start), '\n');
+                            r.with("task", static_cast<std::int64_t>(item + 1)).with("done", text.compare(start, 5, "- \xE2\x98\x91") == 0);
+                        }
+                    }
+                }
                 return r;
             }));
 

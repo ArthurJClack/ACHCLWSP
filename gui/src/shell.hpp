@@ -24,6 +24,14 @@
 
 namespace wetwaresuite::gui {
 
+// Pushes the default font at exactly `px` screen pixels (the UI's own font scale undone), so text
+// typed over a page or slide is the size the page draws it. Pop with ImGui::PopFont().
+inline void pushFontPx(float px) {
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float scale = st.FontScaleMain * st.FontScaleDpi;
+    ImGui::PushFont(nullptr, scale > 0 ? px / scale : px);
+}
+
 // Adds one typed character (a code point) to UTF-8 text.
 inline void appendUtf8(std::string& out, unsigned c) {
     if (c < 0x80) {
@@ -233,6 +241,24 @@ struct LivePreview {
     bool runNow = false;
 };
 
+// Layout pages (layout_view.cpp): the page shown, its frames (mm boxes), the picked one, a drag
+// and the text frame being typed into.
+struct LayoutView {
+    std::string doc;
+    int page = 1, pages = 1;
+    double pageW = 210, pageH = 297;
+    std::uint64_t seen = ~0ull;
+    std::vector<std::string> ids, types;
+    std::vector<ImVec4> boxes;
+    int selected = -1, handle = -1;
+    bool dragging = false;
+    ImVec2 pressAt{0, 0};
+    ImVec4 start{0, 0, 0, 0}, live{0, 0, 0, 0};
+    bool editing = false, focus = false;
+    std::string text, original, editFrame;
+    int generation = 0;
+};
+
 // Slides (deck_view.cpp): which slide is shown big, the strip of thumbnails, the part of the
 // slide being typed into and an object being dragged. Boxes are in slide points (x, y, w, h).
 struct DeckView {
@@ -252,14 +278,18 @@ struct DeckView {
     // press / drag
     std::string pressKind, pressText;
     int pressObject = 0;
+    float pressFont = 0;
+    ImVec4 pressBg{1, 1, 1, 1}, pressFg{0, 0, 0, 1};
     ImVec4 press{0, 0, 0, 0};
     ImVec2 pressAt{0, 0};
     bool moving = false;
     // the part being edited
     bool editing = false, focus = false;
-    std::string kind, text;
-    int object = 0;
+    std::string kind, text, original;
+    int object = 0, generation = 0;
     ImVec4 box{0, 0, 0, 0};
+    float fontSize = 24;               // slide points
+    ImVec4 bg{1, 1, 1, 1}, fg{0, 0, 0, 1};  // the slide's colours, so the box looks like the slide
 };
 
 // A retouch command waiting to run: it runs on the frame after it is queued, so the
@@ -365,6 +395,13 @@ struct Canvas {
     std::string textDraft;
 
     GameCanvas game;
+};
+
+// What the in-place document editor's text callback reads and writes (canvas.cpp).
+struct DocEditAccess {
+    int* caret;     // caret position to set once, -1 none
+    char* pending;  // 'b', 'i', 'u' formatting to apply to the selection
+    int* cursor;    // where the caret is now
 };
 
 // A whiteboard on the canvas (board_view.cpp), in board units.
@@ -477,6 +514,12 @@ struct GridState {
     std::string doc;
     int sheet = -1;  // -1: start on the document's active sheet
     int row = 0, col = 0;
+    int row2 = 0, col2 = 0;   // the other corner of the selected range (== row, col for one cell)
+    bool selecting = false;   // dragging out a range
+    bool filling = false;     // dragging the fill handle
+    int fillRow = 0, fillCol = 0;  // where the fill handle is dragged to
+    bool focusGrid = false;        // the grid has the keyboard (Ctrl+B/I/U style the range)
+    ImVec4 fillPick{1, 1, 1, 1}, inkPick{0, 0, 0, 1};  // the format bar's colour pickers while open
     bool editing = false;
     bool focusEdit = false;   // give the cell editor keyboard focus next frame
     bool caretToEnd = false;  // started by typing: keep the typed text, caret after it
@@ -530,6 +573,7 @@ public:
     void frame();                         // one ImGui frame of every panel
     void onEvent(const SDL_Event& event);  // raw input for strokes, before ImGui sees it
     void openFile(const std::string& path);
+    void followWikiLink(const std::string& name);
     // a command's form, or "settings" for the Aa menu (text size and colours)
     void showAction(const std::string& commandId) {
         if (commandId == "settings") { openSettings_ = true; return; }
@@ -587,6 +631,12 @@ private:
     void closeDoc(const std::string& id);  // asks first when it has unsaved changes
     void closeDocNow(const std::string& id);
     void askSavePopup();
+    void passwordPopup();
+    struct PasswordAsk {
+        bool open = false;
+        std::string path, command, text, error;
+        bool focus = false;
+    } passwordAsk_;
     void noteChange(const std::string& id, const Params& params, const Result& r);
     void showDoc(const std::string& id);
     void nextTab(int step);
@@ -708,6 +758,7 @@ private:
     void pdfLoad(bool force);
     void pdfRun(const std::string& command, Params params, const std::string& title);
     void pdfRelease();
+    void gridFormatBar(const CellGrid& layout);
     bool commitCell(const CellGrid& layout, int sheet, int row, int col, const std::string& input);
     // selections on the canvas (selection_view.cpp)
     void selectSettings();
@@ -938,10 +989,19 @@ private:
     struct DocBlockEdit {
         std::string doc;
         int block = 0;  // 0: nothing open
-        std::string kind, text;
+        std::string kind, text, original;
         float top = 0, bottom = 0;  // in the page picture's pixels
+        float left = 0, right = 0;  // the text column, picture px
+        float fontPx = 14;          // the block's text size in picture px
         bool focus = false;
+        int caret = -1;             // where the caret goes when the box opens (-1: the end)
+        char pending = 0;           // 'b', 'i', 'u': wrap the selection on the next frame
+        int split = -1;             // Enter: the caret position to split the paragraph at
+        int cursor = 0;             // the caret as of the last frame (Enter splits there)
+        int generation = 0;         // bumps on every open so each block gets its own text box
     } docEdit_;
+    void docCommit(bool close);
+    void deckCommit();
     void docCanvas(ImDrawList* dl, ImVec2 p0, bool hovered);
     // the 3D view's arrows and picking (handles.cpp)
     View3d view3d_;
@@ -1048,6 +1108,14 @@ private:
     void showSlide(int n);
     void deckStrip();
     void deckCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    // layout: drag frames, resize by handles, double-click text to retype (layout_view.cpp)
+    LayoutView page_;
+    bool layoutDoc() const;
+    std::string layoutPicture();
+    void layoutRefreshFrames();
+    void layoutShowPage(int n);
+    void layoutCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    void layoutCommit();
     TimelineState timeline_;
     GridState grid_;
     CircuitCanvas circuit_;

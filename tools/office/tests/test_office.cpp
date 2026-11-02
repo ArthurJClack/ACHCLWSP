@@ -451,6 +451,13 @@ void testMarkdown() {
     for (std::size_t i = 0; i < std::min(again.blocks.size(), d.blocks.size()); ++i) {
         CHECK(blockText(again.blocks[i]) == blockText(d.blocks[i]));
     }
+    // notes-style Markdown survives a save: task boxes and [[links]] stay as written
+    {
+        std::vector<MediaFile> none;
+        const std::string notes = writeMarkdown(readMarkdown("# Groceries\n\n- [ ] milk\n- [x] eggs\n\nsee [[Plans]] and [a link](x.md)\n"), "m/", none);
+        CHECK(notes.find("- [ ] milk") != std::string::npos && notes.find("- [x] eggs") != std::string::npos);
+        CHECK(notes.find("see [[Plans]]") != std::string::npos && notes.find("[a link](x.md)") != std::string::npos);
+    }
     // images: a file next to the markdown
     raster::Image px(8, 4, {255, 0, 0, 255});
     writeFile(tmp("red.png"), raster::encodePng(px));

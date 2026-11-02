@@ -234,18 +234,19 @@ std::string ascii85(const std::string& in) {
 
 // ---- file --------------------------------------------------------------------
 
-PdfFile::PdfFile(std::string bytes) : bytes_(std::move(bytes)) {
+PdfFile::PdfFile(std::string bytes, const std::string& password) : bytes_(std::move(bytes)) {
     const std::size_t head = bytes_.find("%PDF-");
     if (head == std::string::npos || head > 1024) throw std::runtime_error("not a PDF file");
     std::size_t e = head + 5;
     while (e < bytes_.size() && (std::isdigit(static_cast<unsigned char>(bytes_[e])) || bytes_[e] == '.')) ++e;
     version_ = bytes_.substr(head + 5, e - head - 5);
     scan();
+    if (encrypted_) unlock(password);
     loadObjectStreams();
     buildPages();
 }
 
-PdfFile PdfFile::load(const std::filesystem::path& path) { return PdfFile(readAll(path)); }
+PdfFile PdfFile::load(const std::filesystem::path& path, const std::string& password) { return PdfFile(readAll(path), password); }
 
 const Object& PdfFile::object(int num) const {
     static const Object null;
@@ -341,7 +342,7 @@ void PdfFile::scan() {
             lx.pos = es == std::string::npos ? s.size() : es + 9;
             if (o.get("Type") && o.get("Type")->isName("XRef")) trailers.push_back(o);
         }
-        (void)gen;
+        o.gen = gen;  // the per-object encryption key needs it
         objects_[num] = std::move(o);
         i = std::max(lx.pos, p + 3);
     }
