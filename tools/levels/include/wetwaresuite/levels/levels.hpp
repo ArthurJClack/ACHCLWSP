@@ -134,6 +134,12 @@ struct Map {
     Properties props;
     std::string background;             // "#rrggbb", empty = transparent
     int nextLayerId = 1, nextObjectId = 1;
+    // Tiled's map shapes: "orthogonal" (square grid), "isometric" (diamonds), "staggered"
+    // (diamonds in shifted rows) or "hexagonal" (hexagons in shifted rows or columns).
+    std::string orientation = "orthogonal";
+    std::string staggerAxis = "y";      // staggered/hexagonal: rows ("y") or columns ("x") shift
+    std::string staggerIndex = "odd";   // which of them shift: "odd" or "even"
+    int hexSideLength = 0;              // hexagonal: length of the flat side, px
 
     bool inside(int x, int y) const { return x >= 0 && y >= 0 && x < width && y < height; }
     std::uint32_t at(const Layer& l, int x, int y) const { return l.cells[static_cast<std::size_t>(y) * width + x]; }
@@ -278,6 +284,19 @@ struct RenderOptions {
     std::vector<std::string> layers;  // only these (names or indexes); empty = all visible
 };
 Image render(const Map& map, const RenderOptions& options = {});
+
+// Map shapes: where a cell's tile goes and which cell a pixel is in.
+bool orthogonal(const Map& map);
+// Size of the whole map in px, for any orientation.
+std::array<int, 2> mapPixelSize(const Map& map);
+// Top-left px of cell (x, y)'s tileWidth x tileHeight footprint.
+std::array<double, 2> cellOrigin(const Map& map, int x, int y);
+// The cell's outline in px (4 points for squares and diamonds, 6 for hexagons).
+std::vector<ObjPoint> cellOutline(const Map& map, int x, int y);
+// The cell under map pixel (px, py); may be outside the map.
+std::array<int, 2> cellAt(const Map& map, double px, double py);
+// Neighbouring cells sharing an edge (4 for squares and diamonds, 6 for hexagons).
+std::vector<std::array<int, 2>> cellNeighbours(const Map& map, int x, int y);
 // An object's outline in map px with its rotation applied (rect corners,
 // ellipse points, polygon/polyline points; empty for points).
 std::vector<ObjPoint> objectWorldPoints(const MapObject& object);

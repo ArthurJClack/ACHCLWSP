@@ -103,6 +103,9 @@ void Shell::gameSync() {
         g.tileH = std::max(1, static_cast<int>(tp::number(r, "tile_height", 16)));
         g.mapW = static_cast<int>(tp::number(r, "width"));
         g.mapH = static_cast<int>(tp::number(r, "height"));
+        g.orientation = tp::text(r, "orientation").empty() ? std::string("orthogonal") : tp::text(r, "orientation");
+        g.pixW = static_cast<int>(tp::number(r, "pixel_width", g.mapW * g.tileW));
+        g.pixH = static_cast<int>(tp::number(r, "pixel_height", g.mapH * g.tileH));
         g.layers = splitComma(tp::text(r, "layers"));
         g.layerKinds = splitComma(tp::text(r, "layer_kinds"));
         g.layerKinds.resize(g.layers.size(), "tiles");
@@ -185,7 +188,7 @@ std::string Shell::gamePicture() {
     GameCanvas& g = canvas_.game;
     if (g.kind == "scene") return scenePicture();
     Result r = g.kind == "level"
-                   ? query("levels.preview", {{"doc", currentDoc_}, {"scale", 1.0}, {"max_size", std::int64_t{8192}}})
+                   ? query("levels.preview", {{"doc", currentDoc_}, {"scale", 1.0}, {"max_size", std::int64_t{8192}}, {"grid", g.grid && g.orientation != "orthogonal"}})
                    : query("forge.sprite_preview", {{"doc", currentDoc_},
                                                     {"frame", static_cast<std::int64_t>(g.frame)},
                                                     {"scale", std::int64_t{1}},
@@ -264,7 +267,11 @@ void Shell::gameToolbar() {
     }
     if (isLevel) {
         ImGui::SameLine();
-        ImGui::Checkbox("Grid", &g.grid);
+        if (ImGui::Checkbox("Grid", &g.grid) && g.orientation != "orthogonal") canvas_.dirty = true;  // drawn into the picture
+        if (g.orientation != "orthogonal") {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s map", g.orientation.c_str());
+        }
     }
 }
 
@@ -275,18 +282,19 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
     const float z = canvas_.zoom;
     const bool isLevel = g.kind == "level";
     // a map bigger than the preview's size limit comes back shrunk: cells are then smaller on the picture
-    const float shrinkX = isLevel && g.mapW > 0 && canvas_.texture.srcWidth > 0
-                              ? std::min(1.0f, static_cast<float>(canvas_.texture.srcWidth) / static_cast<float>(g.mapW * g.tileW))
+    const float shrinkX = isLevel && g.pixW > 0 && canvas_.texture.srcWidth > 0
+                              ? std::min(1.0f, static_cast<float>(canvas_.texture.srcWidth) / static_cast<float>(g.pixW))
                               : 1.0f;
-    const float shrinkY = isLevel && g.mapH > 0 && canvas_.texture.srcHeight > 0
-                              ? std::min(1.0f, static_cast<float>(canvas_.texture.srcHeight) / static_cast<float>(g.mapH * g.tileH))
+    const float shrinkY = isLevel && g.pixH > 0 && canvas_.texture.srcHeight > 0
+                              ? std::min(1.0f, static_cast<float>(canvas_.texture.srcHeight) / static_cast<float>(g.pixH))
                               : 1.0f;
+    const bool squares = !isLevel || g.orientation == "orthogonal";
     const float cw = isLevel ? static_cast<float>(g.tileW) * shrinkX : 1.0f, ch = isLevel ? static_cast<float>(g.tileH) * shrinkY : 1.0f;
     const int cols = isLevel ? g.mapW : g.width, rows = isLevel ? g.mapH : g.height;
     auto screenOf = [&](float x, float y) { return ImVec2{origin.x + x * z, origin.y + y * z}; };
 
     // grid: tile cells for levels, pixels for sprites once they are big enough to see
-    if ((isLevel ? g.grid : true) && cw * z >= 6 && cols > 0 && rows > 0 && cols <= 1024 && rows <= 1024) {
+    if ((isLevel ? g.grid && squares : true) && cw * z >= 6 && cols > 0 && rows > 0 && cols <= 1024 && rows <= 1024) {
         const ImU32 line = IM_COL32(128, 128, 128, isLevel ? 90 : 50);
         for (int x = 0; x <= cols; ++x) dl->AddLine(screenOf(x * cw, 0), screenOf(x * cw, rows * ch), line);
         for (int y = 0; y <= rows; ++y) dl->AddLine(screenOf(0, y * ch), screenOf(cols * cw, y * ch), line);
@@ -296,7 +304,25 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
     if (isLevel && g.tool == GameTool::Stamp && g.haveStamp && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) g.haveStamp = false;
 
     const ImVec2 img = toImage(io.MousePos);
-    const int cx = static_cast<int>(std::floor(img.x / cw)), cy = static_cast<int>(std::floor(img.y / ch));
+    int cx = static_cast<int>(std::floor(img.x / cw)), cy = static_cast<int>(std::floor(img.y / ch));
+    if (!squares && (hovered || g.dragging)) {
+        // diamonds and hexagons: the level says which cell is under the mouse (asked again only when it moves)
+        if (img.x != g.hoverAt.x || img.y != g.hoverAt.y) {
+            g.hoverAt = img;
+            Result pk = query("levels.pick", {{"doc", currentDoc_}, {"px", static_cast<double>(img.x / shrinkX)}, {"py", static_cast<double>(img.y / shrinkY)}});
+            g.hoverX = static_cast<int>(tp::number(pk, "x", -1));
+            g.hoverY = static_cast<int>(tp::number(pk, "y", -1));
+            g.hoverOutline = tp::numbers(pk, "outline");
+        }
+        cx = g.hoverX, cy = g.hoverY;
+    }
+    auto drawOutline = [&](const std::vector<double>& o, ImU32 col, bool filled) {
+        std::vector<ImVec2> pts;
+        for (std::size_t i = 0; i + 1 < o.size(); i += 2) pts.push_back(screenOf(static_cast<float>(o[i]) * shrinkX, static_cast<float>(o[i + 1]) * shrinkY));
+        if (pts.size() < 3) return;
+        if (filled) dl->AddConvexPolyFilled(pts.data(), static_cast<int>(pts.size()), col);
+        else dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), col, ImDrawFlags_Closed, 1.5f);
+    };
     const bool inside = cx >= 0 && cy >= 0 && cx < cols && cy < rows;
     const ImU32 accent = ImGui::ColorConvertFloat4ToU32(accent_);
 
@@ -305,6 +331,8 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
         g.dragging = true;
         g.dragFrom = g.dragTo = {static_cast<float>(cx), static_cast<float>(cy)};
         g.points = {static_cast<double>(cx), static_cast<double>(cy)};
+        g.outlines.clear();
+        if (!squares) g.outlines.push_back(g.hoverOutline);
     }
     // drag (also on the release frame, so a fast flick keeps its last cells)
     if (g.dragging) {
@@ -323,6 +351,7 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
             }
             g.points.push_back(cx);
             g.points.push_back(cy);
+            if (!squares) g.outlines.push_back(g.hoverOutline);
         }
     }
     // release
@@ -335,6 +364,13 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
 
     // what the tool will do
     const ImU32 fill = IM_COL32(255, 255, 255, 70);
+    if (!squares) {
+        // diamonds and hexagons: the touched cells and the one under the mouse, in their own shapes
+        if (g.dragging)
+            for (const auto& o : g.outlines) drawOutline(o, IM_COL32(255, 255, 255, 70), true);
+        if (hovered && inside) drawOutline(g.hoverOutline, accent, false);
+        return;
+    }
     if (g.dragging && dragsShape(g.tool) && !(g.tool == GameTool::Stamp && g.haveStamp)) {
         const float x0 = std::min(g.dragFrom.x, g.dragTo.x), y0 = std::min(g.dragFrom.y, g.dragTo.y);
         const float x1 = std::max(g.dragFrom.x, g.dragTo.x) + 1, y1 = std::max(g.dragFrom.y, g.dragTo.y) + 1;

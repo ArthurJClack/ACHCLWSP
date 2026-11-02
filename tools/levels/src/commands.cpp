@@ -348,6 +348,11 @@ void registerFileCommands(Session& session) {
               {"tile_height", ParamType::Int, "tile height in px (default: tile_width)", false},
               {"layer", ParamType::String, "name of the first tile layer", false, {}, std::string("ground")},
               {"background", ParamType::String, "background colour, e.g. #203040 (default transparent)", false},
+              {"orientation", ParamType::String, "grid shape: square cells, isometric diamonds, diamonds in shifted rows, or hexagons", false,
+               {"orthogonal", "isometric", "staggered", "hexagonal"}, std::string("orthogonal")},
+              {"stagger_axis", ParamType::String, "staggered/hexagonal: shift rows (y, pointy-top hexagons) or columns (x, flat-top)", false, {"x", "y"}, std::string("y")},
+              {"stagger_index", ParamType::String, "staggered/hexagonal: whether odd or even rows/columns shift", false, {"odd", "even"}, std::string("odd")},
+              {"hex_side", ParamType::Int, "hexagonal: length of the flat side in px (default: half the tile)", false},
               previewParam()},
              false, true},
             [&session](const Params& p) -> std::unique_ptr<Action> {
@@ -357,6 +362,11 @@ void registerFileCommands(Session& session) {
                     const int th = clampInt(intParam(p, "tile_height", tw), 1, 1024);
                     auto doc = std::make_shared<LevelDoc>();
                     doc->map = newMap(w, h, tw, th);
+                    doc->map.orientation = stringParam(p, "orientation", "orthogonal");
+                    doc->map.staggerAxis = stringParam(p, "stagger_axis", "y");
+                    doc->map.staggerIndex = stringParam(p, "stagger_index", "odd");
+                    if (doc->map.orientation == "hexagonal")
+                        doc->map.hexSideLength = clampInt(intParam(p, "hex_side", (doc->map.staggerAxis == "x" ? tw : th) / 2), 0, 1024);
                     if (has(p, "background")) {
                         auto c = Color::parse(stringParam(p, "background"));
                         if (!c) return Result::failure("background isn't a colour: " + stringParam(p, "background"));
@@ -485,6 +495,9 @@ void registerFileCommands(Session& session) {
                     .with("height", static_cast<std::int64_t>(m.height))
                     .with("tile_width", static_cast<std::int64_t>(m.tileWidth))
                     .with("tile_height", static_cast<std::int64_t>(m.tileHeight))
+                    .with("orientation", m.orientation.empty() ? std::string("orthogonal") : m.orientation)
+                    .with("pixel_width", static_cast<std::int64_t>(mapPixelSize(m)[0]))
+                    .with("pixel_height", static_cast<std::int64_t>(mapPixelSize(m)[1]))
                     .with("layers", layers)
                     .with("layer_kinds", kinds)
                     .with("tilesets", tilesets)
@@ -592,7 +605,25 @@ void registerTilesetCommands(Session& session) {
                     std::error_code ec;
                     fs::create_directories(parent, ec);
                 }
-                raster::save(placeholderTileset(tiles, columns, m.tileWidth, m.tileHeight, style, colors), path);
+                Image sheet = placeholderTileset(tiles, columns, m.tileWidth, m.tileHeight, style, colors);
+                if (!orthogonal(m)) {
+                    // diamond or hexagon tiles for those maps: clear what's outside the cell's shape
+                    auto shape = cellOutline(m, 0, 0);
+                    const auto o = cellOrigin(m, 0, 0);
+                    for (auto& pt : shape) pt.x -= o[0], pt.y -= o[1];
+                    auto inside = [&](double px, double py) {
+                        bool in = false;
+                        for (std::size_t i = 0, j = shape.size() - 1; i < shape.size(); j = i++)
+                            if ((shape[i].y > py) != (shape[j].y > py) &&
+                                px < (shape[j].x - shape[i].x) * (py - shape[i].y) / (shape[j].y - shape[i].y) + shape[i].x)
+                                in = !in;
+                        return in;
+                    };
+                    for (int y = 0; y < sheet.height(); ++y)
+                        for (int x = 0; x < sheet.width(); ++x)
+                            if (!inside((x % m.tileWidth) + 0.5, (y % m.tileHeight) + 0.5)) sheet.pixel(x, y)[3] = 0;
+                }
+                raster::save(sheet, path);
                 Tileset t = loadTileset(path, m.tileWidth, m.tileHeight, 0, 0, stringParam(p, "name"));
                 t.tileCount = tiles;
                 if (m.tileset(t.name)) return Result::failure("there is already a tileset called '" + t.name + "' (give name=)");
@@ -1836,6 +1867,22 @@ void registerQueryCommands(Session& session) {
                 }
                 Result r = edited(plural(filled, "filled cell") + text, p);
                 return r.with("filled", static_cast<std::int64_t>(filled)).with("distinct", static_cast<std::int64_t>(distinctTotal));
+            }, false));
+
+    reg.add({"levels.pick", "Cell At Point",
+             "Which cell is under a pixel of the map picture (any grid shape: square, isometric, staggered, hexagonal), "
+             "with the cell's outline; for clicking cells in a picture.",
+             {docParam(), {"px", ParamType::Number, "x in map px", true}, {"py", ParamType::Number, "y in map px", true}}, false, true},
+            levelCommand(session, [](LevelDoc& doc, const Params& p) {
+                const Map& m = doc.map;
+                const auto c = cellAt(m, numberParam(p, "px"), numberParam(p, "py"));
+                NumberList outline;
+                for (const auto& pt : cellOutline(m, c[0], c[1])) {
+                    outline.push_back(pt.x);
+                    outline.push_back(pt.y);
+                }
+                Result r = edited("cell " + std::to_string(c[0]) + "," + std::to_string(c[1]) + (m.inside(c[0], c[1]) ? "" : " (outside the map)"), p);
+                return r.with("x", static_cast<std::int64_t>(c[0])).with("y", static_cast<std::int64_t>(c[1])).with("inside", m.inside(c[0], c[1])).with("outline", outline);
             }, false));
 
     reg.add({"levels.cell", "Inspect Cell", "What is at a cell: the tile on every tile layer (with tile properties) and the objects that cover it.",

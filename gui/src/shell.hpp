@@ -115,6 +115,12 @@ struct GameCanvas {
     std::string tilesetFor;  // doc/tileset/change the texture shows
     int tsColumns = 1, tsTiles = 0, tsTileW = 16, tsTileH = 16;
     bool grid = true;
+    std::string orientation = "orthogonal";  // isometric, staggered and hexagonal maps pick cells through levels.pick
+    int pixW = 0, pixH = 0;                  // the whole map in px
+    std::vector<std::vector<double>> outlines;  // non-square maps: outlines of the cells a stroke has touched
+    std::vector<double> hoverOutline;
+    int hoverX = -1, hoverY = -1;
+    ImVec2 hoverAt{-1, -1};
     int brushW = 1, brushH = 1;  // a block of tiles picked in the tileset: Paint stamps it
     bool tsDragging = false;
     int tsFrom = 0;

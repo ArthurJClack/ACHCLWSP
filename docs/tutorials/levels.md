@@ -698,6 +698,26 @@ painted terrain in 4 cells; auto-tiled 4 cells on ground with tiles auto:0..auto
 erased terrain in 1 cell; auto-tiled 1 cell on ground with tiles auto:0..auto:15
 ```
 
+### Isometric and hexagonal maps
+
+`levels.new` takes `orientation=isometric` (diamonds), `staggered` (diamonds in shifted rows) or `hexagonal`, with `stagger_axis=y` (rows shift: pointy-top hexagons) or `x` (columns shift: flat-top), `stagger_index=odd|even` and `hex_side` (the flat side's length; half the tile by default). Tiled's TMX/TMJ files with those shapes open too. Cells keep their column and row numbers, so every paint, fill and stamp command works the same; the picture puts each tile where Tiled would. `levels.tileset_placeholder` cuts its tiles to the map's shape, and the Godot export sets the TileSet's tile shape and layout.
+
+```text
+levels.new width=8 height=8 tile_width=32 tile_height=16 orientation=isometric -> a
+levels.tileset_placeholder doc=$a path=iso.png style=colors tiles=8
+levels.fill_rect doc=$a x=0 y=0 width=8 height=8 tile=2
+levels.pick doc=$a px=128 py=8
+```
+
+```text
+cell 0,0
+x: 0
+y: 0
+outline: 128,0,144,8,128,16,112,8
+```
+
+`levels.pick` turns a pixel of the map picture into a cell (and its outline), which is how clicks land in the window: on these maps the cell under the mouse is outlined in its own shape and the grid is drawn as diamonds or hexagons.
+
 ## 10. Auto-tiling in detail
 
 `levels.autotile` has three rules (`mode=`). The default, `4bit`, is the simplest complete one, 16 tiles chosen by a 4-bit mask of which of the four side neighbours are the same terrain:
@@ -762,7 +782,7 @@ Which tiles are solid: `solid=any` (any tile on the `from` layers, default every
 
 | format | open | save | notes |
 | --- | --- | --- | --- |
-| Tiled TMX (`.tmx`) | yes | yes | orthogonal maps; tile data CSV, base64, base64+zlib or base64+gzip (read); writes `csv`, `base64` or `zlib`; embedded or external `.tsx` tilesets (read); infinite maps open as finite ones covering their chunks; group layers are flattened (their offsets, parallax and tint pass down); image layers, layer offsets, parallax and tint, tile animations, tile collision shapes, Wang sets, polygon/polyline/rotated objects and tile objects are kept |
+| Tiled TMX (`.tmx`) | yes | yes | orthogonal, isometric, staggered and hexagonal maps; tile data CSV, base64, base64+zlib or base64+gzip (read); writes `csv`, `base64` or `zlib`; embedded or external `.tsx` tilesets (read); infinite maps open as finite ones covering their chunks; group layers are flattened (their offsets, parallax and tint pass down); image layers, layer offsets, parallax and tint, tile animations, tile collision shapes, Wang sets, polygon/polyline/rotated objects and tile objects are kept |
 | Tiled JSON (`.tmj`, or `.json` from Tiled) | yes | yes | same coverage as TMX; external `.tsj`/`.tsx` tilesets read |
 | plain JSON (`.json`) | yes | yes | `format: wetwaresuite-level`: `data` is rows of gids (0 empty), tilesets with `firstGid`, objects with typed properties |
 | LDtk-lite (`.ldtk`, or `.json` from LDtk) | yes (one level) | yes | Tiles and auto-layer tiles, IntGrid (as collision grids), entities with fields; one tileset per tile layer (others are left out with a warning); image layers are left out; cells must be square |
@@ -1500,7 +1520,7 @@ List a world's levels with their positions and sizes, and render the whole world
 
 ## 14. Limitations
 
-- **Orthogonal maps only.** Isometric, hexagonal and staggered maps are refused with a message. Infinite (chunked) maps open as finite maps just big enough for their chunks and are saved finite.
+- **Isometric, staggered and hexagonal maps** draw, paint, pick cells and go in and out of TMX, TMJ and Godot, but auto-tiling, the terrain brush and the generators still think in squares, and objects on them are placed in plain pixels (Tiled puts isometric objects in projected coordinates). Infinite (chunked) maps open as finite maps just big enough for their chunks and are saved finite.
 - **The window's tools are basic.** Paint, rectangles, erase, fill, pick and boxes for objects; no stamps, terrain brush, object editing or selection there yet (use the commands, or the form for any command in the right panel).
 - **TMX/TMJ coverage.** Object templates and text objects are not kept (text objects open as boxes, without their text). Group layers are flattened into their children. Zstandard-compressed tile data can't be read. Image-collection tilesets (one image per tile) open without pixels, so their tiles draw as colours. Tile collision shapes ignore the tile's flips.
 - **LDtk-lite** writes and reads a single level of an LDtk project with the fields engines' loaders use (layer instances with grid tiles, IntGrid values, entities with fields). The LDtk editor may want more definitions than are written; treat it as an export for runtimes, not a round trip with the editor. Multi-world projects and levels in separate files aren't read. One tileset per tile layer and square cells.
