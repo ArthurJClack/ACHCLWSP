@@ -233,6 +233,25 @@ void testPlan() {
     CHECK(count(plan.args, "-i") == 1 && after(plan.args, "-c:a").empty());
 
     // a range
+    // the graphics card's encoders (WETWARESUITE_HW_ENCODER=none in the tests, so auto is the CPU)
+    CHECK(plan.encoder == "libx264" && hardwareEncoders().empty());
+    rq.encoder = "nvenc";
+    plan = planExport(tl, rq, true);
+    CHECK(plan.encoder == "h264_nvenc" && after(plan.args, "-c:v") == "h264_nvenc" && after(plan.args, "-cq") == "22");
+    rq.encoder = "qsv";
+    CHECK(after(planExport(tl, rq, true).args, "-global_quality") == "22");
+    rq.encoder = "videotoolbox";
+    plan = planExport(tl, rq, true);
+    CHECK(plan.encoder == "h264_videotoolbox" && contains(after(plan.args, "-b:v"), "k"));
+    rq.encoder = "amf";
+    CHECK(planExport(tl, rq, true).encoder == "h264_amf");
+    rq.encoder = "gpu9000";
+    CHECK(throws([&] { planExport(tl, rq, true); }, "encoder"));
+    rq.encoder = "auto";
+    rq.output = "/out/x.webm";
+    CHECK(planExport(tl, rq, true).encoder == "libvpx-vp9");
+    rq.output = "/out/x.mp4";
+
     rq.start = 2;
     rq.end = 5;
     plan = planExport(tl, rq, true);
@@ -527,6 +546,196 @@ void testWithFfmpeg() {
     fs::remove_all(dir, ec);  // windows: a cached decoder may still hold a source open
 }
 
+// the media bin: files brought in without placing them, dragged onto a track at a time
+void testBin() {
+    const fs::path dir = tempDir("bin");
+    const std::string a = solidPng(dir / "a.png", {255, 0, 0, 255}), b = solidPng(dir / "b.png", {0, 0, 255, 255});
+    Session s;
+    registerCommands(s);
+    CHECK(run(s, "cut.new width=320 height=180").ok);
+    auto tl = s.workspace().getAs<Timeline>("cut1");
+    Result r = run(s, "cut.bin_add doc=cut1 path=" + q(a));
+    CHECK(r.ok && num(r, "count") == 1 && tl->duration() == 0);
+    CHECK(contains(run(s, "cut.bin_add doc=cut1 path=" + q(a)).message, "already"));
+    CHECK(!run(s, "cut.bin_add doc=cut1 path=" + q(dir / "nope.png")).ok);
+    CHECK(run(s, "cut.add_image doc=cut1 path=" + q(b) + " duration=2").ok);
+    r = run(s, "cut.bin doc=cut1");
+    CHECK(num(r, "count") == 2 && contains(text(r, "rows"), "a.png\timage\t0") && contains(text(r, "rows"), "b.png\timage\t1"));
+    // the window's drop: an AddFile edit with a place
+    wetwaresuite::TimelineEdit drop;
+    drop.kind = wetwaresuite::TimelineEditKind::AddFile;
+    drop.name = tl->bin[0];
+    drop.track = "v1";
+    drop.place = 3;
+    const std::string line = tl->timelineCommand(drop);
+    CHECK(contains(line, "cut.add_clip") && contains(line, "start=3"));
+    CHECK(run(s, line + " doc=cut1").ok);
+    CHECK(tl->track("v1")->clips.size() == 2 && near(tl->track("v1")->clips.back().start, 3));
+    TimelineLayout layout;
+    CHECK(tl->timeline(layout) && layout.media.size() == 2 && layout.tracks[0].clips[0].source == tl->bin[1]);
+    // undo takes the bin back too; it saves with the timeline
+    CHECK(run(s, "cut.bin_remove doc=cut1 path=" + q(a)).ok && tl->bin.size() == 1);
+    CHECK(run(s, "undo").ok && tl->bin.size() == 2);
+    const std::string path = (dir / "bin.wwcut").string();
+    CHECK(run(s, "cut.save doc=cut1 path=" + q(path)).ok);
+    r = run(s, "cut.open path=" + q(path));
+    auto again = s.workspace().getAs<Timeline>(toText(r.value));
+    CHECK(again && again->bin == tl->bin);
+    fs::remove_all(dir);
+}
+
+// dragging keyframes, voice cleanup, ducking and clip markers
+void testVideoSound() {
+    const fs::path dir = tempDir("vsound");
+    Session s;
+    registerCommands(s);
+    CHECK(run(s, "cut.new width=320 height=180 fps=25").ok);
+    auto tl = s.workspace().getAs<Timeline>("cut1");
+
+    // keyframes slide, and the selected clip shows the curve between them
+    CHECK(run(s, "cut.add_title doc=cut1 text=Hi start=0 duration=4").ok);
+    CHECK(run(s, "cut.keyframe doc=cut1 clip=c1 property=opacity value=0 t=0").ok);
+    CHECK(run(s, "cut.keyframe doc=cut1 clip=c1 property=opacity value=1 t=2").ok);
+    wetwaresuite::TimelineEdit mk;
+    mk.kind = wetwaresuite::TimelineEditKind::MoveKey;
+    mk.clip = "c1";
+    mk.at = 2;
+    mk.start = 1;
+    const std::string line = tl->timelineCommand(mk);
+    CHECK(contains(line, "cut.move_keyframe clip=c1 from=2.0000 to=1.0000"));
+    CHECK(run(s, line + " doc=cut1").ok);
+    CHECK(tl->findClip("c1")->keys.at("opacity").size() == 2 && near(tl->findClip("c1")->keys.at("opacity")[1].t, 1));
+    CHECK(!run(s, "cut.move_keyframe doc=cut1 clip=c1 from=3 to=1").ok);
+    CHECK(!run(s, "cut.move_keyframe doc=cut1 clip=c1 from=1 to=9").ok);
+    TimelineLayout layout;
+    tl->timeline(layout);
+    const auto& tc = layout.tracks[0].clips[0];
+    CHECK(tc.curveName == "opacity" && tc.curve.size() == 64 && tc.curve.front() < 0.01f && tc.curve.back() > 0.99f);
+
+    // ducking: music on a2 drops 12 dB while the voice on a1 talks
+    audio::Buffer voice = audio::tone(1, 3.0, 22050, 1000, 0.5);
+    for (std::size_t i = 0; i < voice.frames(); ++i)
+        if (i < 22050 || i >= 44100) voice.channels[0][i] = 0;  // talks from 1 to 2 s
+    audio::save(voice, dir / "voice.wav");
+    audio::save(audio::tone(1, 3.0, 22050, 440, 0.5), dir / "music.wav");
+    CHECK(run(s, "cut.add_audio doc=cut1 path=" + q(dir / "voice.wav") + " track=a1").ok);
+    CHECK(run(s, "cut.add_audio doc=cut1 path=" + q(dir / "music.wav") + " track=a2").ok);
+    const audio::Buffer plain = mixAudio(*tl, 0, 3, 22050);
+    CHECK(!run(s, "cut.set_track doc=cut1 track=a2 duck_under=v1").ok);
+    CHECK(run(s, "cut.set_track doc=cut1 track=a2 duck_under=auto duck_db=-12").ok && tl->track("a2")->duckUnder == "auto");
+    const audio::Buffer ducked = mixAudio(*tl, 0, 3, 22050);
+    auto diffRms = [&](double a, double b) {
+        double sum = 0;
+        const auto i0 = static_cast<std::size_t>(a * 22050), i1 = static_cast<std::size_t>(b * 22050);
+        for (std::size_t i = i0; i < i1; ++i) sum += std::pow(plain.channels[0][i] - ducked.channels[0][i], 2);
+        return std::sqrt(sum / static_cast<double>(i1 - i0));
+    };
+    CHECK(diffRms(0.1, 0.6) < 0.01);  // before the voice: untouched
+    CHECK(diffRms(1.4, 1.8) > 0.2);   // under it: the music is down by about three quarters
+    CHECK(diffRms(2.9, 3.0) < diffRms(1.4, 1.8));  // coming back up after
+    TimelineLayout lay2;
+    tl->timeline(lay2);
+    bool duckToggle = false;
+    for (const auto& t : lay2.tracks)
+        for (const auto& g : t.toggles)
+            if (t.id == "a2" && g.name == "duck") duckToggle = g.on;
+    CHECK(duckToggle);
+    CHECK(run(s, "cut.set_track doc=cut1 track=a2 duck_under=off").ok && tl->track("a2")->duckUnder.empty());
+
+    // voice cleanup: steady hiss under a voice comes down
+    audio::Buffer noisy = audio::noise(1, 2.0, 22050, 0.1);
+    const audio::Buffer words = audio::tone(1, 2.0, 22050, 300, 0.4);
+    for (std::size_t i = 22050; i < noisy.frames(); ++i) noisy.channels[0][i] += words.channels[0][i];
+    audio::save(noisy, dir / "noisy.wav");
+    CHECK(run(s, "cut.add_audio doc=cut1 path=" + q(dir / "noisy.wav") + " track=a3").ok);
+    const std::string nid = tl->track("a3")->clips[0].id;
+    CHECK(run(s, "cut.set_track doc=cut1 track=a1 muted=true").ok && run(s, "cut.set_track doc=cut1 track=a2 muted=true").ok);
+    auto hiss = [&] {
+        const audio::Buffer m = mixAudio(*tl, 0, 2, 22050);
+        double sum = 0;
+        for (std::size_t i = 2205; i < 19845; ++i) sum += static_cast<double>(m.channels[0][i]) * m.channels[0][i];
+        return std::sqrt(sum / (19845 - 2205));
+    };
+    const double before = hiss();
+    CHECK(!run(s, "cut.set_clip doc=cut1 clip=" + nid + " denoise=99").ok);
+    CHECK(run(s, "cut.set_clip doc=cut1 clip=" + nid + " denoise=20").ok);
+    CHECK(hiss() < before * 0.4);
+
+    // clip markers ride along with their clip; plain ones stay
+    CHECK(run(s, "cut.add_marker doc=cut1 t=1.5 clip=c1 name=beat").ok);
+    CHECK(run(s, "cut.add_marker doc=cut1 t=3.5 name=plain").ok);
+    CHECK(!run(s, "cut.add_marker doc=cut1 t=9 clip=c1").ok);
+    CHECK(run(s, "cut.move_clip doc=cut1 clip=c1 start=2").ok);
+    CHECK(near(tl->markers[0].t, 3.5) && tl->markers[0].clip == "c1");
+    bool plainStayed = false;
+    for (const auto& m : tl->markers) plainStayed = plainStayed || (m.name == "plain" && near(m.t, 3.5) && m.clip.empty());
+    CHECK(plainStayed);
+    CHECK(run(s, "undo").ok && near(tl->findClip("c1")->start, 0));
+    bool back = false;
+    for (const auto& m : tl->markers) back = back || (m.name == "beat" && near(m.t, 1.5));
+    CHECK(back);
+    // moved on purpose, it stays put; deleting the clip frees it
+    const std::string beat = tl->markers[0].name == "beat" ? tl->markers[0].id : tl->markers[1].id;
+    CHECK(run(s, "cut.set_marker doc=cut1 marker=" + beat + " t=1").ok);
+    CHECK(run(s, "cut.delete_clip doc=cut1 clip=c1").ok);
+    for (const auto& m : tl->markers)
+        if (m.id == beat) CHECK(near(m.t, 1) && m.clip.empty());
+    // the window's Marker button on a selected clip makes a clip marker
+    const Result again = run(s, "cut.add_title doc=cut1 text=Again start=0 duration=2");
+    CHECK(again.ok);
+    wetwaresuite::TimelineEdit me;
+    me.kind = wetwaresuite::TimelineEditKind::Marker;
+    me.clip = toText(again.value);
+    me.at = 1;
+    CHECK(contains(tl->timelineCommand(me), "clip=" + me.clip));
+    fs::remove_all(dir);
+}
+
+// hardware encoding falls back to the CPU; proxies of big sources for previews
+void testProxiesAndEncoders() {
+    if (!findProgram("ffmpeg") || !findProgram("ffprobe")) {
+        std::printf("ffmpeg not found: skipping proxy tests\n");
+        return;
+    }
+    const fs::path dir = tempDir("proxy");
+    const std::string ff = findProgram("ffmpeg")->string();
+    const std::string big = (dir / "big.mp4").string();
+    CHECK(runProgram({ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=2560x1440:r=10:d=1", "-c:v", "libx264", "-preset",
+                      "ultrafast", "-pix_fmt", "yuv420p", big})
+              .exitCode == 0);
+    Session s;
+    registerCommands(s);
+    CHECK(run(s, "cut.new width=1280 height=720 fps=10").ok);
+    CHECK(run(s, "cut.add_clip doc=cut1 path=" + q(big)).ok);
+    Result r = run(s, "cut.proxies doc=cut1");
+    CHECK(r.ok && num(r, "count") == 1 && num(r, "ready") == 0 && contains(text(r, "rows"), "2560x1440\tnone"));
+    CHECK(run(s, "cut.proxies doc=cut1 action=clear").ok);
+    r = run(s, "cut.proxies doc=cut1 action=make");
+    CHECK(r.ok && num(r, "ready") == 1);
+    const std::string rows = text(r, "rows");
+    const std::string proxy = rows.substr(rows.rfind('\t') + 1, rows.size() - rows.rfind('\t') - 2);
+    Result pr = run(s, "cut.probe path=" + q(proxy));
+    CHECK(pr.ok && num(pr, "height") == 540 && num(pr, "width") == 960);
+    // previews read it
+    auto tl = s.workspace().getAs<Timeline>("cut1");
+    {
+        auto player = tl->player();
+        int w = 0, h = 0;
+        std::vector<std::uint8_t> rgba;
+        CHECK(player->frame(0.5, 320, w, h, rgba) && w == 320 && h == 180);
+    }
+    CHECK(run(s, "cut.proxies doc=cut1 action=off").ok && !std::get<bool>(*run(s, "cut.proxies doc=cut1").field("on")));
+    CHECK(run(s, "cut.proxies doc=cut1 action=on").ok);
+    // a graphics card encoder that can't run here falls back to the CPU and says so
+    r = run(s, "cut.render doc=cut1 output=" + q((dir / "hw.mp4").string()) + " encoder=nvenc quality=draft");
+    CHECK(r.ok && fs::file_size(dir / "hw.mp4") > 0);
+    CHECK(text(r, "encoder") == "h264_nvenc" || !text(r, "hw_fallback").empty());
+    r = run(s, "cut.render doc=cut1 output=" + q((dir / "cpu.mp4").string()) + " encoder=cpu quality=draft");
+    CHECK(r.ok && text(r, "encoder") == "libx264");
+    CHECK(run(s, "cut.proxies doc=cut1 action=clear").ok && num(run(s, "cut.proxies doc=cut1"), "ready") == 0);
+    fs::remove_all(dir);
+}
+
 void testMcp() {
     Session session;
     registerCommands(session);
@@ -573,6 +782,9 @@ int main() {
     testEdits();
     testSequence();
     testWithFfmpeg();
+    testBin();
+    testVideoSound();
+    testProxiesAndEncoders();
     testMcp();
     return check::summary("cut");
 }

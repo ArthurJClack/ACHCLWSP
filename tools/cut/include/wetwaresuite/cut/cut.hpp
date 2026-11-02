@@ -57,6 +57,7 @@ struct Clip {
     double volume = 1;
     bool mute = false;
     double pan = 0;  // -1 left .. 1 right
+    double denoise = 0;  // voice cleanup: dB of steady noise (hiss, hum, fans) taken out, 0 = off
     double fadeIn = 0, fadeOut = 0;  // seconds on the timeline (picture and sound)
     double opacity = 1;
     std::string blend = "normal";
@@ -145,6 +146,10 @@ struct Track {
     bool locked = false;
     bool solo = false;
     double volume = 1;
+    // ducking (audio tracks): drop by duckDb while other sound plays. "" = off, "auto" = under every
+    // audio track that isn't ducked itself (the voices), or one track's id
+    std::string duckUnder;
+    double duckDb = -12;
     std::vector<Clip> clips;  // kept sorted by start
     bool operator==(const Track&) const = default;
 };
@@ -155,6 +160,7 @@ struct Marker {
     double duration = 0;
     std::string name;
     std::string color = "green";
+    std::string clip;  // a clip marker: moves with this clip (empty = stays at its time)
     bool operator==(const Marker&) const = default;
 };
 
@@ -167,6 +173,7 @@ public:
     double masterVolume = 1;
     int nextClip = 1, nextLink = 1, nextMarker = 1;
     double cursor = 0;  // the playhead: razor, markers and inserts default to it; previews show it
+    std::vector<std::string> bin;  // the media bin: files brought in (cut.bin_add and every file added), to drag onto tracks
 
     std::string kind() const override { return "timeline"; }
     std::string summary() const override;
@@ -220,6 +227,7 @@ private:
         std::vector<Marker> markers;
         double inPoint = -1, outPoint = -1, masterVolume = 1;
         int nextClip = 1, nextLink = 1, nextMarker = 1;
+        std::vector<std::string> bin;
     };
     std::shared_ptr<Timeline> doc_;
     std::function<Result(Timeline&)> fn_;
@@ -285,6 +293,9 @@ struct ExportRequest {
     std::string listPath;          // where the caller will write the concat list for stream copy
     std::string audioPath;         // where the caller writes the mixed sound (WAV) for encoding
     double shrink = 1;             // a retry after missing a file size limit: less bitrate (gif: smaller, fewer frames)
+    // H.264 encoder: auto (the graphics card's when ffmpeg can use it, except quality=best), cpu (libx264),
+    // or one of nvenc, qsv, amf, videotoolbox
+    std::string encoder = "auto";
 };
 
 // The ffmpeg run that encodes composited frames read from stdin (rawvideo rgba) plus a mixed WAV.
@@ -301,7 +312,12 @@ struct EncodePlan {
     std::string concatList;
     double maxBytes = 0;  // the preset's file size limit, checked after encoding
     int videoKbps = 0;    // the bitrate cap that limit set (0 = none)
+    std::string encoder;  // the ffmpeg video encoder used ("libx264", "h264_nvenc", ...; empty without video)
 };
+// The hardware H.264 encoders that work here, best first ("nvenc", "qsv", "amf", "videotoolbox"):
+// each is tried once on a tiny clip and remembered. WETWARESUITE_HW_ENCODER=none turns them off,
+// or names one to use without trying it.
+std::vector<std::string> hardwareEncoders();
 // "TikTok: up to 10:00, 287 MB, 30 fps" (empty when the preset has no limits).
 std::string presetLimits(const Preset& preset);
 // Plans an export. Pure: touches no files. Throws std::runtime_error with a readable reason.

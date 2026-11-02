@@ -204,7 +204,7 @@ void Shell::drawSelection(ImDrawList* dl, ImVec2 origin, bool hovered) {
 
     // marching ants around the selection
     auto doc = std::dynamic_pointer_cast<raster::ImageDoc>(session_.workspace().get(currentDoc_));
-    animating_ = doc && doc->hasSelection();
+    animating_ = animating_ || (doc && doc->hasSelection());
     if (!doc || !doc->hasSelection()) {
         canvas_.ants.clear();
         canvas_.antsDoc.clear();

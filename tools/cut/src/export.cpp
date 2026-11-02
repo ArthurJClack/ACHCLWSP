@@ -5,9 +5,13 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
+#include "media.hpp"
+#include "wetwaresuite/core/process.hpp"
 #include "wetwaresuite/cut/cut.hpp"
 
 namespace wetwaresuite::cut {
@@ -167,7 +171,58 @@ std::string clockOf(double seconds) {
 
 std::vector<std::string> head() { return {"ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-y"}; }
 
+const std::vector<std::string>& hwNames() {
+    static const std::vector<std::string> names = {"nvenc", "qsv", "amf", "videotoolbox"};
+    return names;
+}
+
+// The H.264 encoder arguments for one encoder name; crf is the libx264-style quality (18 best .. 28 draft).
+std::vector<std::string> h264Args(const std::string& enc, int crf, bool draft, const std::string& speed, int width, int height, double fps) {
+    const std::string q = std::to_string(crf);
+    if (enc == "nvenc") return {"-c:v", "h264_nvenc", "-preset", draft ? "p1" : "p4", "-rc", "vbr", "-cq", q, "-b:v", "0", "-pix_fmt", "yuv420p"};
+    if (enc == "qsv") return {"-c:v", "h264_qsv", "-preset", draft ? "veryfast" : "medium", "-global_quality", q, "-pix_fmt", "nv12"};
+    if (enc == "amf") return {"-c:v", "h264_amf", "-quality", draft ? "speed" : "balanced", "-rc", "cqp", "-qp_i", q, "-qp_p", q, "-pix_fmt", "yuv420p"};
+    if (enc == "videotoolbox") {
+        // a bitrate from the picture size: every Mac's encoder takes -b:v, not all take a quality
+        const double bitsPerPixel = draft ? 0.05 : crf <= 20 ? 0.12 : 0.08;
+        const long kbps = std::max(500L, static_cast<long>(width * static_cast<double>(height) * fps * bitsPerPixel / 1000));
+        return {"-c:v", "h264_videotoolbox", "-b:v", std::to_string(kbps) + "k", "-pix_fmt", "yuv420p"};
+    }
+    return {"-c:v", "libx264", "-preset", speed, "-crf", q, "-pix_fmt", "yuv420p"};
+}
+
 }  // namespace
+
+std::vector<std::string> hardwareEncoders() {
+    static std::once_flag once;
+    static std::vector<std::string> found;
+    std::call_once(once, [] {
+        const char* env = std::getenv("WETWARESUITE_HW_ENCODER");
+        const std::string forced = env ? lower(env) : "";
+        if (forced == "none" || forced == "cpu" || forced == "off" || forced == "0") return;
+        if (!forced.empty()) {
+            if (std::find(hwNames().begin(), hwNames().end(), forced) != hwNames().end()) found.push_back(forced);
+            return;
+        }
+        auto ffmpeg = ffmpegPath();
+        if (!ffmpeg) return;
+#if defined(__APPLE__)
+        const std::vector<std::string> tryThese = {"videotoolbox"};
+#else
+        const std::vector<std::string> tryThese = {"nvenc", "qsv", "amf"};
+#endif
+        // listed isn't enough (a build can list nvenc with no NVIDIA card): encode a few frames with each
+        const ProcessResult listed = runProgram({*ffmpeg, "-hide_banner", "-encoders"});
+        for (const auto& name : tryThese) {
+            if (listed.output.find("h264_" + name) == std::string::npos) continue;
+            std::vector<std::string> args = {*ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=gray:s=640x360:r=30:d=0.2"};
+            for (const auto& a : h264Args(name, 23, true, "ultrafast", 640, 360, 30)) args.push_back(a);
+            args.insert(args.end(), {"-frames:v", "6", "-f", "null", "-"});
+            if (runProgram(args).exitCode == 0) found.push_back(name);
+        }
+    });
+    return found;
+}
 
 std::string streamCopyBlocker(const Timeline& tl, const std::string& outExtRaw) {
     const std::string outExt = lower(outExtRaw);
@@ -385,18 +440,30 @@ EncodePlan planExport(const Timeline& tl, const ExportRequest& rq, bool hasSound
         const std::string graph = "[0:v]split[g1][g2];[g1]" + filter("palettegen", {{"stats_mode", "diff"}}) + "[pal];[g2][pal]" +
                                   filter("paletteuse", {{"dither", "bayer"}, {"bayer_scale", "4"}}) + "[out]";
         plan.args.insert(plan.args.end(), {"-filter_complex", graph, "-map", "[out]", "-loop", "0"});
+        plan.encoder = "gif";
     } else if (plan.video) {
         plan.args.insert(plan.args.end(), {"-map", "0:v"});
         if (vcodec == "vp9") {
             const int crf = preset ? preset->crf : draft ? 42 : best ? 24 : 33;
             plan.args.insert(plan.args.end(), {"-c:v", "libvpx-vp9", "-crf", std::to_string(crf), "-b:v", "0", "-deadline", draft ? "realtime" : "good",
                                                "-cpu-used", draft ? "8" : best ? "2" : "5", "-row-mt", "1", "-pix_fmt", "yuv420p"});
+            plan.encoder = "libvpx-vp9";
         } else if (vcodec == "prores") {
             plan.args.insert(plan.args.end(), {"-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"});
+            plan.encoder = "prores_ks";
         } else {
             const int crf = preset ? preset->crf : draft ? 28 : best ? 18 : 22;
             const std::string speed = preset && !preset->speed.empty() ? preset->speed : draft ? "ultrafast" : best ? "slow" : "veryfast";
-            plan.args.insert(plan.args.end(), {"-c:v", "libx264", "-preset", speed, "-crf", std::to_string(crf), "-pix_fmt", "yuv420p"});
+            std::string enc = lower(rq.encoder.empty() ? std::string("auto") : rq.encoder);
+            if (enc == "auto") {
+                const auto hw = best ? std::vector<std::string>{} : hardwareEncoders();
+                enc = hw.empty() ? "cpu" : hw.front();
+            } else if (enc != "cpu" && std::find(hwNames().begin(), hwNames().end(), enc) == hwNames().end()) {
+                throw std::runtime_error("encoder is auto, cpu, nvenc, qsv, amf or videotoolbox");
+            }
+            const auto args = h264Args(enc, crf, draft, speed, plan.width, plan.height, plan.fps);
+            plan.args.insert(plan.args.end(), args.begin(), args.end());
+            plan.encoder = args[1];
             if (plan.videoKbps > 0) {
                 plan.args.insert(plan.args.end(), {"-maxrate", std::to_string(plan.videoKbps) + "k", "-bufsize", std::to_string(plan.videoKbps) + "k"});
             }

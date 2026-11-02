@@ -550,6 +550,12 @@ struct Transport {
     bool recording = false, recClipped = false;
     std::string recProject;
     double recAt = 0, recSeconds = 0, recPeakDb = -200;
+    // proxies of big video sources (video app): made in the background after each change
+    std::uint64_t proxySeen = ~0ull;
+    std::string proxyDoc;
+    double proxyPolled = -10;
+    int proxyCount = 0, proxyReady = 0;
+    bool proxiesOn = true, proxyMaking = false;
 };
 
 // The timeline panel's own state (timeline_view.cpp).
@@ -559,7 +565,7 @@ struct TimelineState {
     double scroll = 0;  // seconds at the left edge
     double cursor = 0;  // where Split cuts
     std::string selTrack, selClip;
-    enum class Drag { None, Cursor, Move, TrimStart, TrimEnd, FadeIn, FadeOut, Gain } drag = Drag::None;
+    enum class Drag { None, Cursor, Move, TrimStart, TrimEnd, FadeIn, FadeOut, Gain, Key } drag = Drag::None;
     double grabT = 0, origStart = 0, origLength = 0, headroom = -1, tailroom = -1;
     double origValue = 0, dragValue = 0;  // a fade (seconds) or gain (dB) handle while it's dragged
 };
@@ -917,6 +923,7 @@ private:
     void codeSync();
     void codeCommit();
     void codeOpenAt(const std::string& path, int line);
+    void codeLanguageServer();  // completion list, hover notes, go to definition, live problems
     void codeRun(const std::string& what);
     void codePoll();
     void codeFind(int step);

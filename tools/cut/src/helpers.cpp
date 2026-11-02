@@ -74,6 +74,7 @@ const std::vector<ParamSpec>& allSpecs() {
         {"volume", ParamType::Number, "sound level: 1 = unchanged, 0.3 = quiet, 2 = louder (keyframable)", false},
         {"mute", ParamType::Bool, "silence this clip's sound", false},
         {"pan", ParamType::Number, "-1 (left) .. 1 (right), 0 = centre (keyframable)", false},
+        {"denoise", ParamType::Number, "voice cleanup: take this many dB of steady noise out (hiss, hum, fans, room tone); 0 = off, 12 is a good start (0..40)", false},
         {"fade_in", ParamType::Number, "fade in over this many seconds (picture from transparent, sound from silence)", false},
         {"fade_out", ParamType::Number, "fade out over this many seconds", false},
         {"opacity", ParamType::Number, "0 (invisible) .. 1 (solid) (keyframable)", false},
@@ -224,6 +225,7 @@ std::string applyProps(Clip& c, const Params& p) {
     n("volume", c.volume);
     b("mute", c.mute);
     n("pan", c.pan);
+    n("denoise", c.denoise);
     n("fade_in", c.fadeIn);
     n("fade_out", c.fadeOut);
     n("opacity", c.opacity);
@@ -310,7 +312,7 @@ std::string applyProps(Clip& c, const Params& p) {
             }
         }
     }
-    if ((c.kind == "title" || c.kind == "color" || c.kind == "image") && (has(p, "volume") || has(p, "mute") || has(p, "pan"))) {
+    if ((c.kind == "title" || c.kind == "color" || c.kind == "image") && (has(p, "volume") || has(p, "mute") || has(p, "pan") || has(p, "denoise"))) {
         return "a " + c.kind + " has no sound";
     }
     return {};
@@ -327,6 +329,7 @@ std::string validate(const Clip& c) {
     if (c.kind == "nest" && c.nested && c.out > c.nested->duration() + 0.05) return "out is past the end of the nested sequence";
     if (c.volume < 0 || c.volume > 10) return "volume must be between 0 and 10";
     if (c.pan < -1 || c.pan > 1) return "pan must be -1..1";
+    if (c.denoise < 0 || c.denoise > 40) return "denoise must be 0..40 dB";
     if (c.opacity < 0 || c.opacity > 1) return "opacity must be between 0 and 1";
     if (c.fadeIn < 0 || c.fadeOut < 0) return "fades can't be negative";
     if (c.fadeIn + c.fadeOut > c.length() + 1e-3) return "fade_in + fade_out is longer than the clip (" + num(c.length()) + "s)";
@@ -420,6 +423,7 @@ std::string describe(const Timeline& tl, const Track& track, const Clip& c) {
     add("volume", c.volume, 1);
     if (c.mute) s += " muted";
     add("pan", c.pan, 0);
+    add("denoise", c.denoise, 0);
     add("fade_in", c.fadeIn, 0);
     add("fade_out", c.fadeOut, 0);
     add("opacity", c.opacity, 1);
@@ -710,6 +714,7 @@ Result addClip(Timeline& tl, const Params& p, Clip c, const std::string& default
         }
     }
     tl.track(trackId)->clips.push_back(c);
+    if (!c.source.empty() && std::find(tl.bin.begin(), tl.bin.end(), c.source) == tl.bin.end()) tl.bin.push_back(c.source);
     Result r = clipResult("added " + what + " " + c.id + " on " + trackId + " at " + num(c.start) + "s" +
                               (soundId.empty() ? std::string() : " with its sound linked as " + soundId + " on " + trackOf(tl, soundId)->id),
                           tl, p, c.id);

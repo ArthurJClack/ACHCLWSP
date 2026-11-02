@@ -228,7 +228,8 @@ void registerMarkerCommands(Session& session) {
              {docParam(), {"t", ParamType::Number, "timeline time (default the playhead)", false},
               {"name", ParamType::String, "what it marks", false},
               {"color", ParamType::String, "marker colour", false, kMarkerColours, std::string("green")},
-              {"duration", ParamType::Number, "seconds it spans (0 = a point)", false, {}, 0.0}},
+              {"duration", ParamType::Number, "seconds it spans (0 = a point)", false, {}, 0.0},
+              {"clip", ParamType::String, "make it a clip marker: it moves with this clip (its time must be on the clip)", false}},
              true},
             cutCommand(session, [](Timeline& tl, const Params& p) {
                 Marker m;
@@ -238,6 +239,11 @@ void registerMarkerCommands(Session& session) {
                 m.color = stringParam(p, "color", "green");
                 m.duration = std::max(0.0, numberParam(p, "duration", 0));
                 if (std::find(kMarkerColours.begin(), kMarkerColours.end(), m.color) == kMarkerColours.end()) return Result::failure("unknown marker colour '" + m.color + "'");
+                if (has(p, "clip")) {
+                    const Clip* c = requireClip(tl, p);
+                    if (m.t < c->start - 1e-6 || m.t > c->end() + 1e-6) return Result::failure("the marker's time isn't on " + c->id + " (" + num(c->start) + "-" + num(c->end()) + "s)");
+                    m.clip = c->id;
+                }
                 tl.markers.push_back(m);
                 std::sort(tl.markers.begin(), tl.markers.end(), [](const Marker& a, const Marker& b) { return a.t < b.t; });
                 Result r = Result::success("marker " + m.id + " at " + num(m.t) + "s" + (m.name.empty() ? "" : " \"" + m.name + "\""), m.id);
@@ -286,7 +292,7 @@ void registerMarkerCommands(Session& session) {
                 std::string text = tl.markers.empty() ? "no markers (cut.add_marker adds one)" : "";
                 for (const auto& m : tl.markers) {
                     text += (text.empty() ? "" : "\n") + m.id + " " + num(m.t) + "s " + m.color + (m.duration > 0 ? " " + num(m.duration) + "s" : "") +
-                            (m.name.empty() ? "" : " " + m.name);
+                            (m.name.empty() ? "" : " " + m.name) + (m.clip.empty() ? "" : " (on " + m.clip + ")");
                 }
                 Result r = Result::success(text);
                 return r.with("count", static_cast<std::int64_t>(tl.markers.size()));

@@ -168,6 +168,40 @@ void Shell::transportBar() {
         recordButton();
         ImGui::SameLine();
     }
+    if (tool == "cut" && find("cut.proxies")) {
+        // big sources (4K and up) get small copies for smooth playback, made in the background
+        const double now = ImGui::GetTime();
+        if (t.proxySeen != changes_ || t.proxyDoc != currentDoc_) {
+            t.proxySeen = changes_;
+            t.proxyDoc = currentDoc_;
+            const Result r = session_.run("cut.proxies", {{"doc", currentDoc_}, {"action", std::string(t.proxiesOn ? "make" : "status")}, {"wait", false}});
+            t.proxyPolled = -10;
+            (void)r;
+        }
+        if (now - t.proxyPolled > 1.0) {
+            t.proxyPolled = now;
+            const Result r = session_.run("cut.proxies", {{"doc", currentDoc_}});
+            t.proxyCount = static_cast<int>(numberField(r, "count"));
+            t.proxyReady = static_cast<int>(numberField(r, "ready"));
+            t.proxyMaking = stringField(r, "rows").find("\tmaking\t") != std::string::npos;
+            t.proxiesOn = boolField(r, "on");
+        }
+        if (t.proxyMaking) animating_ = true;  // keep drawing so the count moves while the window is idle
+        if (t.proxyCount > 0) {
+            bool on = t.proxiesOn;
+            const std::string label = t.proxyMaking ? "Proxies " + std::to_string(t.proxyReady) + "/" + std::to_string(t.proxyCount) + "..." : std::string("Proxies");
+            if (ImGui::Checkbox(label.c_str(), &on)) {
+                t.proxiesOn = on;
+                session_.run("cut.proxies", {{"doc", currentDoc_}, {"action", std::string(on ? "on" : "off")}});
+                if (on) session_.run("cut.proxies", {{"doc", currentDoc_}, {"action", std::string("make")}, {"wait", false}});
+                t.proxyPolled = -10;
+            }
+            ImGui::SetItemTooltip("%s", t.proxyMaking ? "Making small copies of the big clips so they play smoothly; export still uses the originals"
+                                        : on ? "Playback reads small copies of the big clips; export still uses the originals"
+                                             : "Playback reads the full-size clips (can stutter on 4K)");
+            ImGui::SameLine();
+        }
+    }
 
     // a timeline keeps its own playhead: the bar shows and moves that one while stopped
     auto doc = session_.workspace().get(currentDoc_);

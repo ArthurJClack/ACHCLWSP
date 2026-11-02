@@ -392,7 +392,7 @@ void testWindowHooks(Session& s, const fs::path& dir) {
             return std::any_of(props.begin(), props.end(), [&](const ClipProperty& p) { return p.name == name; });
         };
         CHECK(has("opacity") && has("fade_in") && has("grayscale") && !has("volume") && !has("speed"));
-        CHECK(sound->clipProperties(sound->track("a1")->clips.front().id).size() == 6);  // speed, fades, volume, pan, mute
+        CHECK(sound->clipProperties(sound->track("a1")->clips.front().id).size() == 7);  // speed, fades, volume, pan, mute, noise cleanup
         CHECK(still->clipProperties("c99").empty());
         wetwaresuite::TimelineEdit set{TimelineEditKind::SetProperty, id};
         set.name = "opacity";

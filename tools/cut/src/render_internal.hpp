@@ -61,6 +61,7 @@ struct FrameContext::Impl {
     std::map<std::string, std::unique_ptr<VideoReader>> readers;
     std::map<std::string, long> readerUse;
     long useCounter = 0;
+    bool preview = false;      // the previews' context: reads proxies of big sources when they're there
     bool approximate = false;  // scrubbing: a nearby frame from the scrub cache beats waiting for the exact one
     std::map<std::string, std::shared_ptr<const TitleImage>> titles;
     std::map<std::string, std::shared_ptr<const Lut3d>> luts;

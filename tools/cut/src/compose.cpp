@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "media.hpp"
+#include "proxy.hpp"
 #include "render_internal.hpp"
 #include "wetwaresuite/raster/codec.hpp"
 #include "wetwaresuite/raster/ops.hpp"
@@ -308,8 +309,9 @@ bool FrameContext::Impl::video(const std::string& path, double sourceTime, int w
         std::lock_guard<std::mutex> g(hookLock());
         if (hook()) return hook()(path, sourceTime, width, height, out);
     }
-    if (approximate && scrubFrame(path, sourceTime, width, height, out)) return true;
-    const std::string key = path + "|" + std::to_string(width) + "x" + std::to_string(height);
+    const std::string& file = preview ? previewSource(path) : path;
+    if (approximate && scrubFrame(file, sourceTime, width, height, out)) return true;
+    const std::string key = file + "|" + std::to_string(width) + "x" + std::to_string(height);
     auto it = readers.find(key);
     if (it == readers.end()) {
         if (!ffmpegPath()) throw std::runtime_error(missingFfmpeg());
@@ -319,7 +321,7 @@ bool FrameContext::Impl::video(const std::string& path, double sourceTime, int w
             readers.erase(oldest->first);
             readerUse.erase(oldest);
         }
-        it = readers.emplace(key, std::make_unique<VideoReader>(path, width, height, rate)).first;
+        it = readers.emplace(key, std::make_unique<VideoReader>(file, width, height, rate)).first;
     }
     readerUse[key] = ++useCounter;
     std::string err;
@@ -360,6 +362,8 @@ const Lut3d* FrameContext::Impl::lut(const std::string& path) {
 
 FrameContext& previewContext() {
     static FrameContext ctx;
+    static const bool marked = (ctx.impl().preview = true);
+    (void)marked;
     return ctx;
 }
 
