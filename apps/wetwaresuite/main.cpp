@@ -72,7 +72,7 @@ void usage() {
                  "  wetwaresuite run <command> key=value  run one command, e.g. run convert.file input=a.png output=a.jpg\n"
                  "  wetwaresuite <command> key=value      same as run\n"
                  "  wetwaresuite batch [file] [--keep-going]  run a script of commands (stdin if no file)\n"
-                 "  wetwaresuite mcp [--tools a,b]        serve all (or some) tools to Claude over MCP on stdin/stdout\n"
+                 "  wetwaresuite mcp [--tools a,b] [--catalog|--all-tools]  serve all (or some) tools to Claude over MCP\n"
                  "  wetwaresuite mcp --http [--port N] [--host H] [--token T]  serve MCP over HTTP instead\n"
                  "  wetwaresuite --version\n";
 }
@@ -195,11 +195,12 @@ int main(int argc, char** argv) {
                     rest.push_back(args[i]);
                 }
             }
+            const mcp::ToolMode mode = mcp::takeToolModeArgs(rest);
             mcp::TransportOptions transport;
             std::string error;
             if (!mcp::parseTransportArgs(rest, transport, error)) {
-                std::cerr << "error: " << error << "\nusage: wetwaresuite mcp [--tools a,b] [--http ...]  (tools: " << joinedTools()
-                          << ")\n" << mcp::transportUsage();
+                std::cerr << "error: " << error << "\nusage: wetwaresuite mcp [--tools a,b] [--catalog|--all-tools] [--http ...]  (tools: "
+                          << joinedTools() << ")\n" << mcp::toolModeUsage() << mcp::transportUsage();
                 return 2;
             }
             if (hasTools) {
@@ -226,10 +227,10 @@ int main(int argc, char** argv) {
                 Session filtered;
                 suite::registerAll(filtered, keep);
                 apps::registerCommands(filtered, "suite");
-                mcp::Server server(filtered, {"wetwaresuite", kVersion, instructions});
+                mcp::Server server(filtered, {"wetwaresuite", kVersion, instructions, mode});
                 return mcp::serve(server, transport, std::cin, std::cout, std::cerr);
             }
-            mcp::Server server(session, {"wetwaresuite", kVersion, instructions});
+            mcp::Server server(session, {"wetwaresuite", kVersion, instructions, mode});
             return mcp::serve(server, transport, std::cin, std::cout, std::cerr);
         }
         if (cmd == "batch") {

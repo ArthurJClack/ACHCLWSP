@@ -4,7 +4,10 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cctype>
 #include <map>
+#include <vector>
 #include <istream>
 #include <ostream>
 
@@ -243,6 +246,136 @@ bool toParams(const json& args, Params& out, std::string& error) {
     return true;
 }
 
+
+// ---- catalog mode: find_tools / describe_tools / run_tool ----
+
+constexpr const char* kFindTools = "find_tools";
+constexpr const char* kDescribeTools = "describe_tools";
+constexpr const char* kRunTool = "run_tool";
+
+json catalogTools() {
+    auto tool = [](const char* name, const char* title, const char* description, json properties, json required,
+                   bool readOnly) {
+        return json{{"name", name},
+                    {"title", title},
+                    {"description", description},
+                    {"inputSchema", {{"type", "object"}, {"properties", std::move(properties)}, {"required", std::move(required)}}},
+                    {"annotations", {{"title", title}, {"readOnlyHint", readOnly}, {"openWorldHint", false}}}};
+    };
+    json tools = json::array();
+    tools.push_back(tool(kFindTools, "Find tools",
+                         "Search this server's tools by what you want to do (e.g. 'resize image', 'fillet edge', "
+                         "'export pdf'), or list a whole family by its name (e.g. 'photo', 'cad'). Gives each "
+                         "match's name and what it does; then describe_tools for its parameters and run_tool to use it.",
+                         {{"query", {{"type", "string"}, {"description", "words describing the job, or a tool family name"}}},
+                          {"limit", {{"type", "integer"}, {"description", "most matches to return (1-200)"}, {"default", 20}}}},
+                         json::array({"query"}), true));
+    tools.push_back(tool(kDescribeTools, "Describe tools",
+                         "The full input schema (every parameter, its type, choices and default) of one or more tools "
+                         "found with find_tools.",
+                         {{"names", {{"type", "string"}, {"description", "tool names, comma separated, e.g. photo_resize,photo_crop"}}}},
+                         json::array({"names"}), true));
+    tools.push_back(tool(kRunTool, "Run a tool",
+                         "Run any tool of this server by name with its arguments (see describe_tools). Same as calling "
+                         "the tool directly; each change is one undo step.",
+                         {{"name", {{"type", "string"}, {"description", "tool name, e.g. photo_resize"}}},
+                          {"arguments", {{"type", "object"}, {"description", "the tool's arguments"}}}},
+                         json::array({"name"}), false));
+    return tools;
+}
+
+std::string lower(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::vector<std::string> words(const std::string& text) {
+    std::vector<std::string> out;
+    std::string w;
+    for (char ch : text + " ") {
+        const auto c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c)) {
+            w += static_cast<char>(std::tolower(c));
+            continue;
+        }
+        if (!w.empty()) {
+            // a plural asks for the same thing: "layers" finds "layer"
+            if (w.size() > 3 && w.back() == 's' && w[w.size() - 2] != 's') w.pop_back();
+            out.push_back(w);
+        }
+        w.clear();
+    }
+    return out;
+}
+
+std::string firstSentence(const std::string& text) {
+    auto end = text.find(". ");
+    std::string s = end == std::string::npos ? text : text.substr(0, end + 1);
+    if (s.size() > 220) s = s.substr(0, 217) + "...";
+    return s;
+}
+
+std::string family(const std::string& commandId) { return commandId.substr(0, commandId.find('.')); }
+
+struct Match {
+    int score;
+    const CommandInfo* info;
+};
+
+std::vector<Match> findTools(const CommandRegistry& registry, const std::string& query) {
+    const std::vector<std::string> want = words(query);
+    std::vector<Match> out;
+    if (want.empty()) return out;
+    // the name of a family ("photo", "cad") lists all of it
+    const bool wholeFamily = want.size() == 1 && [&] {
+        bool found = false;
+        registry.forEach([&](const CommandInfo& info) { found = found || family(info.id) == want[0]; });
+        return found;
+    }();
+    registry.forEach([&](const CommandInfo& info) {
+        if (wholeFamily) {
+            if (family(info.id) == want[0]) out.push_back({0, &info});
+            return;
+        }
+        const std::string id = lower(info.id), title = lower(info.title), desc = lower(info.description);
+        const auto idWords = words(info.id), titleWords = words(info.title);
+        auto has = [](const std::vector<std::string>& ws, const std::string& w) {
+            return std::find(ws.begin(), ws.end(), w) != ws.end();
+        };
+        int score = 0, matched = 0;
+        for (const auto& w : want) {
+            int best = 0;
+            if (has(idWords, w)) best = 8;
+            else if (has(titleWords, w)) best = 6;
+            else if (id.find(w) != std::string::npos) best = 4;
+            else if (title.find(w) != std::string::npos) best = 3;
+            else if (desc.find(w) != std::string::npos) best = 1;
+            if (best) ++matched;
+            score += best;
+        }
+        if (!matched) return;
+        // every word found beats most words found, however strong
+        score += matched == static_cast<int>(want.size()) ? 1000 : matched * 100;
+        out.push_back({score, &info});
+    });
+    std::stable_sort(out.begin(), out.end(), [](const Match& a, const Match& b) { return a.score > b.score; });
+    return out;
+}
+
+// "photo (45), paint (30), ..." in registry order, for the instructions
+std::string familySummary(const CommandRegistry& registry) {
+    std::vector<std::pair<std::string, int>> counts;
+    registry.forEach([&](const CommandInfo& info) {
+        const std::string f = family(info.id);
+        auto it = std::find_if(counts.begin(), counts.end(), [&](const auto& c) { return c.first == f; });
+        if (it == counts.end()) counts.emplace_back(f, 1);
+        else ++it->second;
+    });
+    std::string out;
+    for (const auto& [f, n] : counts) out += (out.empty() ? "" : ", ") + f + " (" + std::to_string(n) + ")";
+    return out;
+}
+
 }  // namespace
 
 std::string base64(const std::string& bytes) {
@@ -297,10 +430,38 @@ std::string toolsListJsonReference(const CommandRegistry& registry) {
     return tools.dump();
 }
 
+ToolMode takeToolModeArgs(std::vector<std::string>& args) {
+    ToolMode mode = ToolMode::Auto;
+    std::vector<std::string> rest;
+    for (auto& a : args) {
+        if (a == "--catalog") mode = ToolMode::Catalog;
+        else if (a == "--all-tools") mode = ToolMode::All;
+        else rest.push_back(std::move(a));
+    }
+    args = std::move(rest);
+    return mode;
+}
+
+const char* toolModeUsage() {
+    return "  --catalog     list three tools (find_tools, describe_tools, run_tool) instead of every command\n"
+           "  --all-tools   list every command as its own tool (the default up to 150 commands)\n";
+}
+
+bool Server::catalog() const {
+    if (info_.mode == ToolMode::Auto) return session_.registry().size() > kCatalogThreshold;
+    return info_.mode == ToolMode::Catalog;
+}
+
+std::string Server::catalogJson() {
+    json tools = catalogTools();
+    for (const auto& t : kNoArgsTools) tools.push_back(noArgsTool(t.name, t.description, t.readOnly));
+    return tools.dump();
+}
+
 const std::string& Server::toolsJson() {
     const auto& reg = session_.registry();
     if (toolsRevision_ != reg.revision()) {
-        tools_ = toolsListJson(reg);
+        tools_ = catalog() ? catalogJson() : toolsListJson(reg);
         toolsRevision_ = reg.revision();
     }
     return tools_;
@@ -331,6 +492,113 @@ std::string Server::toolName(const std::string& commandId) {
     return out;
 }
 
+std::string Server::callTool(const std::string& tool, const std::string& argumentsJson) {
+    const json arguments = json::parse(argumentsJson, nullptr, false);
+    if (tool == "undo") {
+        bool done = session_.history().undo();
+        return textResult(done ? "undone" : "nothing to undo", !done).dump();
+    }
+    if (tool == "redo") {
+        bool done = session_.history().redo();
+        return textResult(done ? "redone" : "nothing to redo", !done).dump();
+    }
+    if (tool == "history") {
+        std::string text;
+        for (const auto& label : session_.history().labels()) text += label + "\n";
+        return textResult(text.empty() ? "history is empty" : text, false).dump();
+    }
+    if (tool == "documents") {
+        std::string text;
+        json docs = json::array();
+        for (const auto& docId : session_.workspace().ids()) {
+            auto doc = session_.workspace().get(docId);
+            text += docId + " (" + doc->kind() + "): " + doc->summary() + "\n";
+            docs.push_back({{"id", docId}, {"kind", doc->kind()}, {"summary", doc->summary()}, {"path", doc->path}});
+        }
+        json out = textResult(text.empty() ? "no open documents" : text, false);
+        out["structuredContent"] = {{"documents", docs}};
+        return out.dump();
+    }
+    if (tool == kFindTools) {
+        const std::string query = arguments.is_object() ? arguments.value("query", "") : "";
+        std::int64_t limit = 20;
+        if (arguments.is_object() && arguments.contains("limit") && arguments["limit"].is_number())
+            limit = std::clamp<std::int64_t>(static_cast<std::int64_t>(arguments["limit"].get<double>()), 1, 200);
+        const auto matches = findTools(session_.registry(), query);
+        if (matches.empty()) {
+            return textResult("no tools match '" + query + "'. Families: " + familySummary(session_.registry()), true).dump();
+        }
+        std::string text;
+        json found = json::array();
+        for (std::size_t i = 0; i < matches.size() && static_cast<std::int64_t>(i) < limit; ++i) {
+            const CommandInfo& info = *matches[i].info;
+            const std::string name = toolName(info.id), what = firstSentence(info.description);
+            text += name + ": " + what + "\n";
+            found.push_back({{"name", name}, {"title", info.title}, {"description", what}});
+        }
+        if (static_cast<std::int64_t>(matches.size()) > limit)
+            text += "(" + std::to_string(matches.size() - static_cast<std::size_t>(limit)) + " more; raise limit= or narrow the words)\n";
+        json out = textResult(text, false);
+        out["structuredContent"] = {{"tools", found}, {"total", matches.size()}};
+        return out.dump();
+    }
+    if (tool == kDescribeTools) {
+        const std::string names = arguments.is_object() ? arguments.value("names", "") : "";
+        json described = json::array();
+        std::string missing;
+        std::string item;
+        for (char c : names + ",") {
+            if (c != ',' && c != ' ') {
+                item += c;
+                continue;
+            }
+            if (item.empty()) continue;
+            const std::string commandId = commandFor(item);
+            const CommandInfo* info = commandId.empty() ? nullptr : session_.registry().find(commandId);
+            if (info) described.push_back(describe(*info));
+            else missing += (missing.empty() ? "" : ", ") + item;
+            item.clear();
+        }
+        if (described.empty()) return textResult("no such tools: " + (missing.empty() ? std::string("(none given)") : missing), true).dump();
+        std::string text = described.dump(1);
+        if (!missing.empty()) text += "\nnot found: " + missing;
+        json out = textResult(text, false);
+        out["structuredContent"] = {{"tools", described}};
+        return out.dump();
+    }
+
+    const std::string commandId = commandFor(tool);
+    if (commandId.empty()) return {};
+
+    Params args;
+    std::string error;
+    if (!toParams(arguments.is_discarded() ? json::object() : arguments, args, error)) return textResult(error, true).dump();
+    // a number sent for a string param (e.g. a cad expression field) means its text
+    if (const auto* info = session_.registry().find(commandId)) {
+        for (const auto& spec : info->params) {
+            auto it = args.find(spec.name);
+            if (spec.type == ParamType::String && it != args.end() &&
+                (std::holds_alternative<std::int64_t>(it->second) || std::holds_alternative<double>(it->second))) {
+                std::string text = toText(it->second);
+                if (auto d = std::get_if<double>(&it->second)) {
+                    char buf[40];
+                    std::snprintf(buf, sizeof buf, "%.15g", *d);
+                    if (std::strtod(buf, nullptr) != *d) std::snprintf(buf, sizeof buf, "%.17g", *d);
+                    text = buf;
+                }
+                it->second = text;
+            }
+        }
+    }
+    Result result;
+    try {
+        result = session_.run(commandId, args);
+    } catch (const std::exception& e) {
+        result = Result::failure(std::string("internal error: ") + e.what());
+    }
+    return toolResult(result).dump();
+}
+
 std::optional<std::string> Server::handle(const std::string& line) {
     json msg = json::parse(line, nullptr, false);
     if (msg.is_discarded() || !msg.is_object()) return rpcError(nullptr, -32700, "parse error").dump();
@@ -355,7 +623,15 @@ std::optional<std::string> Server::handle(const std::string& line) {
                        {"capabilities",
                         {{"tools", {{"listChanged", false}}}, {"resources", {{"listChanged", false}}}}},
                        {"serverInfo", {{"name", info_.name}, {"version", info_.version}}}};
-        if (!info_.instructions.empty()) result["instructions"] = info_.instructions;
+        std::string instructions = info_.instructions;
+        if (catalog()) {
+            instructions += std::string(instructions.empty() ? "" : "\n\n") + "This server has " +
+                            std::to_string(session_.registry().size()) +
+                            " tools, too many to list at once. Use find_tools to search them by job or family, "
+                            "describe_tools for a tool's parameters, then run_tool (or call the tool by its name). "
+                            "Families: " + familySummary(session_.registry()) + ".";
+        }
+        if (!instructions.empty()) result["instructions"] = instructions;
         return rpcResult(id, result).dump();
     }
     if (method == "ping") return rpcResult(id, json::object()).dump();
@@ -368,64 +644,19 @@ std::optional<std::string> Server::handle(const std::string& line) {
 
     if (method == "tools/call") {
         const std::string tool = params.value("name", "");
-        if (tool == "undo") {
-            bool done = session_.history().undo();
-            return rpcResult(id, textResult(done ? "undone" : "nothing to undo", !done)).dump();
+        const json arguments = params.value("arguments", json::object());
+        if (tool == kRunTool) {
+            const std::string inner = arguments.is_object() ? arguments.value("name", "") : "";
+            if (inner.empty()) return rpcResult(id, textResult("run_tool needs name= (a tool from find_tools)", true)).dump();
+            if (inner == kRunTool) return rpcResult(id, textResult("run_tool can't run itself", true)).dump();
+            const json innerArgs = arguments.value("arguments", json::object());
+            std::string r = callTool(inner, innerArgs.dump());
+            if (r.empty()) return rpcResult(id, textResult("unknown tool: " + inner + " (find_tools lists them)", true)).dump();
+            return "{\"id\":" + id.dump() + ",\"jsonrpc\":\"2.0\",\"result\":" + r + "}";
         }
-        if (tool == "redo") {
-            bool done = session_.history().redo();
-            return rpcResult(id, textResult(done ? "redone" : "nothing to redo", !done)).dump();
-        }
-        if (tool == "history") {
-            std::string text;
-            for (const auto& label : session_.history().labels()) text += label + "\n";
-            return rpcResult(id, textResult(text.empty() ? "history is empty" : text, false)).dump();
-        }
-        if (tool == "documents") {
-            std::string text;
-            json docs = json::array();
-            for (const auto& docId : session_.workspace().ids()) {
-                auto doc = session_.workspace().get(docId);
-                text += docId + " (" + doc->kind() + "): " + doc->summary() + "\n";
-                docs.push_back({{"id", docId}, {"kind", doc->kind()}, {"summary", doc->summary()}, {"path", doc->path}});
-            }
-            json out = textResult(text.empty() ? "no open documents" : text, false);
-            out["structuredContent"] = {{"documents", docs}};
-            return rpcResult(id, out).dump();
-        }
-
-        const std::string commandId = commandFor(tool);
-        if (commandId.empty()) return rpcError(id, -32602, "unknown tool: " + tool).dump();
-
-        Params args;
-        std::string error;
-        if (!toParams(params.value("arguments", json::object()), args, error)) {
-            return rpcResult(id, textResult(error, true)).dump();
-        }
-        // a number sent for a string param (e.g. a cad expression field) means its text
-        if (const auto* info = session_.registry().find(commandId)) {
-            for (const auto& spec : info->params) {
-                auto it = args.find(spec.name);
-                if (spec.type == ParamType::String && it != args.end() &&
-                    (std::holds_alternative<std::int64_t>(it->second) || std::holds_alternative<double>(it->second))) {
-                    std::string text = toText(it->second);
-                    if (auto d = std::get_if<double>(&it->second)) {
-                        char buf[40];
-                        std::snprintf(buf, sizeof buf, "%.15g", *d);
-                        if (std::strtod(buf, nullptr) != *d) std::snprintf(buf, sizeof buf, "%.17g", *d);
-                        text = buf;
-                    }
-                    it->second = text;
-                }
-            }
-        }
-        Result result;
-        try {
-            result = session_.run(commandId, args);
-        } catch (const std::exception& e) {
-            result = Result::failure(std::string("internal error: ") + e.what());
-        }
-        return rpcResult(id, toolResult(result)).dump();
+        std::string r = callTool(tool, arguments.dump());
+        if (r.empty()) return rpcError(id, -32602, "unknown tool: " + tool).dump();
+        return "{\"id\":" + id.dump() + ",\"jsonrpc\":\"2.0\",\"result\":" + r + "}";
     }
 
     if (method == "resources/list") {
