@@ -79,10 +79,22 @@ struct TrashItem {
     std::int64_t deleted = 0;
     std::uint64_t size = 0;
     bool dir = false;
+    std::string system;  // in the computer's own trash: where (empty: in the suite's trash folder)
 };
 fs::path trashFolder();  // <data folder>/trash
 // Moves a file or folder into the trash and returns its id.
 std::string moveToTrash(const fs::path& p);
+// The computer's own trash (Recycle Bin, macOS Trash, freedesktop trash): where the item went and
+// its record there (Linux .trashinfo, Windows $I file). The item is empty when the Recycle Bin took
+// it but couldn't be found again (restore then has to happen from the Recycle Bin).
+struct SystemTrashed {
+    fs::path item, record;
+};
+SystemTrashed moveToSystemTrashRaw(const fs::path& abs);
+bool systemTrashWanted();  // false when WETWARESUITE_TRASH=suite
+// Moves into the computer's trash, falling back to the suite's trash when it can't take it (another
+// drive, no desktop). Returns an id like moveToTrash: explorer.trash lists it, restore puts it back.
+std::string moveToSystemTrash(const fs::path& p, bool* usedSystem = nullptr);
 // Puts it back where it was (or at `to`); returns where it went.
 fs::path restoreFromTrash(const std::string& id, const fs::path& to = {});
 std::vector<TrashItem> trashItems();

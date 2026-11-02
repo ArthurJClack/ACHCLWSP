@@ -4,7 +4,8 @@ add_library(wetwaresuite_explorer
   src/files.cpp
   src/cmd_browse.cpp
   src/cmd_change.cpp
-  src/cmd_archive.cpp)
+  src/cmd_archive.cpp
+  src/system_trash.cpp)
 add_library(wetwaresuite::explorer ALIAS wetwaresuite_explorer)
 target_include_directories(wetwaresuite_explorer PUBLIC include)
 target_link_libraries(wetwaresuite_explorer PUBLIC wetwaresuite::core

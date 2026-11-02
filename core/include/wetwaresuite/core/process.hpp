@@ -48,6 +48,9 @@ public:
     // `env` added to the environment. False with a plain-word `error` when it can't.
     bool start(const std::vector<std::string>& args, const std::filesystem::path& cwd, std::string& error,
                const std::vector<std::pair<std::string, std::string>>& env = {});
+    // Call before start: the program's error output is thrown away instead of mixed into read()
+    // (for programs that speak a protocol on their output, such as language servers).
+    void dropErrors(bool on);
     // Output that arrived since the last call; never blocks.
     std::string read();
     // Waits up to `seconds` for more output or the end; returns what arrived.

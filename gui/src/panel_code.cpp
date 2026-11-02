@@ -290,6 +290,25 @@ void Shell::codeToolbar() {
         c.gotoLine = c.editor.cursor.line + 1;
     }
     ImGui::SetItemTooltip("Jump to a line number (Ctrl+G)");
+    tp::flow("View");
+    if (ImGui::Button("View")) ImGui::OpenPopup("codeview");
+    ImGui::SetItemTooltip("Wrap long lines, fold blocks");
+    if (ImGui::BeginPopup("codeview")) {
+        ImGui::Checkbox("Wrap long lines (Alt+Z)", &c.editor.wrap);
+        if (ImGui::Checkbox("Language server", &c.lsp)) {
+            c.lspProblems.clear();
+            c.lspPoll = 0;
+            if (!c.lsp) run("code.lsp", {{"action", std::string("stop")}});
+        }
+        ImGui::SetItemTooltip("Completion (Ctrl+Space), go to definition (F12 or Ctrl+click), notes when the mouse rests on a name, and problems as you "
+                              "type, from the language server installed for the file's language (clangd, pyright, rust-analyzer, gopls, ...)");
+        if (ImGui::Selectable("Fold every block")) editorFoldAll(c.editor, true);
+        if (ImGui::Selectable("Open every block")) editorFoldAll(c.editor, false);
+        ImGui::Separator();
+        ImGui::TextDisabled("Ctrl+Shift+[ / ] folds or opens the block at the caret.");
+        ImGui::TextDisabled("Alt+click adds a caret, Ctrl+D the next match, Ctrl+Alt+Up/Down a line.");
+        ImGui::EndPopup();
+    }
     ImGui::EndDisabled();
     if (pro_ && !c.editor.doc.empty()) {
         ImGui::SameLine();
@@ -747,7 +766,8 @@ void Shell::codeOutput() {
             c.bottom = 0;
             ImGui::EndTabItem();
         }
-        const std::string problems = "Problems (" + std::to_string(c.problems.size()) + ")###problems";
+        const std::size_t live = c.lsp && c.lspProblemsFor == c.editor.doc ? c.lspProblems.size() : 0;
+        const std::string problems = "Problems (" + std::to_string(c.problems.size() + live) + ")###problems";
         if (ImGui::BeginTabItem(problems.c_str(), nullptr, want == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
             c.bottom = 1;
             ImGui::EndTabItem();
@@ -778,7 +798,25 @@ void Shell::codeOutput() {
         return;
     }
     ImGui::BeginChild("problems", {0, 0}, ImGuiChildFlags_Borders);
-    if (c.problems.empty()) ImGui::TextDisabled("No errors or warnings.");
+    const bool live = c.lsp && c.lspProblemsFor == c.editor.doc;
+    if (c.problems.empty() && (!live || c.lspProblems.empty())) ImGui::TextDisabled("No errors or warnings.");
+    // the language server's, for the file in the editor, as it is now
+    for (std::size_t i = 0; live && i < c.lspProblems.size(); ++i) {
+        const auto& p = c.lspProblems[i];
+        if (p.size() < 4) continue;
+        ImGui::PushID(static_cast<int>(100000 + i));
+        const bool error = p[2] == "error";
+        ImGui::PushStyleColor(ImGuiCol_Text, error ? ImVec4{0.95f, 0.45f, 0.42f, 1} : ImVec4{0.92f, 0.72f, 0.25f, 1});
+        ImGui::TextUnformatted(p[2].c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::Selectable(("line " + p[0] + ":" + p[1] + "  " + p[3]).c_str())) {
+            const int line = std::stoi(p[0]) - 1, col = std::stoi(p[1]) - 1;
+            editorSelect(c.editor, {line, col}, {line, col});
+            c.editor.focusNext = true;
+        }
+        ImGui::PopID();
+    }
     for (std::size_t i = 0; i < c.problems.size(); ++i) {
         const auto& p = c.problems[i];
         if (p.size() < 5) continue;
@@ -809,6 +847,11 @@ void Shell::codePanel() {
     for (const auto& p : c.problems) {
         if (p.size() > 3 && !edPath.empty() && (samePath(p[0], edPath) || tp::baseName(p[0]) == tp::baseName(edPath))) {
             ed.marks.emplace_back(std::stoi(p[1]) - 1, p[3] == "error");
+        }
+    }
+    if (c.lsp && c.lspProblemsFor == ed.doc) {
+        for (const auto& p : c.lspProblems) {
+            if (p.size() > 2 && (p[2] == "error" || p[2] == "warning")) ed.marks.emplace_back(std::stoi(p[0]) - 1, p[2] == "error");
         }
     }
     // shortcuts
@@ -858,7 +901,9 @@ void Shell::codePanel() {
     } else {
         codeTabs();
         codeFindBar();
+        ed.menuOpen = c.compOpen;
         if (drawEditor(ed, monoFont, dark_, {0, -outputH})) c.outlineSeen = ~0ull;
+        codeLanguageServer();
         if (ed.wantUndo) {
             ed.wantUndo = false;
             undo();
@@ -868,10 +913,171 @@ void Shell::codePanel() {
             redo();
         }
     }
+    std::string lspNote;
+    if (!ed.doc.empty() && c.lsp && c.lspProblemsFor == ed.doc) lspNote = "   " + std::to_string(c.lspProblems.size()) + " problem(s)";
+    if (!ed.doc.empty() && !c.lsp && c.lspHintFor == ed.language && !c.lspHint.empty()) lspNote = "   " + c.lspHint;
     ImGui::TextDisabled("%s", ed.doc.empty() ? "" : ("Line " + std::to_string(ed.cursor.line + 1) + ", column " + std::to_string(ed.cursor.col + 1) +
-                                                     (ed.language.empty() ? "" : "   " + ed.language) + (c.project.empty() ? "" : "   " + c.project)).c_str());
+                                                     (ed.extra.empty() ? "" : "   " + std::to_string(ed.extra.size() + 1) + " carets") +
+                                                     (ed.language.empty() ? "" : "   " + ed.language) + lspNote + (c.project.empty() ? "" : "   " + c.project)).c_str());
     codeOutput();
     ImGui::EndChild();
+}
+
+void Shell::codeLanguageServer() {
+    CodePanel& c = panels_->code;
+    CodeEditor& ed = c.editor;
+    const double now = tp::seconds();
+    std::string edPath;
+    for (const auto& f : c.files) {
+        if (f[0] == ed.doc && f.size() > 1) edPath = f[1];
+    }
+    // off: say once per language when a server is there to turn on
+    if (!c.lsp) {
+        if (c.lspHintFor != ed.language) {
+            c.lspHintFor = ed.language;
+            c.lspHint.clear();
+            for (const auto& r : tp::rows(query("code.lsp", {}))) {
+                if (r.size() > 2 && r[0] == ed.language && r[2] != "not installed") c.lspHint = r[1] + " is installed: View > Language server";
+            }
+        }
+        c.compOpen = false;
+        ed.wantComplete = ed.wantDefinition = false;
+        return;
+    }
+    if (edPath.empty()) {
+        if (ed.wantComplete || ed.wantDefinition) c.status = "Save the file first: the language server reads it from disk.";
+        ed.wantComplete = ed.wantDefinition = false;
+        c.compOpen = false;
+        return;
+    }
+    auto spot = [&](TextPos p) {
+        return Params{{"doc", ed.doc}, {"line", static_cast<std::int64_t>(p.line + 1)}, {"col", static_cast<std::int64_t>(p.col + 1)}};
+    };
+    // live problems, a moment after typing stops
+    if (now - ed.lastEdit > 0.8 && now - c.lspPoll > 1.5) {
+        c.lspPoll = now;
+        codeCommit();
+        Params q{{"doc", ed.doc}, {"wait", 0.0}};
+        Result r = query("code.diagnostics", q);
+        if (r.ok) {
+            c.lspProblems = tp::rows(r, "rows");
+            c.lspProblemsFor = ed.doc;
+            c.lspWaiting = tp::text(r, "fresh") != "true";
+        } else {
+            c.status = friendlyError(r.message);
+            c.lsp = false;  // no server for this file: off, with the reason in the status line
+        }
+    }
+    // keep drawing (and so asking) while the server is still looking, or typing just stopped
+    if (c.lsp && (c.lspWaiting || now - ed.lastEdit < 2.5)) animating_ = true;
+    // completion list
+    auto refilter = [&]() {
+        const std::string& line = ed.lines[static_cast<std::size_t>(ed.cursor.line)];
+        if (ed.cursor.line != c.compLine || ed.cursor.col < c.compFrom) {
+            c.compOpen = false;
+            return;
+        }
+        std::string typed = line.substr(static_cast<std::size_t>(c.compFrom), static_cast<std::size_t>(ed.cursor.col - c.compFrom));
+        for (auto& ch : typed) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        c.comps.clear();
+        for (const auto& it : c.compsAll) {
+            std::string l = it[0];
+            for (auto& ch : l) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (l.rfind(typed, 0) == 0) c.comps.push_back(it);
+        }
+        c.compSel = std::clamp(c.compSel, 0, std::max(0, static_cast<int>(c.comps.size()) - 1));
+        if (c.comps.empty()) c.compOpen = false;
+    };
+    if (ed.wantComplete) {
+        ed.wantComplete = false;
+        codeCommit();
+        Result r = query("code.complete", spot(ed.cursor));
+        if (r.ok) {
+            c.compsAll = tp::rows(r, "rows");
+            c.compFrom = static_cast<int>(tp::number(r, "from_col")) - 1;
+            c.compLine = ed.cursor.line;
+            c.compSel = 0;
+            c.compOpen = !c.compsAll.empty();
+            refilter();
+            if (c.compsAll.empty()) c.status = "Nothing to complete here.";
+        } else {
+            c.status = friendlyError(r.message);
+        }
+    }
+    if (c.compOpen) refilter();
+    if (c.compOpen) {
+        auto accept = [&](int i) {
+            const auto& it = c.comps[static_cast<std::size_t>(i)];
+            editorReplaceAtCaret(ed, c.compFrom, it.size() > 3 && !it[3].empty() ? it[3] : it[0]);
+            c.compOpen = false;
+            ed.focusNext = true;
+        };
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) c.compSel = (c.compSel + 1) % static_cast<int>(c.comps.size());
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) c.compSel = (c.compSel + static_cast<int>(c.comps.size()) - 1) % static_cast<int>(c.comps.size());
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) c.compOpen = false;
+        if (c.compOpen && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) || ImGui::IsKeyPressed(ImGuiKey_Tab, false))) {
+            accept(c.compSel);
+        }
+        if (c.compOpen) {
+            const float unit = ImGui::GetFontSize();
+            ImGui::SetNextWindowPos({ed.caretScreen.x, ed.caretScreen.y + ed.lineHeight});
+            ImGui::SetNextWindowSizeConstraints({unit * 22, 0}, {unit * 36, unit * 16});
+            ImGui::Begin("##complete", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+                                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
+                                                    ImGuiWindowFlags_Tooltip);
+            for (int i = 0; i < static_cast<int>(c.comps.size()) && i < 60; ++i) {
+                const auto& it = c.comps[static_cast<std::size_t>(i)];
+                ImGui::PushID(i);
+                if (ImGui::Selectable(it[0].c_str(), i == c.compSel)) accept(i);
+                if (i == c.compSel) ImGui::SetScrollHereY();
+                if (it.size() > 2 && !(it[1].empty() && it[2].empty())) {
+                    ImGui::SameLine(unit * 12);
+                    ImGui::TextDisabled("%s", (it[1] + (it[2].empty() ? "" : "  " + it[2])).substr(0, 60).c_str());
+                }
+                ImGui::PopID();
+                if (!c.compOpen) break;
+            }
+            ImGui::End();
+        }
+    }
+    // go to definition
+    if (ed.wantDefinition) {
+        ed.wantDefinition = false;
+        codeCommit();
+        Result r = query("code.definition", spot(ed.cursor));
+        if (!r.ok) {
+            c.status = friendlyError(r.message);
+        } else if (tp::number(r, "count") < 1) {
+            c.status = "No definition found there.";
+        } else {
+            const int line = static_cast<int>(tp::number(r, "line")), col = static_cast<int>(tp::number(r, "col"));
+            codeOpenAt(tp::text(r, "path"), line);
+            editorSelect(c.editor, {line - 1, col - 1}, {line - 1, col - 1});
+            c.editor.focusNext = true;
+        }
+    }
+    // a note when the mouse rests on a name
+    if (!ed.mouseOnText || ed.mousePos != c.hoverAt) {
+        c.hoverAt = ed.mouseOnText ? ed.mousePos : TextPos{-1, -1};
+        c.hoverSince = now;
+        c.hoverAsked = false;
+        c.hoverText.clear();
+    } else if (!c.hoverAsked && now - c.hoverSince <= 0.6) {
+        animating_ = true;  // keep drawing so the note can come up while the mouse rests
+    } else if (!c.hoverAsked && !c.compOpen) {
+        c.hoverAsked = true;
+        codeCommit();
+        Result r = query("code.hover", spot(c.hoverAt));
+        c.hoverText = r.ok && tp::text(r, "found") == "true" ? tp::text(r, "text") : std::string();
+    }
+    if (!c.hoverText.empty() && ed.mouseOnText) {
+        if (now - c.hoverSince < 1.5) animating_ = true;  // a tooltip takes a frame or two to size itself
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32);
+        ImGui::TextUnformatted(c.hoverText.substr(0, 1500).c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
 }
 
 }  // namespace wetwaresuite::gui

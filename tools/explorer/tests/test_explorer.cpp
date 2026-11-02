@@ -43,6 +43,13 @@ int main() {
     const fs::path dir = fs::temp_directory_path() / ("ww-explorer-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(dir / "home");
     setEnv("WETWARESUITE_HOME", sysutil::fromPath(dir / "data"));  // the trash goes here
+#if defined(__linux__)
+    setEnv("XDG_DATA_HOME", sysutil::fromPath(dir / "xdg"));  // the desktop trash, kept in the test folder
+    const bool desktopTrash = true;
+#else
+    setEnv("WETWARESUITE_TRASH", "suite");  // never fill the real Recycle Bin / Trash from a test
+    const bool desktopTrash = false;
+#endif
 
     // ---- checksums ----
     {
@@ -189,16 +196,41 @@ int main() {
 
         Result del = s.run("explorer.delete", {{"paths", sysutil::fromPath(work / "out")}});
         CHECK(del.ok && !there(work / "out"));
+        if (desktopTrash) {
+            // in the freedesktop trash, with its .trashinfo, and listed as such
+            CHECK(field(del, "system") == "1" && fs::is_directory(dir / "xdg" / "Trash" / "files" / "out"));
+            const std::string info = sysutil::readFile(dir / "xdg" / "Trash" / "info" / "out.trashinfo");
+            CHECK(info.rfind("[Trash Info]\nPath=/", 0) == 0 && info.find("DeletionDate=") != std::string::npos && info.find("/work/out\n") != std::string::npos);
+        }
         Result tr = s.run("explorer.trash", {});
         CHECK(tr.ok && field(tr, "rows").find(sysutil::fromPath(fs::absolute(work / "out").lexically_normal()) + "\t") != std::string::npos);  // undone copies are in there too
         CHECK(s.history().undo());
         CHECK(there(work / "out" / "photo1.jpg"));
+        if (desktopTrash) CHECK(!there(dir / "xdg" / "Trash" / "files" / "out") && !there(dir / "xdg" / "Trash" / "info" / "out.trashinfo"));
 
         // delete, then restore by id
         CHECK(s.run("explorer.delete", {{"paths", sysutil::fromPath(work / "out" / "photo1.jpg")}}).ok);
         std::string rows = field(s.run("explorer.trash", {}), "rows");
         std::string id = rows.substr(0, rows.find('\t'));
         CHECK(s.run("explorer.restore", {{"id", id}}).ok && there(work / "out" / "photo1.jpg"));
+        if (desktopTrash) {
+            // emptied from the desktop trash by someone else: the suite forgets it
+            sysutil::writeFile(work / "out" / "extra.txt", "x");
+            CHECK(s.run("explorer.delete", {{"paths", sysutil::fromPath(work / "out" / "extra.txt")}}).ok);
+            const std::size_t before = explorer::trashItems().size();
+            fs::remove(dir / "xdg" / "Trash" / "files" / "extra.txt");
+            CHECK(explorer::trashItems().size() == before - 1);
+            // system=false keeps it in the suite's own trash
+            Result own = s.run("explorer.delete", {{"paths", sysutil::fromPath(work / "out" / "photo1.jpg")}, {"system", false}});
+            CHECK(own.ok && field(own, "system") == "0" && !there(dir / "xdg" / "Trash" / "files" / "photo1.jpg"));
+            CHECK(s.history().undo() && there(work / "out" / "photo1.jpg"));
+            // a second item with the same name gets name.2
+            sysutil::writeFile(work / "dup.txt", "1");
+            CHECK(s.run("explorer.delete", {{"paths", sysutil::fromPath(work / "dup.txt")}}).ok);
+            sysutil::writeFile(work / "dup.txt", "2");
+            CHECK(s.run("explorer.delete", {{"paths", sysutil::fromPath(work / "dup.txt")}}).ok);
+            CHECK(sysutil::readFile(dir / "xdg" / "Trash" / "files" / "dup.txt.2") == "2");
+        }
 
         CHECK(s.run("explorer.new_folder", {{"path", sysutil::fromPath(work / "new" / "deep")}}).ok && fs::is_directory(work / "new" / "deep"));
         CHECK(s.history().undo());
@@ -252,6 +284,7 @@ int main() {
 
         Result empty = s.run("explorer.empty_trash", {});
         CHECK(empty.ok && field(s.run("explorer.trash", {}), "count") == "0");
+        if (desktopTrash) CHECK(!there(dir / "xdg" / "Trash" / "files" / "dup.txt") && !there(dir / "xdg" / "Trash" / "info" / "dup.txt.2.trashinfo"));
     }
 
     // ---- MCP ----

@@ -283,13 +283,12 @@ std::uint64_t sizeOf(const fs::path& p, std::uint64_t* files) {
 
 fs::path trashFolder() { return sysutil::dataDir() / "trash"; }
 
-std::string moveToTrash(const fs::path& p) {
+namespace {
+
+fs::path newTrashSlot(std::string& id) {
     std::error_code ec;
-    if (!fs::exists(p, ec) && !fs::is_symlink(p, ec)) throw std::runtime_error("not found: " + sysutil::fromPath(p));
-    const fs::path abs = fs::absolute(p, ec).lexically_normal();
     static std::atomic<int> counter{0};
     const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
-    std::string id;
     fs::path slot;
     do {
         char num[16];
@@ -299,6 +298,27 @@ std::string moveToTrash(const fs::path& p) {
     } while (fs::exists(slot, ec));
     fs::create_directories(slot, ec);
     if (ec) throw std::runtime_error("can't make the trash folder " + sysutil::fromPath(slot));
+    return slot;
+}
+
+std::map<std::string, std::string> trashInfo(const fs::path& slot) {
+    std::map<std::string, std::string> out;
+    for (const auto& line : sysutil::splitLines(readSmall(slot / "info.txt"))) {
+        auto eq = line.find('=');
+        if (eq != std::string::npos) out[line.substr(0, eq)] = line.substr(eq + 1);
+    }
+    return out;
+}
+
+}  // namespace
+
+std::string moveToTrash(const fs::path& p) {
+    std::error_code ec;
+    if (!fs::exists(p, ec) && !fs::is_symlink(p, ec)) throw std::runtime_error("not found: " + sysutil::fromPath(p));
+    const fs::path abs = fs::absolute(p, ec).lexically_normal();
+    std::string id;
+    const fs::path slot = newTrashSlot(id);
+    const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
     std::uint64_t files = 0;
     const std::uint64_t size = sizeOf(abs, &files);
     const bool dir = fs::is_directory(abs, ec);
@@ -315,22 +335,56 @@ std::string moveToTrash(const fs::path& p) {
     return id;
 }
 
+std::string moveToSystemTrash(const fs::path& p, bool* usedSystem) {
+    if (usedSystem) *usedSystem = false;
+    std::error_code ec;
+    if (!fs::exists(p, ec) && !fs::is_symlink(p, ec)) throw std::runtime_error("not found: " + sysutil::fromPath(p));
+    const fs::path abs = fs::absolute(p, ec).lexically_normal();
+    if (!systemTrashWanted()) return moveToTrash(abs);
+    const std::string name = sysutil::nameOf(abs);
+    if (name.empty()) throw std::runtime_error("can't delete a whole drive");
+    std::uint64_t files = 0;
+    const std::uint64_t size = sizeOf(abs, &files);
+    const bool dir = fs::is_directory(abs, ec);
+    SystemTrashed where;
+    try {
+        where = moveToSystemTrashRaw(abs);
+    } catch (const std::exception&) {
+        return moveToTrash(abs);  // another drive, no desktop trash: the suite's own trash still has undo
+    }
+    std::string id;
+    const fs::path slot = newTrashSlot(id);
+    const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+    sysutil::writeFile(slot / "info.txt", "original=" + sysutil::fromPath(abs) + "\ndeleted=" + std::to_string(now) + "\nsize=" + std::to_string(size) +
+                                              "\ndir=" + (dir ? "1" : "0") + "\nname=" + name + "\nsystem=" +
+                                              (where.item.empty() ? std::string("?") : sysutil::fromPath(where.item)) + "\nrecord=" + sysutil::fromPath(where.record) + "\n");
+    if (usedSystem) *usedSystem = true;
+    return id;
+}
+
 std::vector<TrashItem> trashItems() {
     std::vector<TrashItem> out;
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(trashFolder(), ec)) {
         TrashItem t;
         t.id = sysutil::nameOf(e.path());
-        for (const auto& line : sysutil::splitLines(readSmall(e.path() / "info.txt"))) {
-            auto eq = line.find('=');
-            if (eq == std::string::npos) continue;
-            std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-            if (k == "original") t.original = v;
-            else if (k == "deleted") t.deleted = std::atoll(v.c_str());
-            else if (k == "size") t.size = std::strtoull(v.c_str(), nullptr, 10);
-            else if (k == "dir") t.dir = v == "1";
+        const auto info = trashInfo(e.path());
+        auto get = [&](const char* k) {
+            auto it = info.find(k);
+            return it == info.end() ? std::string() : it->second;
+        };
+        t.original = get("original");
+        t.deleted = std::atoll(get("deleted").c_str());
+        t.size = std::strtoull(get("size").c_str(), nullptr, 10);
+        t.dir = get("dir") == "1";
+        t.system = get("system");
+        if (t.original.empty()) continue;
+        std::error_code e2;
+        if (!t.system.empty() && t.system != "?" && !fs::exists(sysutil::toPath(t.system), e2) && !fs::is_symlink(sysutil::toPath(t.system), e2)) {
+            fs::remove_all(e.path(), e2);  // emptied from the computer's trash (or put back) by someone else
+            continue;
         }
-        if (!t.original.empty()) out.push_back(t);
+        out.push_back(t);
     }
     std::sort(out.begin(), out.end(), [](const TrashItem& a, const TrashItem& b) { return a.deleted > b.deleted || (a.deleted == b.deleted && a.id > b.id); });
     return out;
@@ -340,17 +394,29 @@ fs::path restoreFromTrash(const std::string& id, const fs::path& to) {
     if (id.empty() || id.find('/') != std::string::npos || id.find('\\') != std::string::npos || id.find("..") != std::string::npos)
         throw std::runtime_error("bad trash id '" + id + "'");
     const fs::path slot = trashFolder() / id;
-    std::string original, name;
-    for (const auto& line : sysutil::splitLines(readSmall(slot / "info.txt"))) {
-        if (line.rfind("original=", 0) == 0) original = line.substr(9);
-        if (line.rfind("name=", 0) == 0) name = line.substr(5);
-    }
+    const auto info = trashInfo(slot);
+    auto get = [&](const char* k) {
+        auto it = info.find(k);
+        return it == info.end() ? std::string() : it->second;
+    };
+    const std::string original = get("original"), name = get("name"), system = get("system");
     if (original.empty()) throw std::runtime_error("nothing in the trash called '" + id + "' (explorer.trash lists it)");
+    if (system == "?") throw std::runtime_error(original + " is in the Recycle Bin: put it back from there (right-click, Restore)");
     fs::path target = to.empty() ? sysutil::toPath(original) : to;
     std::error_code ec;
     if (fs::exists(target, ec)) throw std::runtime_error(sysutil::fromPath(target) + " exists again; restore to another place with to=");
     fs::create_directories(target.parent_path(), ec);
-    moveAny(slot / sysutil::toPath(name), target);
+    if (!system.empty()) {
+        const fs::path item = sysutil::toPath(system);
+        if (!fs::exists(item, ec) && !fs::is_symlink(item, ec)) {
+            fs::remove_all(slot, ec);
+            throw std::runtime_error(original + " is gone from the computer's trash (it was emptied, or put back already)");
+        }
+        moveAny(item, target);
+        if (!get("record").empty()) fs::remove(sysutil::toPath(get("record")), ec);
+    } else {
+        moveAny(slot / sysutil::toPath(name), target);
+    }
     fs::remove_all(slot, ec);
     return target;
 }
@@ -361,6 +427,12 @@ std::size_t emptyTrash(double olderThanDays) {
     std::error_code ec;
     for (const auto& t : trashItems()) {
         if (olderThanDays > 0 && now - static_cast<double>(t.deleted) < olderThanDays * 86400) continue;
+        if (!t.system.empty() && t.system != "?") {
+            // deleted in the suite, so emptying the suite's trash takes it out of the computer's too
+            const auto info = trashInfo(trashFolder() / t.id);
+            fs::remove_all(sysutil::toPath(t.system), ec);
+            if (auto it = info.find("record"); it != info.end() && !it->second.empty()) fs::remove(sysutil::toPath(it->second), ec);
+        }
         fs::remove_all(trashFolder() / t.id, ec);
         if (!ec) ++n;
     }

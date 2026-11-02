@@ -1,9 +1,12 @@
-// code.git_* commands: status, diff, stage, commit, log and branches through the
-// git program when it is installed. Nothing talks to a server (no push or pull):
-// the suite stays offline.
+// code.git_* commands: status, diff, stage, commit, log, branches, merge, and fetch/pull/push
+// through the git program when it is installed. Only fetch, pull and push talk to a server, and
+// they never stop to ask for a password: git uses the credentials it already has (a credential
+// helper, an ssh key) or fails with a message saying so.
 #include "internal.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 namespace wetwaresuite::code::detail {
 
@@ -15,6 +18,56 @@ ProcessResult git(const fs::path& dir, std::vector<std::string> args) {
     if (!findProgram("git")) throw std::runtime_error("git is not installed (get it from git-scm.com or your package manager)");
     args.insert(args.begin(), {"git", "-C", sysutil::fromPath(dir), "-c", "color.ui=never", "-c", "core.quotepath=off"});
     return runProgram(args);
+}
+
+// For commands that reach a server: no terminal prompts (a window or an MCP client has no
+// terminal to answer them in), ssh in batch mode.
+ProcessResult gitRemote(const fs::path& dir, std::vector<std::string> args) {
+    static const bool once = [] {
+#ifdef _WIN32
+        _putenv_s("GIT_TERMINAL_PROMPT", "0");
+        if (!std::getenv("GIT_SSH_COMMAND")) _putenv_s("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+#else
+        setenv("GIT_TERMINAL_PROMPT", "0", 1);
+        setenv("GIT_SSH_COMMAND", "ssh -o BatchMode=yes", 0);
+#endif
+        return true;
+    }();
+    (void)once;
+    ProcessResult r = git(dir, std::move(args));
+    if (r.exitCode != 0) {
+        const std::string out = sysutil::trim(r.output);
+        if (out.find("terminal prompts disabled") != std::string::npos || out.find("could not read Username") != std::string::npos ||
+            out.find("Permission denied (publickey") != std::string::npos || out.find("Authentication failed") != std::string::npos)
+            throw std::runtime_error("the server wants a login git doesn't have yet. Sign in once from a terminal (or set up a credential helper or an ssh key), then try again.\n" + out);
+        if (out.find("Could not resolve host") != std::string::npos || out.find("unable to access") != std::string::npos)
+            throw std::runtime_error("couldn't reach the server (offline?)\n" + out);
+    }
+    return r;
+}
+
+std::vector<std::string> conflictedFiles(const fs::path& dir) {
+    std::vector<std::string> out;
+    for (const auto& l : lines(git(dir, {"diff", "--name-only", "--diff-filter=U"}).output)) {
+        if (!sysutil::trim(l).empty()) out.push_back(sysutil::trim(l));
+    }
+    return out;
+}
+
+std::string currentBranch(const fs::path& dir) { return sysutil::trim(git(dir, {"rev-parse", "--abbrev-ref", "HEAD"}).output); }
+
+// a merge or pull that stopped on conflicts: which files, and what to do next
+Result conflictResult(const fs::path& dir, const std::string& what) {
+    const auto files = conflictedFiles(dir);
+    std::string text = what + " stopped: " + std::to_string(files.size()) + " file(s) changed on both sides. Fix the parts between <<<<<<< and >>>>>>> in:";
+    std::string rows;
+    for (const auto& f : files) {
+        text += "\n  " + f;
+        rows += f + "\n";
+    }
+    text += "\nthen code.git_commit all=true to finish, or code.git_merge abort=true to go back.";
+    Result r = Result::success(text);
+    return r.with("conflicts", static_cast<int64_t>(files.size())).with("rows", rows);
 }
 
 ProcessResult gitOk(const fs::path& dir, std::vector<std::string> args) {
@@ -228,6 +281,158 @@ void registerWriteCommands(Session& s, StatePtr st) {
                 if (b.empty()) throw std::runtime_error("give a branch name");
                 gitOk(folderParam(*st, p), boolParam(p, "create", false) ? std::vector<std::string>{"checkout", "-q", "-b", b} : std::vector<std::string>{"checkout", "-q", b});
                 return Result::success("on branch " + b).with("branch", b);
+            }));
+
+    reg.add({"code.git_merge", "Merge",
+             "Bring another branch's commits into the current one. Stops on conflicts and lists the files (status shows them "
+             "too); fix them, then code.git_commit all=true. abort=true goes back to before the merge.",
+             {folderOpt(), opt("branch", ParamType::String, "the branch to merge in (e.g. main, or origin/main after a fetch)"),
+              opt("abort", ParamType::Bool, "give up on a merge that stopped on conflicts", false)},
+             false},
+            reader([st](const Params& p) {
+                const fs::path dir = folderParam(*st, p);
+                if (boolParam(p, "abort", false)) {
+                    gitOk(dir, {"merge", "--abort"});
+                    return Result::success("merge abandoned: back to how it was");
+                }
+                const std::string b = stringParam(p, "branch");
+                if (b.empty()) throw std::runtime_error("give the branch to merge in (branch=)");
+                const std::string before = sysutil::trim(git(dir, {"rev-parse", "HEAD"}).output);
+                ProcessResult r = git(dir, {"merge", "--no-edit", b});
+                if (r.exitCode != 0) {
+                    if (!conflictedFiles(dir).empty()) return conflictResult(dir, "merging " + b);
+                    throw std::runtime_error(sysutil::trim(r.output));
+                }
+                const std::string after = sysutil::trim(git(dir, {"rev-parse", "HEAD"}).output);
+                if (after == before) return Result::success("already up to date with " + b).with("conflicts", int64_t{0});
+                const bool ff = r.output.find("Fast-forward") != std::string::npos;
+                return Result::success(std::string(ff ? "fast-forwarded to " : "merged ") + b + " (" + sysutil::trim(git(dir, {"log", "-1", "--format=%h"}).output) + ")")
+                    .with("conflicts", int64_t{0})
+                    .with("commit", sysutil::trim(git(dir, {"log", "-1", "--format=%h"}).output));
+            }));
+
+    reg.add({"code.git_remotes", "Remotes",
+             "The servers this repository syncs with (name and address). add= with url= adds one (e.g. add=origin "
+             "url=https://github.com/you/project.git), remove= takes one away.",
+             {folderOpt(), opt("add", ParamType::String, "name of a remote to add"), opt("url", ParamType::String, "its address"),
+              opt("remove", ParamType::String, "name of a remote to remove")},
+             false},
+            reader([st](const Params& p) {
+                const fs::path dir = folderParam(*st, p);
+                std::string note;
+                if (!stringParam(p, "add").empty()) {
+                    if (stringParam(p, "url").empty()) throw std::runtime_error("add= needs url=");
+                    gitOk(dir, {"remote", "add", stringParam(p, "add"), stringParam(p, "url")});
+                    note = "added " + stringParam(p, "add") + "\n";
+                }
+                if (!stringParam(p, "remove").empty()) {
+                    gitOk(dir, {"remote", "remove", stringParam(p, "remove")});
+                    note += "removed " + stringParam(p, "remove") + "\n";
+                }
+                std::string text, rows;
+                int64_t n = 0;
+                for (const auto& l : lines(gitOk(dir, {"remote", "-v"}).output)) {
+                    if (l.find("(fetch)") == std::string::npos) continue;
+                    const auto tab = l.find('\t');
+                    if (tab == std::string::npos) continue;
+                    std::string url = l.substr(tab + 1);
+                    url = sysutil::trim(url.substr(0, url.rfind(" (")));
+                    text += "  " + l.substr(0, tab) + "  " + url + "\n";
+                    rows += l.substr(0, tab) + "\t" + url + "\n";
+                    ++n;
+                }
+                return Result::success(note + (n ? text : "no remotes (add=origin url=... adds one)\n")).with("count", n).with("rows", rows);
+            }));
+
+    reg.add({"code.git_fetch", "Fetch",
+             "Download new commits from a remote (all of them by default) without changing your files. Then git_status "
+             "shows how far ahead or behind you are, and git_merge branch=origin/main brings them in.",
+             {folderOpt(), opt("remote", ParamType::String, "which remote (default: all)")}, false},
+            reader([st](const Params& p) {
+                const fs::path dir = folderParam(*st, p);
+                const std::string remote = stringParam(p, "remote");
+                ProcessResult r = gitRemote(dir, remote.empty() ? std::vector<std::string>{"fetch", "--all", "--prune"} : std::vector<std::string>{"fetch", "--prune", remote});
+                if (r.exitCode != 0) throw std::runtime_error(sysutil::trim(r.output));
+                ProcessResult ab = git(dir, {"rev-list", "--left-right", "--count", "HEAD...@{upstream}"});
+                std::string text = "fetched " + (remote.empty() ? std::string("every remote") : remote);
+                Result res = Result::success("");
+                if (ab.exitCode == 0) {
+                    long long ahead = 0, behind = 0;
+                    std::sscanf(ab.output.c_str(), "%lld %lld", &ahead, &behind);
+                    text += ": " + std::to_string(ahead) + " commit(s) to push, " + std::to_string(behind) + " to pull";
+                    res.with("ahead", static_cast<int64_t>(ahead)).with("behind", static_cast<int64_t>(behind));
+                }
+                res.message = text;
+                return res;
+            }));
+
+    reg.add({"code.git_pull", "Pull",
+             "Fetch and merge the current branch's upstream (or remote= and branch=). rebase=true replays your commits on "
+             "top instead of merging. Stops on conflicts and lists the files, like git_merge.",
+             {folderOpt(), opt("remote", ParamType::String, "remote (default: the branch's upstream)"), opt("branch", ParamType::String, "branch on the remote"),
+              opt("rebase", ParamType::Bool, "rebase instead of merge", false)},
+             false},
+            reader([st](const Params& p) {
+                const fs::path dir = folderParam(*st, p);
+                std::vector<std::string> args{"pull", "--no-edit", boolParam(p, "rebase", false) ? "--rebase" : "--no-rebase"};
+                if (!stringParam(p, "remote").empty()) args.push_back(stringParam(p, "remote"));
+                if (!stringParam(p, "branch").empty()) {
+                    if (stringParam(p, "remote").empty()) args.push_back("origin");
+                    args.push_back(stringParam(p, "branch"));
+                }
+                const std::string before = sysutil::trim(git(dir, {"rev-parse", "HEAD"}).output);
+                ProcessResult r = gitRemote(dir, args);
+                if (r.exitCode != 0) {
+                    if (!conflictedFiles(dir).empty()) return conflictResult(dir, "pulling");
+                    std::string out = sysutil::trim(r.output);
+                    if (out.find("no tracking information") != std::string::npos)
+                        throw std::runtime_error("this branch has no upstream yet: give remote= and branch= (or push once with code.git_push)");
+                    throw std::runtime_error(out);
+                }
+                const std::string after = sysutil::trim(git(dir, {"rev-parse", "HEAD"}).output);
+                if (before == after) return Result::success("already up to date").with("conflicts", int64_t{0}).with("commits", int64_t{0});
+                const auto count = sysutil::trim(git(dir, {"rev-list", "--count", before + ".." + after}).output);
+                return Result::success("pulled " + count + " commit(s), now at " + sysutil::trim(git(dir, {"log", "-1", "--format=%h %s"}).output))
+                    .with("conflicts", int64_t{0})
+                    .with("commits", static_cast<int64_t>(std::atoll(count.c_str())));
+            }));
+
+    reg.add({"code.git_push", "Push",
+             "Send the current branch's commits to a remote (default origin). The first push of a branch sets it as the "
+             "upstream so later pulls and pushes need no names. force=true overwrites the remote branch only if nobody "
+             "else pushed since your last fetch (--force-with-lease).",
+             {folderOpt(), opt("remote", ParamType::String, "remote (default: the upstream's, or origin)"), opt("branch", ParamType::String, "branch to push (default: the current one)"),
+              opt("force", ParamType::Bool, "replace the remote branch (safely)", false)},
+             false},
+            reader([st](const Params& p) {
+                const fs::path dir = folderParam(*st, p);
+                const std::string branch = stringParam(p, "branch").empty() ? currentBranch(dir) : stringParam(p, "branch");
+                if (branch.empty() || branch == "HEAD") throw std::runtime_error("not on a branch (code.git_switch to one first)");
+                std::string remote = stringParam(p, "remote");
+                const bool hasUpstream = git(dir, {"rev-parse", "--abbrev-ref", branch + "@{upstream}"}).exitCode == 0;
+                if (remote.empty()) {
+                    remote = sysutil::trim(git(dir, {"config", "branch." + branch + ".remote"}).output);
+                    if (remote.empty()) remote = "origin";
+                }
+                std::vector<std::string> args{"push", "--porcelain"};
+                if (!hasUpstream) args.push_back("-u");
+                if (boolParam(p, "force", false)) args.push_back("--force-with-lease");
+                args.push_back(remote);
+                args.push_back(branch);
+                ProcessResult r = gitRemote(dir, args);
+                if (r.exitCode != 0) {
+                    const std::string out = sysutil::trim(r.output);
+                    if (out.find("rejected") != std::string::npos && (out.find("fetch first") != std::string::npos || out.find("non-fast-forward") != std::string::npos))
+                        throw std::runtime_error("the remote has commits you don't have yet: code.git_pull first, then push\n" + out);
+                    if (out.find("does not appear to be a git repository") != std::string::npos || out.find("No such remote") != std::string::npos)
+                        throw std::runtime_error("no remote called " + remote + " (code.git_remotes add=" + remote + " url=... adds it)");
+                    throw std::runtime_error(out);
+                }
+                const bool upToDate = r.output.find("[up to date]") != std::string::npos;
+                return Result::success(upToDate ? branch + " is already up to date on " + remote
+                                                : "pushed " + branch + " to " + remote + (hasUpstream ? "" : " (now its upstream)"))
+                    .with("remote", remote)
+                    .with("branch", branch);
             }));
 
     reg.add({"code.git_init", "Start a repository", "Make a folder a git repository so changes can be tracked.", {folderOpt()}, false},

@@ -43,7 +43,11 @@ Opening a file also opens its folder in the tree.
   - **Tab** and **Shift+Tab** indent and unindent the selected lines.
   - **Home** goes to the first word of the line, then to the very start.
   - **Ctrl+/** comments or uncomments the selected lines.
-  - **Ctrl+D** duplicates the line.
+  - **Ctrl+D** selects the next match of the word or selection with another cursor. **Ctrl+Shift+L** puts a cursor on every match. **Alt+click** adds a cursor anywhere, and **Ctrl+Alt+Up/Down** adds one on the line above or below. Typing, deleting and arrows work at every cursor. **Esc** goes back to one.
+  - **Ctrl+Shift+D** duplicates the line.
+  - **Folding**: click the arrow in the margin, or press **Ctrl+Shift+[** and **Ctrl+Shift+]**. Folding follows indentation, so it works in every language. View > Fold all / Open all.
+  - **Alt+Z** (or View > Wrap) wraps long lines to the window.
+  - With a language server on (see Task 7): **Ctrl+Space** completes, **F12** or **Ctrl+click** goes to the definition, and resting the mouse on a name shows its type and docs.
   - **Ctrl+A**, **Ctrl+C**, **Ctrl+X** and **Ctrl+V** work as usual.
   - **Ctrl+Z** undoes, and **Ctrl+Y** or **Ctrl+Shift+Z** redoes.
   - **Ctrl+Home** and **Ctrl+End** go to the start and end of the file (Cmd on a Mac).
@@ -291,10 +295,15 @@ The git commands use the `git` installed on your computer:
 | `code.git_commit` | commit (`all=true` stages everything first) |
 | `code.git_log` | history (`count=`, `file=`) |
 | `code.git_branches`, `code.git_switch` | list, switch to or create (`create=true`) a branch |
+| `code.git_merge` | merge a branch into the current one (`abort=true` backs out of a conflicted merge) |
+| `code.git_remotes` | list, `add=name url=...`, change `url` or `remove` a remote |
+| `code.git_fetch` | fetch and report how far ahead and behind you are |
+| `code.git_pull` | pull (`remote`, `branch`, `rebase=true`) |
+| `code.git_push` | push; the first push of a branch sets its upstream. `force=true` uses `--force-with-lease`, so it never overwrites work you haven't seen |
 
 In the window, the **Changes** section shows every changed file with a tick box. Ticking it stages the file. Click a file name to see its diff in the output area. Type a message and press **Commit**. With nothing ticked, the button reads **Commit all changes**. Below that are the last 15 commits. In the advanced view there is also a branch picker and **Create branch**. A folder that isn't tracked yet gets a **Start tracking changes (git init)** button.
 
-Pushing and pulling are left to your usual git tools, because they need the network and your sign-in.
+Push, pull and fetch use your normal git sign-in (ssh keys or a credential helper). They never stop to ask for a password: if git needs one you get a clear "sign in with git first" error instead. A merge or pull that hits conflicts lists the conflicted files in `conflicts` rows. Fix them, stage, and commit, or call `code.git_merge abort=true`.
 
 ## Task 6: highlighting for other programs
 
@@ -305,13 +314,44 @@ $ wetwaresuite code.highlight text='x = 1  # one' language=python format=ansi
 x = 1  # one        (1 in yellow, the comment in grey)
 ```
 
+## Task 7: language servers
+
+A language server gives the editor real completion, go-to-definition, hover info and live errors. The suite doesn't ship any. It uses the ones you already have:
+
+| Language | Server it looks for |
+|---|---|
+| Python | `pyright-langserver`, then `pylsp` |
+| C, C++ | `clangd` |
+| Rust | `rust-analyzer` |
+| Go | `gopls` |
+| JavaScript, TypeScript | `typescript-language-server` |
+
+Set `WETWARESUITE_LSP_<LANGUAGE>` (for example `WETWARESUITE_LSP_PYTHON="pylsp -v"`) to use a different one. In the window, turn it on with View > Language server. The status line tells you when a server is installed but off. Errors and warnings from the server show up in the margin and in the Problems tab while you type.
+
+![completion, hover and folding in the code editor](images/code-editor-lsp.png)
+
+From scripts and Claude, the file has to be saved first, because the server reads the project from disk:
+
+```
+$ wetwaresuite batch lsp.txt          # lsp.txt holds the lines below
+code.open path=/tmp/demo/app.py
+code.complete line=12 col=9
+code.hover line=4 col=7
+code.definition line=12 col=9
+code.references line=4 col=7
+code.diagnostics wait=5
+code.lsp status
+```
+
+`code.complete` returns rows of label, kind, detail and the text to insert. `code.diagnostics` returns rows of line, column, severity and message, with `errors` and `warnings` counts. `code.lsp stop` shuts the servers down; they also stop when the suite exits.
+
 ## Claude
 
 ```sh
 claude mcp add wetwaresuite-code -s user -- wetwaresuite-system mcp --tools code
 ```
 
-Claude gets all 40 `code_*` tools (`code_open`, `code_edit`, `code_run`, `code_build`, `code_git_commit` and the rest). Example prompts:
+Claude gets all 51 `code_*` tools (`code_open`, `code_edit`, `code_run`, `code_build`, `code_git_commit` and the rest). Example prompts:
 
 - *"Build ~/src/game and fix whatever breaks"*: `code_project`, then `code_build`. Claude reads the `problems` rows, calls `code_open` and `code_goto` on each one, fixes it with `code_edit` or `code_replace_lines`, then calls `code_save` and `code_build` again.
 - *"Rename TAX_RATE to VAT_RATE across the project, but show me first"*: `code_replace_in_files` with `dry_run=true`, then without it.
@@ -339,12 +379,14 @@ Edits made by Claude go through the same documents as the window. If the window 
 | `code.jobs`, `code.job_output`, `code.job_input`, `code.job_stop`, `code.errors` | `job`, `text`, `newline`, `close`, `full` |
 | `code.toolchains`, `code.languages` | |
 | `code.git_*` | see Task 5 |
+| `code.complete`, `code.hover`, `code.definition`, `code.references` | `doc` or `path`, `line`, `col` |
+| `code.diagnostics`, `code.lsp` | `doc`, `wait`; `action` (status, stop) |
 
 `wetwaresuite help code.<name>` shows every parameter.
 
 ## Limitations
 
-- **No language servers.** There is no completion, no go-to-definition across files and no type checking while you type. The outline comes from a fast scanner, not a compiler.
-- **Editor.** There are no multiple cursors, no code folding and no word wrap.
+- **Language servers** have to be installed separately (see Task 7). Without one, the outline comes from a fast scanner, not a compiler, and there is no completion.
+- **Editor.** Folding follows indentation, not syntax, so a block that isn't indented can't be folded.
 - **Programs and input.** A running program gets its input as plain lines through a pipe. Programs that need a real terminal (full-screen tools, password prompts) should be run in the [terminal](terminal.md) or outside the suite.
-- **Git.** There is no push, pull, merge or rebase.
+- **Git.** There is no interactive rebase, and conflicts are fixed by editing the files (no three-way merge view).

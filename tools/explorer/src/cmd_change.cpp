@@ -94,19 +94,26 @@ void registerCopyMove(Session& s) {
             }));
 
     reg.add({"explorer.delete", "Delete",
-             "Move files or folders to the trash (explorer.trash lists it, undo or explorer.restore brings them back).",
-             {pathsParam()}, true},
+             "Move files or folders to the trash: the computer's own (Recycle Bin, macOS Trash, the desktop trash on Linux) "
+             "when it can take them, else the suite's. explorer.trash lists both, undo or explorer.restore brings them back. "
+             "system=false always uses the suite's trash (WETWARESUITE_TRASH=suite does that everywhere).",
+             {pathsParam(), opt("system", ParamType::Bool, "use the computer's trash when it can take them", true)}, true},
             changer([](const Params& p, UndoList& undo) {
                 auto paths = splitPaths(stringParam(p, "paths"));
                 std::string rows;
+                int64_t inSystem = 0;
                 for (const auto& f : paths) {
                     std::error_code ec;
                     const fs::path abs = fs::absolute(f, ec).lexically_normal();
-                    const std::string id = moveToTrash(abs);
+                    bool sys = false;
+                    const std::string id = boolParam(p, "system", true) ? moveToSystemTrash(abs, &sys) : moveToTrash(abs);
+                    inSystem += sys ? 1 : 0;
                     undo.push_back([id, abs] { restoreFromTrash(id, abs); });
-                    rows += id + "\t" + sysutil::fromPath(abs) + "\n";
+                    rows += id + "\t" + sysutil::fromPath(abs) + "\t" + (sys ? "system" : "suite") + "\n";
                 }
-                return Result::success("moved " + names(paths) + " to the trash").with("count", static_cast<int64_t>(paths.size())).with("rows", rows);
+                const int64_t n = static_cast<int64_t>(paths.size());
+                const std::string where = inSystem == n ? "the computer's trash" : inSystem == 0 ? "the suite's trash" : "the trash (some to the computer's, some to the suite's)";
+                return Result::success("moved " + names(paths) + " to " + where).with("count", n).with("system", inSystem).with("rows", rows);
             }));
 
     reg.add({"explorer.new_folder", "New folder", "Make a folder (and any missing folders above it).",
@@ -221,15 +228,17 @@ void registerBatchAndTrash(Session& s) {
                 return Result::success("renamed " + sysutil::plural(plan.size(), "file") + "\n" + text).with("count", static_cast<int64_t>(plan.size())).with("rows", rows);
             }));
 
-    reg.add({"explorer.trash", "Trash", "What is in the suite's trash: id, where it was, when it was deleted and its size.", {}, false, true},
+    reg.add({"explorer.trash", "Trash", "What the suite has deleted: id, where it was, when, its size, and whether it sits in the computer's trash or the suite's.", {}, false, true},
             reader([](const Params&) {
                 auto items = trashItems();
                 std::string text, rows;
                 std::uint64_t total = 0;
                 for (const auto& t : items) {
                     total += t.size;
-                    text += t.id + "  " + t.original + (t.dir ? "/" : "") + "  (" + sysutil::humanSize(t.size) + ", deleted " + formatTime(t.deleted) + ")\n";
-                    rows += t.id + "\t" + t.original + "\t" + std::to_string(t.deleted) + "\t" + std::to_string(t.size) + "\t" + (t.dir ? "dir" : "file") + "\n";
+                    text += t.id + "  " + t.original + (t.dir ? "/" : "") + "  (" + sysutil::humanSize(t.size) + ", deleted " + formatTime(t.deleted) +
+                            (t.system.empty() ? "" : ", in the computer's trash") + ")\n";
+                    rows += t.id + "\t" + t.original + "\t" + std::to_string(t.deleted) + "\t" + std::to_string(t.size) + "\t" + (t.dir ? "dir" : "file") + "\t" +
+                            (t.system.empty() ? "suite" : "system") + "\n";
                 }
                 if (items.empty()) text = "the trash is empty\n";
                 return Result::success(text)
@@ -249,7 +258,7 @@ void registerBatchAndTrash(Session& s) {
             }));
 
     reg.add({"explorer.empty_trash", "Empty trash",
-             "Delete what is in the trash for good (cannot be undone): everything, or what was deleted more than older_days ago.",
+             "Delete what the suite put in the trash for good (cannot be undone), including what it put in the computer's trash: everything, or what was deleted more than older_days ago.",
              {opt("older_days", ParamType::Number, "only items deleted longer ago than this", 0.0)}, false},
             reader([](const Params& p) {
                 std::size_t n = emptyTrash(numberParam(p, "older_days", 0));
