@@ -1,5 +1,6 @@
 // Reading the text of scanned pages: each page is drawn at scanner resolution, read with the
 // built-in recognizer and given an invisible text layer, so it can be searched and copied.
+#include <algorithm>
 #include <cmath>
 
 #include "commands.hpp"

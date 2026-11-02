@@ -8,6 +8,7 @@
 // PCB coordinates are millimetres, y down (flipped to y up in Gerber files).
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <functional>

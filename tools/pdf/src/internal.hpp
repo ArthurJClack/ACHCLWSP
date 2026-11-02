@@ -3,6 +3,7 @@
 // be moved, changed or deleted, and undo restores the whole document.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <functional>

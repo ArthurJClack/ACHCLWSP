@@ -11,6 +11,7 @@
 // written next to it as .glb files.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <memory>

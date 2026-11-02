@@ -2,6 +2,7 @@
 // commands share: dirty-region undo, doc/layer params, previews.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <memory>

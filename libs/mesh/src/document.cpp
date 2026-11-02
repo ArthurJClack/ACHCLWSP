@@ -1,5 +1,6 @@
 #include "wetwaresuite/mesh/document.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 #include "wetwaresuite/raster/codec.hpp"

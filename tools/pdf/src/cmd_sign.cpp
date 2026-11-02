@@ -1,5 +1,6 @@
 // Password protection and digital signatures on save, and the commands for signing identities
 // and checking the signatures in a file.
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 

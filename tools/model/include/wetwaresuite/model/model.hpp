@@ -13,6 +13,7 @@
 // mesh=, slicer.load mesh=, forge and the other mesh tools read it directly.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <memory>

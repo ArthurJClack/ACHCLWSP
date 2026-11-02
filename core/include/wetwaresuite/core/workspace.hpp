@@ -2,6 +2,7 @@
 // the CLI, batch scripts and MCP can work on the same document step by step.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>

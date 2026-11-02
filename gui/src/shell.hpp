@@ -2,6 +2,7 @@
 // files include this; apps use gui.hpp.
 #pragma once
 
+#include <algorithm>
 #include <SDL3/SDL.h>
 
 #include <cmath>
