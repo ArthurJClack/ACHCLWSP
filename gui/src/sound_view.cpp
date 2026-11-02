@@ -38,6 +38,7 @@ std::string noteText(int midi) { return std::string(kNoteNames[((midi % 12) + 12
 
 struct FxSetting {
     std::string name, unit;
+    std::string label;  // shown name when it differs from `name` (plugin settings: name "p7", label "Gain")
     double value = 0, min = 0, max = 1;
     std::vector<std::string> choices;
 };
@@ -66,6 +67,12 @@ struct SoundState {
     int dragPoint = -1;
     bool dragMoved = false;
     int addType = 0;
+    // CLAP plugins on this computer (scanned when the picker first opens): key, name, vendor
+    struct PluginRow {
+        std::string key, name, vendor;
+    };
+    std::vector<PluginRow> plugins;
+    bool scanned = false;
     std::map<std::string, float> sliders;  // a slider's value while it's dragged
     // effects buses (audio projects): id "bus<n>", name, level, muted, and the sends into each
     struct BusRow {
@@ -217,6 +224,7 @@ void Shell::soundPanel() {
             s.min = toNum(row[6]);
             s.max = toNum(row[7], 1);
             s.unit = row[8];
+            if (row.size() > 10) s.label = row[10];
             if (row.size() > 9 && !row[9].empty()) {
                 std::size_t pos = 0;
                 while (pos <= row[9].size()) {
@@ -319,8 +327,16 @@ void Shell::soundPanel() {
     for (std::size_t k = 0; k < st.rack.size(); ++k) {
         const FxSlot& fx = st.rack[k];
         ImGui::PushID(fx.index);
-        const std::string label = std::to_string(fx.index) + "  " + fx.type + (fx.bypass ? "  (off)" : "");
+        const bool plugin = fx.type.rfind("plugin: ", 0) == 0;
+        std::string label = std::to_string(fx.index) + "  " + (plugin ? fx.type.substr(8) : fx.type) + (fx.bypass ? "  (off)" : "");
+        // long names (plugins) stop short of the buttons on the right
+        const float roomForLabel = ImGui::GetContentRegionAvail().x - unit * 11.5f;
+        if (ImGui::CalcTextSize(label.c_str()).x > roomForLabel) {
+            while (label.size() > 4 && ImGui::CalcTextSize((label + "...").c_str()).x > roomForLabel) label.pop_back();
+            label += "...";
+        }
         const bool open = ImGui::TreeNodeEx("##fx", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap, "%s", label.c_str());
+        ImGui::SetItemTooltip("%s", (fx.type + (fx.bypass ? "  (off)" : "")).c_str());
         ImGui::SameLine(std::max(ImGui::GetContentRegionAvail().x - unit * 7.5f, unit * 6));
         bool on = !fx.bypass;
         if (ImGui::Checkbox("##on", &on)) act(tool + ".fx_set", {{"fx", static_cast<std::int64_t>(fx.index)}, {"bypass", !on}}, "Effect on/off");
@@ -341,12 +357,13 @@ void Shell::soundPanel() {
         if (open) {
             for (const auto& s : fx.settings) {
                 ImGui::PushID(s.name.c_str());
+                const std::string shown = s.label.empty() ? s.name : s.label;
                 const std::string key = st.owner + "/" + std::to_string(fx.index) + "/" + s.name;
                 auto set = [&](double v) { act(tool + ".fx_set", {{"fx", static_cast<std::int64_t>(fx.index)}, {"values", s.name + "=" + fmt(v)}}, "Effect setting"); };
                 ImGui::SetNextItemWidth(-unit * 5.5f);
                 if (!s.choices.empty()) {
                     const int cur = std::clamp(static_cast<int>(std::lround(s.value - s.min)), 0, static_cast<int>(s.choices.size()) - 1);
-                    if (ImGui::BeginCombo(s.name.c_str(), s.choices[static_cast<std::size_t>(cur)].c_str())) {
+                    if (ImGui::BeginCombo(shown.c_str(), s.choices[static_cast<std::size_t>(cur)].c_str())) {
                         for (std::size_t c = 0; c < s.choices.size(); ++c)
                             if (ImGui::Selectable(s.choices[c].c_str(), static_cast<int>(c) == cur)) set(s.min + static_cast<double>(c));
                         ImGui::EndCombo();
@@ -356,7 +373,7 @@ void Shell::soundPanel() {
                     float v = it != st.sliders.end() ? it->second : static_cast<float>(s.value);
                     const bool wide = s.min > 0 && s.max / s.min >= 50;  // Hz, ms: drag on a log scale
                     const std::string format = "%.4g" + (s.unit.empty() ? std::string() : " " + s.unit);
-                    if (ImGui::SliderFloat(s.name.c_str(), &v, static_cast<float>(s.min), static_cast<float>(s.max), format.c_str(),
+                    if (ImGui::SliderFloat(shown.c_str(), &v, static_cast<float>(s.min), static_cast<float>(s.max), format.c_str(),
                                            wide ? ImGuiSliderFlags_Logarithmic : ImGuiSliderFlags_None))
                         st.sliders[key] = v;
                     if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -388,6 +405,30 @@ void Shell::soundPanel() {
             if (ImGui::Button("Add", {-1, 0})) act(tool + ".fx_add", {{"type", types[static_cast<std::size_t>(st.addType)]}}, "Add effect");
         }
     }
+    // CLAP effect plugins installed on this computer
+    if (find(tool + ".plugin_add") && find(tool + ".plugins")) {
+        if (ImGui::SmallButton("+ Plugin")) {
+            if (!st.scanned) {
+                st.scanned = true;
+                st.plugins.clear();
+                for (const auto& row : tp::rows(query(tool + ".plugins", {})))
+                    if (row.size() >= 6 && row[5] == "effect") st.plugins.push_back({row[0], row[2], row[3]});
+            }
+            ImGui::OpenPopup("##plugins");
+        }
+        ImGui::SetItemTooltip("Add a CLAP effect plugin installed on this computer");
+        if (ImGui::BeginPopup("##plugins")) {
+            if (st.plugins.empty()) tp::muted("No CLAP effect plugins found in the usual plugin folders.");
+            for (const auto& pl : st.plugins) {
+                const std::string text = pl.name + (pl.vendor.empty() ? "" : "  (" + pl.vendor + ")");
+                if (ImGui::Selectable(text.c_str())) act(tool + ".plugin_add", {{"plugin", pl.key}}, "Add plugin");
+                ImGui::SetItemTooltip("%s", pl.key.c_str());
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("Look again")) st.scanned = false, ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
 
     // ---- envelope ----
     if (find(tool + ".automate")) {
@@ -396,21 +437,22 @@ void Shell::soundPanel() {
         struct Target {
             std::string id;
             double lo, hi;
+            std::string label = {};
         };
         std::vector<Target> targets = {{"volume", -60, 12}};
         if ((st.owner != "master" || !song) && st.owner.rfind("bus", 0) != 0) targets.push_back({"pan", -1, 1});
         for (const auto& fx : st.rack)
             for (const auto& s : fx.settings)
-                if (s.choices.empty()) targets.push_back({"fx" + std::to_string(fx.index) + "." + s.name, s.min, s.max});
+                if (s.choices.empty()) targets.push_back({"fx" + std::to_string(fx.index) + "." + s.name, s.min, s.max, s.label});
         auto tgt = std::find_if(targets.begin(), targets.end(), [&](const Target& t) { return t.id == st.target; });
         if (tgt == targets.end()) {
             st.target = "volume";
             tgt = targets.begin();
         }
         ImGui::SetNextItemWidth(-unit * 4.5f);
-        if (ImGui::BeginCombo("##target", (st.target + (st.lanes.count(st.target) ? "  *" : "")).c_str())) {
+        if (ImGui::BeginCombo("##target", (st.target + (tgt->label.empty() ? "" : " " + tgt->label) + (st.lanes.count(st.target) ? "  *" : "")).c_str())) {
             for (const auto& t : targets)
-                if (ImGui::Selectable((t.id + (st.lanes.count(t.id) ? "  *" : "")).c_str(), t.id == st.target)) st.target = t.id, st.dragPoint = -1;
+                if (ImGui::Selectable((t.id + (t.label.empty() ? "" : " " + t.label) + (st.lanes.count(t.id) ? "  *" : "")).c_str(), t.id == st.target)) st.target = t.id, st.dragPoint = -1;
             ImGui::EndCombo();
         }
         ImGui::SameLine();

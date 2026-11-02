@@ -304,6 +304,7 @@ json rackJson(const Rack& r) {
         json prm = json::object();
         for (const auto& [k, v] : e.params) prm[k] = v;
         a.push_back({{"type", e.type}, {"bypass", e.bypass}, {"params", prm}});
+        if (!e.plugin.empty()) a.back()["plugin"] = e.plugin;
     }
     return a;
 }
@@ -314,7 +315,8 @@ Rack rackOf(const json& a) {
     for (const auto& je : a) {
         Effect e;
         e.type = je.value("type", std::string());
-        if (!findEffectType(e.type)) throw std::runtime_error("unknown effect \"" + e.type + "\" in the file");
+        e.plugin = je.value("plugin", std::string());
+        if (!findEffectType(e.type) && !(e.type == "clap" && !e.plugin.empty())) throw std::runtime_error("unknown effect \"" + e.type + "\" in the file");
         e.bypass = je.value("bypass", false);
         const json prm = je.value("params", json::object());
         for (const auto& [k, v] : prm.items())

@@ -240,6 +240,39 @@ int main() {
         CHECK(ex.ok && audio::load(dir / "mix22.wav").rate == 22050);
     }
 
+    // ---- CLAP plugins in a project's racks ----
+    {
+        Session cs;
+        audio::registerCommands(cs);
+        const std::string plugin = TEST_CLAP_PLUGIN;
+        const std::string folder = fs::path(plugin).parent_path().string();
+        Result found = cs.run("audio.plugins", {{"folder", folder}});
+        CHECK(found.ok && numField(found, "count") >= 1 && str(found, "rows").find("Test Gain\twetwaresuite\t1.0\teffect") != std::string::npos);
+        Result prm = cs.run("audio.plugin_params", {{"plugin", plugin}});
+        CHECK(prm.ok && str(prm, "rows").find("p7\tGain\t-24\t24\t0\t0") == 0);
+        CHECK(!cs.run("audio.plugin_params", {{"plugin", std::string("no such thing")}}).ok);
+        const std::string P = str(cs.run("audio.project_new", {}), "project");
+        const std::string tone = str(cs.run("audio.new", {{"kind", std::string("tone")}, {"seconds", 0.5}}), "doc");
+        CHECK(cs.run("audio.track_add", {{"project", P}}).ok);
+        CHECK(cs.run("audio.clip_add", {{"project", P}, {"track", std::int64_t{0}}, {"doc", tone}, {"at", 0.0}}).ok);
+        auto peak = [&] { return numField(cs.run("audio.mixdown", {{"project", P}}), "peak_db"); };
+        const double loud = peak();
+        Result add = cs.run("audio.plugin_add", {{"project", P}, {"track", std::int64_t{0}}, {"plugin", plugin}, {"values", std::string("Gain=-12")}});
+        CHECK(add.ok && numField(add, "fx") == 0);
+        CHECK(!cs.run("audio.plugin_add", {{"project", P}, {"track", std::int64_t{0}}, {"plugin", plugin}, {"values", std::string("Volume=1")}}).ok);
+        CHECK(near(peak(), loud - 12, 0.3));
+        Result rows = cs.run("audio.fx_list", {{"project", P}, {"track", std::int64_t{0}}});
+        CHECK(str(rows, "rows").find("0\t0\tplugin: Test Gain\t0\tp7\t-12\t-24\t24\t\t\tGain") == 0);
+        CHECK(cs.run("audio.fx_set", {{"project", P}, {"track", std::int64_t{0}}, {"fx", std::int64_t{0}}, {"values", std::string("p7=0")}}).ok);
+        CHECK(near(peak(), loud, 0.3));
+        CHECK(cs.run("audio.automate", {{"project", P}, {"track", std::int64_t{0}}, {"target", std::string("fx0.p7")}, {"points", NumberList{0, -24, 0.5, -24}}}).ok);
+        CHECK(!cs.run("audio.automate", {{"project", P}, {"track", std::int64_t{0}}, {"target", std::string("fx0.Gain")}, {"points", NumberList{0, 0}}}).ok);
+        CHECK(peak() < loud - 20);
+        CHECK(cs.run("audio.project_save", {{"project", P}, {"path", (dir / "clap.json").string()}}).ok);
+        Result op = cs.run("audio.project_open", {{"path", (dir / "clap.json").string()}});
+        CHECK(op.ok && op.message.find("Gain") != std::string::npos);
+    }
+
     // ---- over MCP ----
     {
         mcp::Server server(s, "wetwaresuite-test", "1");
