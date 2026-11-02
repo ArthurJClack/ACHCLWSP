@@ -904,6 +904,9 @@ private:
     void beforeHistoryStep();
     void askFolder(const std::string& purpose);
     void folderChosen(const std::string& purpose, const std::string& path);
+    void askFile(const std::string& purpose);  // a file picker whose answer goes to folderChosen
+    void pipelineOpen(const std::string& path);
+    void pipelineChosen(const std::string& purpose, const std::string& path);
     Result query(const std::string& id, const Params& params);  // polls: no history, no switching documents
     void calcPanel();
     void calcKeypad();
@@ -944,6 +947,7 @@ private:
     void monitorPanel();
     void monitorSample();
     void clockPanel();
+    void pipelinePanel();
     void clockTick();
     void clockTimers();
     void clockStopwatch();

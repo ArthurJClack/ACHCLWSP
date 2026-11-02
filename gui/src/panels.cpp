@@ -339,6 +339,7 @@ void Shell::homeView() {
         // quick actions, wrapped onto new lines when the card is full
         std::vector<std::pair<std::string, std::string>> buttons;
         if (hasPanel(tool)) buttons.emplace_back("Open", "panel:" + tool);
+        if (tool == "automate" && hasPanel("pipeline")) buttons.emplace_back("Build a pipeline", "panel:pipeline");
         for (const auto& id : beginnerCommands(tool, commands_, 3)) {
             if (const CommandInfo* c = find(id)) buttons.emplace_back(c->title, id);
         }
@@ -352,7 +353,7 @@ void Shell::homeView() {
             }
             if (ImGui::SmallButton(buttons[b].first.c_str())) {
                 if (buttons[b].second.empty()) expandTool_ = tool;
-                else if (buttons[b].second.rfind("panel:", 0) == 0) openPanel(tool);
+                else if (buttons[b].second.rfind("panel:", 0) == 0) openPanel(buttons[b].second.substr(6));
                 else select(buttons[b].second);
             }
         }

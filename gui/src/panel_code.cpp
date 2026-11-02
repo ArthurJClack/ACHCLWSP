@@ -46,6 +46,8 @@ void Shell::folderChosen(const std::string& purpose, const std::string& path) {
     } else if (purpose == "terminal") {
         openPanel("terminal");
         terminalNew(path);
+    } else if (purpose.rfind("pipeline", 0) == 0) {
+        pipelineChosen(purpose, path);
     }
 }
 

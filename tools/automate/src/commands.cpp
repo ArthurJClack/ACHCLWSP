@@ -543,6 +543,7 @@ std::vector<std::string> pipelineNeeds(const json& doc) {
             defined.insert(cap.begin(), cap.end());
         } else if (j.is_object()) {
             for (const auto& [k, v] : j.items()) {
+                if (k == "builder_off") continue;  // blocks switched off in the pipeline builder
                 if (k == "for_each") loops = true;
                 if (k == "set" && v.is_object()) {
                     for (const auto& [sk, sv] : v.items()) defined.insert(sk);
@@ -1030,6 +1031,35 @@ void registerCommands(Session& session, Registrar fresh) {
                     }
                     const bool dry = boolParam(p, "dry_run");
                     return runPipelineText(*s, text, path, vars, dry, boolParam(p, "keep_going"), boolParam(p, "verbose"));
+                });
+            });
+
+    reg.add({"automate.pipeline_save", "Save pipeline",
+             "Check a pipeline (JSON or YAML text) and save it as a file that automate.pipeline, automate.watch and the "
+             "pipeline builder can run. The pipeline builder in the files app saves through this.",
+             {{"path", ParamType::String, "where to save it (.json, .yaml or .yml)", true},
+              {"text", ParamType::String, "the pipeline", true},
+              {"overwrite", ParamType::Bool, "replace a file that's already there", false, {}, false}},
+             false, false},
+            [](const Params& p) {
+                return std::make_unique<FunctionAction>([p] {
+                    const fs::path path = stringParam(p, "path");
+                    const std::string text = stringParam(p, "text");
+                    try {
+                        json doc = json::parse(pipelineToJson(text));
+                        json steps = doc.is_array() ? doc : doc.value("steps", json());
+                        if (!steps.is_array()) return Result::failure("a pipeline needs a steps: list");
+                    } catch (const std::exception& e) {
+                        return Result::failure(std::string("that isn't a pipeline the runner can read: ") + e.what());
+                    }
+                    std::error_code ec;
+                    if (fs::exists(path, ec) && !boolParam(p, "overwrite")) return Result::failure(path.string() + " is already there: pass overwrite=true");
+                    if (path.has_parent_path()) fs::create_directories(path.parent_path(), ec);
+                    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+                    out << text;
+                    if (!out) return Result::failure("can't write " + path.string());
+                    Result r = Result::success("saved the pipeline to " + path.string() + "; run it with automate.pipeline path=" + path.generic_string());
+                    return r.with("path", path.generic_string());
                 });
             });
 

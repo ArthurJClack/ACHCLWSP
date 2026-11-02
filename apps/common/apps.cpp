@@ -24,7 +24,7 @@ const std::vector<App>& all() {
         {"system", "calculator, code editor, file manager, terminal, system monitor and clock",
          {"calc", "code", "explorer", "terminal", "monitor", "clock"}, 0x6c7bd9},
         {"files", "open, convert, find and batch-process any file (always installed)",
-         {"toolkit", "convert", "library", "automate"}, 0x8a8f98, true},
+         {"toolkit", "convert", "library", "automate"}, 0xc252d1, true},
         {"share", "share and live-sync folders with other devices", {"share"}, 0xd4a017},
     };
     return table;

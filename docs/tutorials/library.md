@@ -279,6 +279,17 @@ undone
 /mnt/drive/photos/2024-city/IMG_0102.jpg  [image] 677.4 KB 1600x1200 #city
 ```
 
+**Tags that travel with the file.** Tags, ratings, labels and notes live in the catalog, which is quick but stays on this computer. `library.write_tags` also writes them into the files as XMP, the format Lightroom, Bridge, darktable, digiKam and most file managers read. JPEG and PNG get them embedded (only the metadata block changes; the picture isn't re-encoded and EXIF stays). Everything else, camera raw included, gets a `.xmp` sidecar next to it (`IMG_0101.xmp`). Any other XMP already in the file or sidecar, like Lightroom's develop settings, is kept. It is undoable like the rest:
+
+```
+$ wetwaresuite library.write_tags query="tag:city"
+saved tags into 2 of 2 files
+rows: /mnt/drive/photos/2024-city/IMG_0101.jpg	the file
+      /mnt/drive/photos/2024-city/IMG_0102.jpg	the file
+```
+
+It works the other way too. Indexing a new file picks up the tags, rating, label and description inside it (embedded XMP, a sidecar, or the EXIF rating and keywords Windows Explorer writes), so photos tagged in another program arrive tagged. `library.read_tags` does the same for files that are already in the catalog. It adds tags and only fills empty fields, unless you pass `replace=true`. Sidecar `.xmp` files aren't listed as files of their own.
+
 **Claude.** *"Tag everything in photos/2024-beach as beach and holiday, give the best one five stars, and note on rock_4k.jpg that it's licence 2291."* Claude calls `library_tag` (`query: "in:photos/2024-beach"`, `tags: "beach,holiday"`), looks at the photos with `library_search` and `preview: true` to pick one, then `library_rate` and `library_note`. "Undo that" calls `undo`.
 
 ## Task 4: find duplicates
@@ -609,6 +620,8 @@ Every command also takes `library=` (catalog file or its folder; see "Which cata
 | `library.rate` | star rating (undoable) | `rating` 0..5 + selection |
 | `library.label` | colour label (undoable) | `label`: red, orange, yellow, green, blue, purple, gray, none + selection |
 | `library.note` | notes (undoable) | `text`, `append` (false) + selection |
+| `library.write_tags` | save tags, rating, label and notes into the files as XMP (undoable) | `where`: auto (embed in JPEG/PNG, sidecar for the rest), embed, sidecar + selection |
+| `library.read_tags` | load tags from the files' XMP/EXIF (undoable) | `replace` (false) + selection |
 | `library.forget` | drop entries, keep files (undoable) | selection |
 | `library.duplicates` | identical files | `query`, `verify` (true), `keep`: first, oldest, newest, shortest, rated; `min_size` (1), `json` |
 | `library.similar` | look-alike images | `path` (compare to one file), `query`, `threshold` (10), `method`: phash, dhash; `threads`, `preview`, `json` |
@@ -633,5 +646,6 @@ Over MCP the tool names use underscores (`library_search`). Read-only tools (sea
 - Hashes of files over 2 MiB cover the first and last MiB plus the size; `library.duplicates` re-checks those in full before reporting them (unless `verify=false`), but `hash:` searches and move detection use the fast hash.
 - Perceptual hashes compare whole pictures: crops, rotations and mirrored copies are not found as similar. Comparing every image with every other is quadratic; it's instant for tens of thousands of images, slower beyond that.
 - The catalog is one JSON-lines file loaded into memory: comfortable to a few hundred thousand files. Two programs writing the same catalog at the same moment can lose one's changes (the last write wins).
+- Tags only go into files when you run `library.write_tags`; plain `library.tag` stays in the catalog, so it never touches your photos without asking. TIFF, WebP and HEIC get sidecars rather than embedded XMP. Lightroom's hierarchical keywords (`lr:hierarchicalSubject`) aren't read.
 - "Used" is whatever you tag as used: the library doesn't look inside project files to see which assets they reference.
 - Query dates are UTC; `{date}` in rename templates is the file's UTC modification date.

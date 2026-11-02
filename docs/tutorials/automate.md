@@ -261,6 +261,21 @@ Conditions: `$a == b`, `$a != b`, `$n > 3` (also `<`, `>=`, `<=`; both sides num
 
 **Claude.** *"Export every logo in logos/ as PNG at 64, 128, 256 and 512 and show me a contact sheet."* Claude writes the YAML above (or passes it inline as `text`), calls `automate_pipeline` with `dry_run: true` to check the file list, then runs it, then `library_thumbnails` with `preview: true` (or `photo_open` on the sheet) to look at the result.
 
+## Task 2b: build a pipeline without writing one
+
+The files app has a **Pipeline builder** tab (also on the Start screen's Automate card: **Build a pipeline**). It makes the same pipelines as Task 2, by clicking:
+
+1. Tick **Run for every file in** and type a pattern like `photos/*.png` (or pick a folder with **Folder...**, which gives `folder/*`).
+2. **+ Add block** and type what it should do ("convert", "tag", "index"). Each block is one command. A new block's file setting starts as `$file`.
+3. Click a block to fill in its settings on the right. Settings left empty use the command's default. **Browse** picks a file, and **$file** puts in the file this round is for. Output names can use `$stem`, `$ext` and `$dir`, like `out/$stem.jpg`.
+4. Drag blocks (or use the arrows) to change the order. **off** skips a block without losing it, and **x** removes it. Under each block's settings, **Only for files ending in** limits it to some extensions, and **Keep going if this block fails** carries on past errors.
+5. **Try it (nothing changes)** is a dry run that lists every command with the files filled in. **Run** does it.
+6. **Save** writes the pipeline as JSON (through `automate.pipeline_save`), so it also runs from the command line, a watch folder or Claude. **Open...** loads a pipeline the builder saved, or any JSON pipeline made only of command steps. **Copy as text** puts the JSON on the clipboard.
+
+![the pipeline builder converting a folder of PNGs to JPEGs and indexing them](images/files-pipeline-builder.png)
+
+The blocks are the commands of the app you're in: the files app has convert, library, toolkit and automate. In the all-in-one window (`wetwaresuite gui --all`) every command in the suite is a block. Pipelines saved from the builder run anywhere the `wetwaresuite` command does.
+
 ## Task 3: a watch folder that resizes and converts dropped images
 
 `scripts/web.yaml` handles one image: it uses `$file` and `$stem` without a `for_each`, which makes it a **per-file pipeline**: a watch gives it each file in turn, and by hand you pass `vars=file=...`:
@@ -496,7 +511,7 @@ Or keep a watch running all the time: `wetwaresuite automate.watch folder=drop p
 
 ## Task 6: driving pipelines from Claude
 
-Claude sees `automate_list_scripts`, `automate_run_script`, `automate_pipeline`, `automate_watch_start`, `automate_watch_status`, `automate_watch_stop` and `automate_watch` over MCP. A good routine, and the one Claude follows when asked to "run my export pipeline":
+Claude sees `automate_list_scripts`, `automate_run_script`, `automate_pipeline`, `automate_pipeline_save`, `automate_watch_start`, `automate_watch_status`, `automate_watch_stop` and `automate_watch` over MCP. A good routine, and the one Claude follows when asked to "run my export pipeline":
 
 1. `automate_list_scripts` (read-only) to find the script and the variables it needs.
 2. `automate_pipeline` with `dry_run: true` to see the expanded file list and command lines without touching anything.
@@ -542,6 +557,7 @@ A step is a command line string (`- photo.new width=10 height=10`) or a mapping 
 | --- | --- | --- |
 | `automate.run_script` | run a batch script with variables | `path` or `text`, `vars`, `keep_going` (false), `dry_run` (false), `verbose` (false) |
 | `automate.pipeline` | run a JSON/YAML pipeline | `path` or `text`, `vars`, `keep_going` (false), `dry_run` (false), `verbose` (false) |
+| `automate.pipeline_save` | check a pipeline and save it to a file | `path`, `text` (both required), `overwrite` (false) |
 | `automate.watch` | watch a folder in the foreground (blocks) | the watch parameters, plus `duration` (0 = until Ctrl+C), `max_runs` (0 = no limit), `once` (false), `quiet` (false) |
 | `automate.watch_start` | watch in the background (MCP, Python) | the watch parameters; returns `id` |
 | `automate.watch_status` | runs, failures and recent lines | `id` (default: all) |
@@ -554,6 +570,7 @@ Results carry `ran` and `failed` counts (watches: `runs` and `failed`). Over MCP
 
 ## Limitations
 
+- The pipeline builder shows command steps, one optional `for_each` and `ext:` filters. Pipelines with `run:` lines, `vars:`, nested loops, conditions or captures open as text instead (edit them in any editor, or the code app).
 - No shell step, by design: scripts and pipelines can only run suite commands. To call other programs, run them from a shell script that calls `wetwaresuite` (or from Python).
 - Watching is by polling (every `interval` seconds), not OS file events: simple and the same on every platform, but a 2 s interval means up to a few seconds' delay, and huge folders with `recursive=true` cost a scan each time. Files are processed one at a time, in name order.
 - A file is processed when its size and modification time stop changing for `settle` seconds; a program that pauses for longer while writing can get its file processed half-written. Raise `settle` for slow network copies.

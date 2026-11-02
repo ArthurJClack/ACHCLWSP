@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "shell.hpp"
+#include "wetwaresuite/gui/pipeline.hpp"
 
 namespace wetwaresuite::gui {
 
@@ -347,8 +348,20 @@ struct PdfPanel {
     int foundAt = -1;
 };
 
+// automate's pipeline builder: blocks you add, fill in and drag into order
+struct PipelinePanel {
+    PipeModel model;
+    int selected = -1;
+    std::string search;              // the add-a-block list's filter
+    bool focusSearch = false;
+    std::string path = "pipeline.json";
+    std::string output;              // what the last run, dry run or save said
+    bool outputOk = true;
+};
+
 struct ToolPanels {
     PdfPanel pdf;
+    PipelinePanel pipeline;
     CalcPanel calc;
     CodePanel code;
     ExplorerPanel explorer;

@@ -191,11 +191,13 @@ const PanelName kPanels[] = {
     {"calc", "Calculator", "Calculator"},   {"code", "Code editor", "Code (IDE)"},
     {"explorer", "Files", "File manager"},  {"terminal", "Terminal", "Terminal"},
     {"monitor", "This computer", "System monitor"}, {"clock", "Clock and timers", "Clock"},
+    {"pipeline", "Pipeline builder", "Pipeline builder"},  // automate's; shown when automate is in the app
 };
 
 }  // namespace
 
 bool Shell::hasPanel(const std::string& tool) const {
+    if (tool == "pipeline") return std::find(tools_.begin(), tools_.end(), "automate") != tools_.end();
     for (const auto& p : kPanels) {
         if (tool == p.tool) return std::find(tools_.begin(), tools_.end(), tool) != tools_.end();
     }
@@ -292,6 +294,7 @@ void Shell::toolPanelView() {
     else if (panel_ == "terminal") terminalPanel();
     else if (panel_ == "monitor") monitorPanel();
     else if (panel_ == "clock") clockPanel();
+    else if (panel_ == "pipeline") pipelinePanel();
     else homeView();
 }
 

@@ -1,6 +1,6 @@
 find_package(Threads REQUIRED)
 
-add_library(wetwaresuite_library src/catalog.cpp src/scan.cpp src/query.cpp src/thumbs.cpp src/commands.cpp)
+add_library(wetwaresuite_library src/catalog.cpp src/scan.cpp src/query.cpp src/thumbs.cpp src/commands.cpp src/xmp.cpp)
 add_library(wetwaresuite::library ALIAS wetwaresuite_library)
 target_include_directories(wetwaresuite_library PUBLIC include)
 target_link_libraries(wetwaresuite_library PUBLIC wetwaresuite::core wetwaresuite::raster

@@ -406,10 +406,35 @@ struct IndexStats {
     std::vector<std::string> errors;
 };
 
+// Merges tags found inside a file into its catalog entry. `replace` takes the file's values instead.
+bool mergeFileTags(Item& item, const FileTags& t, bool replace) {
+    bool changed = false;
+    if (replace) {
+        changed = item.tags != t.tags || item.rating != t.rating || item.label != t.label || item.notes != t.notes;
+        item.tags = t.tags;
+        item.rating = t.rating;
+        item.label = t.label;
+        item.notes = t.notes;
+        return changed;
+    }
+    for (const auto& tag : t.tags) {
+        if (!item.hasTag(tag)) {
+            item.tags.push_back(tag);
+            changed = true;
+        }
+    }
+    if (!item.rating && t.rating) item.rating = t.rating, changed = true;
+    if (item.label.empty() && !t.label.empty()) item.label = t.label, changed = true;
+    if (item.notes.empty() && !t.notes.empty()) item.notes = t.notes, changed = true;
+    return changed;
+}
+
 bool skipName(const std::string& name, const IndexOptions& o) {
     if (name == kCatalogName || name == kThumbDir || name.rfind(std::string(kCatalogName), 0) == 0) return true;
     if (name == kOldThumbDir || name.rfind(std::string(kOldCatalogName), 0) == 0) return true;
     if (!o.hidden && !name.empty() && name[0] == '.') return true;
+    if (name.size() > 4 && lower(name.substr(name.size() - 4)) == ".xmp") return true;  // sidecars: their tags are read with the file
+    if (name.size() > 6 && name.compare(name.size() - 6, 6, ".wwtmp") == 0) return true;
     for (const auto& x : o.exclude) {
         if (globMatch(x, name)) return true;
     }
@@ -471,10 +496,14 @@ void indexRoot(Catalog& cat, const fs::path& rootPath, const IndexOptions& o, In
     stats.files += files.size();
 
     std::vector<std::optional<Item>> read(work.size());
+    std::vector<std::optional<FileTags>> inside(work.size());
+    std::vector<char> isNew(work.size());
+    for (std::size_t i = 0; i < work.size(); ++i) isNew[i] = cat.find(normPath(work[i])) == nullptr;
     std::vector<std::string> errors(work.size());
     parallelFor(work.size(), o.threads, [&](std::size_t i) {
         try {
             read[i] = readItem(work[i], o.probe, o.fullHash);
+            if (isNew[i]) inside[i] = readFileTags(work[i]);  // tags that came with a new file
         } catch (const std::exception& e) {
             errors[i] = e.what();
         }
@@ -499,6 +528,7 @@ void indexRoot(Catalog& cat, const fs::path& rootPath, const IndexOptions& o, In
             *old = std::move(fresh);
             ++stats.updated;
         } else {
+            if (inside[i]) mergeFileTags(fresh, *inside[i], false);
             addedPaths.insert(fresh.path);
             cat.items.push_back(std::move(fresh));
             ++stats.added;
@@ -640,6 +670,100 @@ private:
     fs::path file_;
     std::vector<std::string> paths_;
     std::vector<std::pair<std::string, Meta>> before_;
+};
+
+class TagWrite : public Action {
+public:
+    TagWrite(StatePtr st, Params p) : st_(std::move(st)), p_(std::move(p)) {}
+
+    Result apply() override {
+        std::string error;
+        Catalog* cat = openCatalog(*st_, p_, error);
+        if (!cat) return Result::failure(error);
+        file_ = cat->file;
+        const std::string where = stringParam(p_, "where", "auto");
+        if (paths_.empty()) {
+            auto items = selectItems(*cat, p_, error, false, true);
+            if (!error.empty()) return Result::failure(error);
+            for (auto* i : items) paths_.push_back(i->path);
+        }
+        backup_.clear();
+        facts_.clear();
+        std::string rows, problems;
+        std::size_t done = 0;
+        for (const auto& path : paths_) {
+            Item* item = cat->find(path);
+            if (!item) continue;
+            FileTags t;
+            t.tags = item->tags;
+            t.rating = item->rating;
+            t.label = item->label;
+            t.notes = item->notes;
+            try {
+                const std::string went = writeFileTags(path, t, where, &backup_);
+                if (went == "the file") {
+                    // the photo itself changed: keep its facts current so a rescan doesn't see a new file
+                    facts_.push_back({path, *item});
+                    Item fresh = readItem(path, false);
+                    item->size = fresh.size;
+                    item->mtime = fresh.mtime;
+                    item->mtick = fresh.mtick;
+                    item->hash = fresh.hash;
+                }
+                rows += path + "\t" + went + "\n";
+                ++done;
+            } catch (const std::exception& e) {
+                problems += "\n  " + path + ": " + e.what();
+            }
+        }
+        if (!facts_.empty()) {
+            try {
+                st_->commit(*cat);
+            } catch (const std::exception& e) {
+                return Result::failure(e.what());
+            }
+        }
+        if (!done && !problems.empty()) return Result::failure("couldn't save tags into the files:" + problems);
+        std::string msg = "saved tags into " + std::to_string(done) + " of " + std::to_string(paths_.size()) + " files";
+        if (!problems.empty()) msg += "; skipped:" + problems;
+        Result r = Result::success(msg);
+        return r.with("files", static_cast<std::int64_t>(done)).with("rows", rows);
+    }
+
+    void revert() override {
+        for (auto it = backup_.rbegin(); it != backup_.rend(); ++it) {
+            std::error_code ec;
+            if (!it->bytes) {
+                fs::remove(it->path, ec);
+                continue;
+            }
+            std::ofstream out(it->path, std::ios::binary | std::ios::trunc);
+            out.write(it->bytes->data(), static_cast<std::streamsize>(it->bytes->size()));
+        }
+        if (facts_.empty()) return;
+        try {
+            Catalog& cat = st_->open(file_);
+            for (const auto& [path, old] : facts_) {
+                if (Item* item = cat.find(path)) {
+                    Item fresh = readItem(path, false);  // the restored bytes have a new file time
+                    item->size = fresh.size;
+                    item->mtime = fresh.mtime;
+                    item->mtick = fresh.mtick;
+                    item->hash = fresh.hash;
+                }
+            }
+            st_->commit(cat);
+        } catch (const std::exception&) {
+        }
+    }
+
+private:
+    StatePtr st_;
+    Params p_;
+    fs::path file_;
+    std::vector<std::string> paths_;
+    std::vector<FileBackup> backup_;
+    std::vector<std::pair<std::string, Item>> facts_;
 };
 
 class ForgetEdit : public Action {
@@ -1034,6 +1158,29 @@ void registerCommands(Session& session) {
                     bool changed = item.notes != n;
                     item.notes = n;
                     return changed;
+                });
+            });
+
+    reg.add({"library.write_tags", "Save tags into files",
+             "Write the library's tags, rating, colour label and notes into the files themselves as XMP, so they "
+             "travel with the photo and show up in Lightroom, Bridge, darktable, digiKam and file managers. JPEG and PNG "
+             "get them embedded (the picture itself isn't re-encoded); everything else gets a .xmp sidecar next to it. "
+             "The rest of any XMP already there is kept. Undoable.",
+             selection({{"where", ParamType::String, "auto (embed in JPEG/PNG, sidecar for the rest), embed or sidecar", false,
+                         {"auto", "embed", "sidecar"}, std::string("auto")}}),
+             true, false},
+            [st](const Params& p) { return std::make_unique<TagWrite>(st, p); });
+
+    reg.add({"library.read_tags", "Load tags from files",
+             "Read tags, rating, colour label and notes stored inside files (embedded XMP, a .xmp sidecar, or the EXIF "
+             "rating/keywords Windows writes) into the library. New files get these automatically when indexed. By "
+             "default tags are added and the rest only fills empty fields; replace=true takes the file's values. Undoable.",
+             selection({{"replace", ParamType::Bool, "use the file's values instead of merging", false, {}, false}}), true, false},
+            [st, noCheck](const Params& p) {
+                return std::make_unique<MetaEdit>(st, p, "read tags for", noCheck, [](Item& item, const Params& q) {
+                    auto t = readFileTags(item.path);
+                    if (!t) return boolParam(q, "replace") ? mergeFileTags(item, FileTags{}, true) : false;
+                    return mergeFileTags(item, *t, boolParam(q, "replace"));
                 });
             });
 

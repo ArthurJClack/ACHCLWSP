@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 #include <nlohmann/json.hpp>
 
@@ -345,6 +346,63 @@ int main() {
     CHECK(intField(s.run("library.search", {{"query", std::string("")}}), "total") == 1);  // the last used catalog
     CHECK(intField(s.run("library.search", {{"query", std::string("")}, {"library", assets.string()}}), "total") == before);
 
+    // ---- tags inside the files (XMP) ----
+    {
+        const fs::path tg = dir / "tagged";
+        fs::create_directories(tg);
+        raster::save(picture(64, 48, 8), tg / "a.jpg", 90);
+        raster::save(picture(64, 48, 8), tg / "b.png");
+        writeText(tg / "c.cr2", "not really a raw");
+        const std::string lib = (dir / "tagged-lib.json").string();
+        Session ts;
+        library::registerCommands(ts);
+        CHECK(ts.run("library.index", {{"root", tg.string()}, {"library", lib}}).ok);
+        CHECK(ts.run("library.tag", {{"query", std::string("")}, {"tags", std::string("beach,café & sun")}}).ok);
+        CHECK(ts.run("library.rate", {{"query", std::string("")}, {"rating", std::int64_t{4}}}).ok);
+        CHECK(ts.run("library.label", {{"query", std::string("")}, {"label", std::string("red")}}).ok);
+        CHECK(ts.run("library.note", {{"query", std::string("")}, {"text", std::string("first <light>")}}).ok);
+        Result w = ts.run("library.write_tags", {{"query", std::string("")}});
+        CHECK(w.ok && intField(w, "files") == 3);
+        CHECK(strField(w, "rows").find("c.cr2\tsidecar c.xmp") != std::string::npos);
+        CHECK(fs::exists(tg / "c.xmp"));
+        // the pictures still decode, with the tags inside
+        CHECK(raster::load(tg / "a.jpg").width() == 64 && raster::load(tg / "b.png").height() == 48);
+        for (const char* f : {"a.jpg", "b.png", "c.cr2"}) {
+            auto t = library::readFileTags(tg / f);
+            CHECK(t && t->rating == 4 && t->label == "red" && t->notes == "first <light>");
+            CHECK(t && t->tags.size() == 2 && t->tags[1] == "café & sun");
+        }
+        // the catalog still knows the photo (no "changed" file on the next rescan)
+        Result again = ts.run("library.index", {{"root", tg.string()}, {"library", lib}});
+        CHECK(again.ok && intField(again, "total") == 3);
+        // a fresh library picks the tags up from the files; sidecars aren't listed as files
+        const std::string lib2 = (dir / "tagged-lib2.json").string();
+        Result fresh = ts.run("library.index", {{"root", tg.string()}, {"library", lib2}});
+        CHECK(fresh.ok && intField(fresh, "total") == 3);
+        CHECK(intField(ts.run("library.search", {{"query", std::string("tag:beach rating:4 label:red")}, {"library", lib2}}), "total") == 3);
+        // rewriting keeps other XMP and updates ours
+        std::string side = [&] { std::ifstream in(tg / "c.xmp"); std::ostringstream o; o << in.rdbuf(); return o.str(); }();
+        side.replace(side.find("<rdf:Description rdf:about=\"\""), 29, "<rdf:Description rdf:about=\"\" xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" crs:Exposure2012=\"+0.50\"");
+        writeText(tg / "c.xmp", side);
+        CHECK(ts.run("library.untag", {{"paths", (tg / "c.cr2").string()}, {"tags", std::string("beach")}, {"library", lib}}).ok);
+        CHECK(ts.run("library.write_tags", {{"paths", (tg / "c.cr2").string()}, {"library", lib}}).ok);
+        side = [&] { std::ifstream in(tg / "c.xmp"); std::ostringstream o; o << in.rdbuf(); return o.str(); }();
+        CHECK(side.find("crs:Exposure2012=\"+0.50\"") != std::string::npos);
+        auto ct = library::readFileTags(tg / "c.cr2");
+        CHECK(ct && ct->tags.size() == 1 && ct->tags[0] == "café & sun");
+        // undo puts the sidecar back as it was
+        CHECK(ts.history().undo());
+        ct = library::readFileTags(tg / "c.cr2");
+        CHECK(ct && ct->tags.size() == 2);
+        // read_tags merges what's in the files into a library that lost them
+        CHECK(ts.run("library.untag", {{"query", std::string("")}, {"tags", std::string("*")}, {"library", lib2}}).ok);
+        Result rd = ts.run("library.read_tags", {{"query", std::string("")}, {"library", lib2}});
+        CHECK(rd.ok && intField(rd, "changed") == 3);
+        CHECK(intField(ts.run("library.search", {{"query", std::string("tag:beach")}, {"library", lib2}}), "total") == 3);
+        // where=embed refuses formats it can't embed in
+        CHECK(!ts.run("library.write_tags", {{"paths", (tg / "c.cr2").string()}, {"where", std::string("embed")}, {"library", lib2}}).ok);
+    }
+
     // ---- MCP ----
     {
         Session ms;
@@ -359,7 +417,7 @@ int main() {
             if (name == "library_move") CHECK(t["annotations"]["readOnlyHint"] == false && t["annotations"]["destructiveHint"] == true);
             if (name == "library_tag") CHECK(t["annotations"]["destructiveHint"] == false);
         }
-        CHECK(seen == 21);
+        CHECK(seen == 23);
         json r = call(server, 2, "library_search", {{"library", assets.string()}, {"query", "type:image"}, {"preview", true}});
         CHECK(r["isError"] == false && r["structuredContent"]["total"] == 4);
         CHECK(r["content"].size() == 2 && r["content"][1]["type"] == "image");

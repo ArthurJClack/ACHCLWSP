@@ -106,6 +106,33 @@ Item readItem(const fs::path& path, bool probe = true, bool fullHash = false);
 // Pixel size from a raster file's header (PNG, JPEG, GIF, BMP, WebP, PSD, TGA, PNM, TIFF, DDS, QOI).
 std::optional<std::pair<int, int>> imageHeaderSize(const fs::path& path);
 
+// ---- tags inside the files (XMP / EXIF) -----------------------------------------
+
+struct FileTags {
+    std::vector<std::string> tags;
+    int rating = 0;
+    std::string label, notes;
+    std::string from;  // "the file", "exif" or "sidecar photo.xmp"
+    bool any() const;
+};
+
+// One file's bytes before a write (nullopt: it didn't exist), so undo can put it back.
+struct FileBackup {
+    fs::path path;
+    std::optional<std::string> bytes;
+};
+
+// The .xmp sidecar for a file: photo.xmp (Bridge, Lightroom), or photo.jpg.xmp when only that exists (darktable).
+fs::path sidecarPath(const fs::path& file);
+// Tags, rating, colour label and description from the XMP embedded in a JPEG or PNG, the
+// EXIF rating/keywords of a JPEG, or the file's .xmp sidecar. nullopt when there are none.
+std::optional<FileTags> readFileTags(const fs::path& path);
+// Writes the four fields into the file's XMP (where: auto = embed in JPEG/PNG and a sidecar for
+// everything else, embed, sidecar), keeping the rest of an existing packet. Returns where it
+// went. Throws std::runtime_error.
+std::string writeFileTags(const fs::path& path, const FileTags& tags, const std::string& where,
+                          std::vector<FileBackup>* backup = nullptr);
+
 // ---- queries ----------------------------------------------------------------
 
 struct Query;  // parsed form, see query.cpp

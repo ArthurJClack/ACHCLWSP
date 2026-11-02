@@ -423,7 +423,7 @@ void Shell::docTabs() {
     std::vector<std::pair<std::string, std::string>> tabs;  // key, label
     tabs.emplace_back("", "Start");
     for (const auto& [tool, panel] : std::vector<std::pair<std::string, std::string>>{
-             {"calc", "Calculator"}, {"code", "Code"}, {"explorer", "Files"}, {"terminal", "Terminal"}, {"monitor", "Monitor"}, {"clock", "Clock"}}) {
+             {"calc", "Calculator"}, {"code", "Code"}, {"explorer", "Files"}, {"terminal", "Terminal"}, {"monitor", "Monitor"}, {"clock", "Clock"}, {"pipeline", "Pipeline builder"}}) {
         if (hasPanel(tool)) tabs.emplace_back("panel:" + tool, panel);
     }
     for (const auto& id : docIds()) {
