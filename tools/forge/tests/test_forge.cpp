@@ -302,6 +302,53 @@ void testSprites(const fs::path& dir) {
 
 }  // namespace
 
+// a flat low-poly square and a high-poly one with a dome in the middle
+void testBake(Session& s, const fs::path& dir) {
+    mesh::Mesh low = mesh::plane(2, 2, 1, 1);
+    forge::generateUvs(low, forge::Projection::Planar, 2, 1.0);
+    mesh::Mesh high = mesh::plane(2, 2, 96, 96);
+    for (auto& v : high.positions) {
+        const double r = std::hypot(v.x, v.y);
+        if (r < 0.5) v.z = std::sqrt(0.25 - r * r) * 0.4;
+    }
+    high.normals.clear();
+    forge::recomputeNormals(high, 89);
+    forge::BakeOptions o;
+    o.size = 64;
+    o.aoSamples = 32;
+    o.distance = 0.3;
+    o.aoDistance = 0.5;
+    const forge::BakeResult b = forge::bakeMaps(low, high, o);
+    CHECK(b.texels > 3500 && b.missed < b.texels / 50);
+    auto px = [](const raster::Image& img, int x, int y) { return img.pixel(x, y); };
+    // flat corner: straight up; the dome's right flank leans right (red up), its top flank up (green up)
+    CHECK(std::abs(px(b.normalMap, 4, 4)[0] - 128) < 6 && px(b.normalMap, 4, 4)[2] > 245);
+    CHECK(px(b.normalMap, 44, 32)[0] > 160);
+    CHECK(px(b.normalMap, 32, 20)[1] > 160);
+    // the floor next to the dome sees less sky than the open corner
+    CHECK(px(b.aoMap, 4, 4)[0] > 230);
+    CHECK(px(b.aoMap, 32 + 17, 32)[0] < px(b.aoMap, 4, 4)[0] - 20);
+    CHECK(px(b.aoMap, 32, 32)[0] > 230);  // the dome's top is open
+    // no UVs: a clear message
+    mesh::Mesh bare = mesh::plane(2, 2, 1, 1);
+    bare.uvs.clear();
+    bool threw = false;
+    try {
+        forge::bakeMaps(bare, high, o);
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("UVs") != std::string::npos;
+    }
+    CHECK(threw);
+    // and as a command, from files
+    mesh::save(dir / "low.obj", low);
+    mesh::save(dir / "high.obj", high);
+    Result r = s.run("forge.mesh_bake", {{"low", (dir / "low.obj").string()}, {"high", (dir / "high.obj").string()},
+                                         {"normal", (dir / "bake" / "n.png").string()}, {"ao", (dir / "bake" / "ao.png").string()},
+                                         {"size", std::int64_t{64}}, {"samples", std::int64_t{8}}, {"distance", 0.3}});
+    CHECK(r.ok && r.attachments.size() == 2 && fs::exists(dir / "bake" / "n.png") && fs::exists(dir / "bake" / "ao.png"));
+    CHECK(!s.run("forge.mesh_bake", {{"low", (dir / "low.obj").string()}, {"high", (dir / "high.obj").string()}}).ok);
+}
+
 int main() {
     auto dir = fs::temp_directory_path() / "wetwaresuite_test_forge";
     fs::remove_all(dir);
@@ -309,6 +356,7 @@ int main() {
 
     Session s;
     forge::registerCommands(s);
+    testBake(s, dir);
     for (const auto& info : s.registry().list()) CHECK(info.id.rfind("forge.", 0) == 0);
 
     // ---- meshes ----

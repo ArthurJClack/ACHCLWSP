@@ -494,6 +494,76 @@ void registerMeshCommands(Session& session) {
                 });
             });
 
+    reg.add({"forge.mesh_bake",
+             "Bake textures",
+             "Bake a high-poly model's detail into texture maps for a low-poly game mesh, like Blender, Substance or "
+             "xNormal: a tangent-space normal map (OpenGL style, green up, for Godot and Blender; directx=true for "
+             "Unreal) and an ambient occlusion map, laid out on the low mesh's UVs. Unwrap the low mesh first "
+             "(model.uv_unwrap, then export it; or forge.mesh_uv). Both meshes must sit in the same place.",
+             {{"doc", ParamType::String, "the low-poly mesh (open, with UVs)", false},
+              {"low", ParamType::String, "a low-poly model file instead of doc", false},
+              {"high", ParamType::String, "the high-poly model file, or an open mesh id", true},
+              {"normal", ParamType::String, "where to write the normal map (.png)", false},
+              {"ao", ParamType::String, "where to write the ambient occlusion map (.png)", false},
+              {"size", ParamType::Int, "texture size, px (square)", false, {}, std::int64_t{512}},
+              {"samples", ParamType::Int, "AO rays per texel: more is smoother and slower", false, {}, std::int64_t{24}},
+              {"distance", ParamType::Number, "how far apart the two surfaces may be (default: 4% of the model)", false},
+              {"ao_distance", ParamType::Number, "how far away something still darkens AO (default: 15% of the model)", false},
+              {"padding", ParamType::Int, "px grown past UV island edges", false, {}, std::int64_t{4}},
+              {"directx", ParamType::Bool, "flip green for DirectX/Unreal", false, {}, false}},
+             false},
+            [s](const Params& p) -> std::unique_ptr<Action> {
+                return std::make_unique<FunctionAction>([s, p]() -> Result {
+                    try {
+                        auto openOrLoad = [&](const std::string& v) {
+                            if (auto d = s->workspace().getAs<MeshDoc>(v)) return d->mesh;
+                            return mesh::load(v);
+                        };
+                        Mesh low;
+                        if (p.count("doc")) {
+                            auto d = s->workspace().getAs<MeshDoc>(stringParam(p, "doc"));
+                            if (!d) return failed("no open mesh called '" + stringParam(p, "doc") + "'");
+                            low = d->mesh;
+                        } else if (p.count("low")) {
+                            low = mesh::load(stringParam(p, "low"));
+                        } else {
+                            return failed("give doc= (an open low-poly mesh) or low= (a file)");
+                        }
+                        const Mesh high = openOrLoad(stringParam(p, "high"));
+                        if (!p.count("normal") && !p.count("ao")) return failed("give normal=file.png and/or ao=file.png");
+                        BakeOptions o;
+                        o.size = static_cast<int>(intParam(p, "size", 512));
+                        o.normal = p.count("normal") > 0;
+                        o.ao = p.count("ao") > 0;
+                        o.aoSamples = static_cast<int>(std::clamp<std::int64_t>(intParam(p, "samples", 24), 1, 1024));
+                        o.distance = numberParam(p, "distance", 0);
+                        o.aoDistance = numberParam(p, "ao_distance", 0);
+                        o.padding = static_cast<int>(std::clamp<std::int64_t>(intParam(p, "padding", 4), 0, 64));
+                        o.directXGreen = boolParam(p, "directx", false);
+                        const BakeResult br = bakeMaps(low, high, o);
+                        std::string msg = "baked " + std::to_string(o.size) + "x" + std::to_string(o.size) + " from " +
+                                          std::to_string(high.triangleCount()) + " onto " + std::to_string(low.triangleCount()) + " triangles";
+                        Result r = Result::success("");
+                        auto write = [&](const char* key, const raster::Image& img, const char* what) {
+                            const fs::path f = stringParam(p, key);
+                            makeParent(f);
+                            raster::save(img, f);
+                            msg += std::string("\n  ") + what + ": " + f.string();
+                            r.with(key, f.string());
+                            r.attach({"image/png", raster::encodePng(img), f.filename().string()});
+                        };
+                        if (o.normal) write("normal", br.normalMap, "normal map");
+                        if (o.ao) write("ao", br.aoMap, "ambient occlusion");
+                        const double miss = br.texels ? 100.0 * static_cast<double>(br.missed) / static_cast<double>(br.texels) : 0;
+                        if (miss > 5) msg += "\n" + num(miss) + "% of the texels found no high surface: raise distance= or check the two meshes line up";
+                        r.message = msg;
+                        return r.with("texels", static_cast<std::int64_t>(br.texels)).with("missed", static_cast<std::int64_t>(br.missed));
+                    } catch (const std::exception& e) {
+                        return failed(e.what());
+                    }
+                });
+            });
+
     reg.add({"forge.mesh_batch",
              "Batch process meshes",
              "Prepare a whole folder of models in one go: optional weld, decimation, axis conversion, scale, "

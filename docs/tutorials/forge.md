@@ -543,6 +543,33 @@ saved export/hit.gif
 
 Claude calls `forge_sprite_new` with `palette=db16`, draws with `forge_draw` (checking each step with `preview=true`), adds frames with `forge_frame_add`, tags them with `forge_tag_add`, and saves with `forge_sprite_save` and `forge_sprite_export godot=coin.tres`.
 
+## Task 6: bake a high-poly model into normal and AO maps
+
+Sculpt or model the detail on a dense mesh, keep a light mesh for the game, and bake the detail into textures that make the light one look dense: a **normal map** (tangent space, OpenGL style with green up, which Godot and Blender read; `directx=true` flips green for Unreal) and an **ambient occlusion** map (how much sky each spot sees: creases go dark). The maps follow the low mesh's UVs, so unwrap it first: `model.uv_unwrap` in the model app (then export it as `.glb` or `.obj`), or one of `forge.mesh_uv`'s projections. Both meshes must sit in the same place, as they do when the low one is a decimated or retopologised copy of the high one.
+
+```text
+# a flat game panel (2 triangles) and its 115,000-triangle sculpt with rivets, grooves and a dome
+forge.mesh_open path=panel_low.obj -> low
+forge.mesh_uv doc=$low projection=planar axis=z
+forge.mesh_open path=panel_high.obj -> high
+forge.mesh_normals doc=$high crease=89
+forge.mesh_bake doc=$low high=$high normal=out/panel_normal.png ao=out/panel_ao.png size=512 samples=32 distance=0.2
+```
+
+```text
+baked 512x512 from 115200 onto 2 triangles
+  normal map: out/panel_normal.png
+  ambient occlusion: out/panel_ao.png
+texels: 262144
+missed: 0
+```
+
+![the baked normal and AO maps](images/forge-bake-panel.png)
+
+It takes about a second and a half on four cores. `distance` is how far apart the two surfaces may be (by default 4% of the model's size): if the message says many texels found no high surface, raise it. `samples` trades AO smoothness for time, `ao_distance` sets how far away something still casts shade, and `padding` grows colour a few pixels past each UV island so seams don't show when the texture is filtered. `high=` takes a file or an open mesh, `low=` a file instead of `doc=`.
+
+**With Claude:** "Bake normal and AO maps from statue_high.glb onto statue_low.glb at 1024 for Godot." Claude calls `forge_mesh_bake` with `low`, `high`, `normal`, `ao` and `size=1024`.
+
 ## More texture helpers
 
 ```sh
@@ -680,6 +707,23 @@ Not undoable (writes files). Writes `<name>_lod0.<ext>` .. `_lodN`.
 | `ascii` | boolean | no | false | STL/PLY as text |
 
 Returns `files`, `triangles` (per level), `levels`.
+
+#### forge.mesh_bake
+Bake a high-poly model's detail into a tangent-space normal map and an ambient occlusion map on the low-poly mesh's UVs. Writes the PNGs and returns them as attachments, with `texels` and `missed`.
+
+| Parameter | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `doc` | string | no | | the low-poly mesh (open, with UVs) |
+| `low` | string | no | | a low-poly model file instead of `doc` |
+| `high` | string | yes | | the high-poly model file, or an open mesh id |
+| `normal` | string | no | | where to write the normal map (.png) |
+| `ao` | string | no | | where to write the AO map (.png) |
+| `size` | integer | no | 512 | texture size, px (square) |
+| `samples` | integer | no | 24 | AO rays per texel |
+| `distance` | number | no | 4% of the model | how far apart the two surfaces may be |
+| `ao_distance` | number | no | 15% of the model | how far away something still darkens AO |
+| `padding` | integer | no | 4 | px grown past UV island edges |
+| `directx` | boolean | no | false | flip green for DirectX/Unreal |
 
 #### forge.mesh_batch
 Not undoable. Processes every model in a folder: weld, decimate, axes, scale, center, floor, normals, UVs, save.
