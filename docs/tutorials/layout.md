@@ -129,7 +129,7 @@ layout
   layout.style_define  Define Style
 ```
 
-### three ways to drive it
+### four ways to drive it
 
 - **CLI**: `wetwaresuite <command> key=value ...` runs one command in a fresh
   process. Documents live only inside one process, so a single command can
@@ -142,6 +142,13 @@ layout
   `place_text`, `place_image`, `frame_duplicate`) and `$name` reuses it. `#`
   starts a comment. The script stops at the first failing line unless you add
   `--keep-going`.
+- **The window**: `wetwaresuite-office poster.wwlay` shows the page with every
+  frame outlined. Click a frame to pick it, drag it to move it (half-mm steps,
+  hold Shift for free), drag one of its eight handles to resize it, and
+  double-click a text frame to retype it right on the page. Arrows nudge 1 mm
+  (Shift: 0.1 mm), Delete removes the frame, PageUp/PageDown or the `<` `>`
+  buttons change page. Everything else (styles, colours, pictures, export) is
+  on the Layout ribbon and in Ctrl+K.
 - **Claude over MCP**: `wetwaresuite mcp` (or `wetwaresuite mcp --tools layout`) serves
   every command as a tool named with `_` instead of `.` (`layout_frame_add`).
   Connect it once (see [mcp.md](mcp.md)):
@@ -1203,10 +1210,7 @@ Render a page to PNG so you can see it, with margins (magenta), column gutters (
 
 - Western European text uses the frame's font. Greek and Cyrillic letters
   are set in wetwaresuite's built-in font (Roboto) and embedded, so they
-  print and copy correctly but don't match a serif or bold face. Chinese,
-  Japanese, Korean, Arabic, Hebrew, Indic scripts and emoji still print as
-  `?`. No right-to-left or complex scripts, no kerning pairs, ligatures or
-  OpenType features.
+  print and copy correctly but don't match a serif or bold face. Chinese, Japanese, Korean, other scripts, symbols and emoji are set in a font already on the computer (Microsoft YaHei, MS Gothic or Malgun Gothic on Windows, PingFang or Arial Unicode on a Mac, WenQuanYi, Droid Sans Fallback or Noto on Linux; Segoe UI Emoji, Noto Emoji or Symbola for emoji, which print in one colour) and only the characters used are embedded, so files stay small. `WETWARESUITE_FALLBACK_FONT=/path/font.ttf` picks your own. A character no installed font has still prints as `?`. Arabic, Hebrew and Indic text gets its letters but not right-to-left order or joined shapes. No kerning pairs, ligatures or OpenType features.
 - No hyphenation; justified lines stretch word spaces only. Very long words
   are broken where they hit the frame edge.
 - No text wrap around pictures, no tab stops, drop caps, footnotes, tables,

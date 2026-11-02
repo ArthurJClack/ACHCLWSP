@@ -196,6 +196,10 @@ void Shell::deckCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active) {
         d.press = {static_cast<float>(numberField(r, "x")), static_cast<float>(numberField(r, "y")), static_cast<float>(numberField(r, "w")),
                    static_cast<float>(numberField(r, "h"))};
         d.pressText = textField(r, "text");
+        d.pressFont = static_cast<float>(numberField(r, "font_size"));
+        auto bg = parseHex(textField(r, "background")), fg = parseHex(textField(r, "text_color"));
+        d.pressBg = bg ? ImVec4{bg->r, bg->g, bg->b, 1} : ImVec4{1, 1, 1, 1};
+        d.pressFg = fg ? ImVec4{fg->r, fg->g, fg->b, 1} : ImVec4{0.1f, 0.1f, 0.1f, 1};
         d.pressAt = io.MousePos;
         d.moving = false;
     }
@@ -226,17 +230,23 @@ void Shell::deckCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active) {
             canvas_.dirty = true;
             d.hoverAt = {-1, -1};
         } else {
+            if (d.editing) deckCommit();
             d.editing = true;
             d.focus = true;
+            ++d.generation;
+            d.fontSize = d.pressFont > 0 ? d.pressFont : 24;
+            d.bg = d.pressBg;
+            d.fg = d.pressFg;
             d.kind = kind;
             d.object = d.pressObject;
             d.box = d.press;
             d.text = d.pressText;
             while (!d.text.empty() && d.text.back() == '\n') d.text.pop_back();
+            d.original = d.text;
         }
     } else if (!d.moving && hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && d.pressKind.empty() && !ImGui::IsKeyDown(ImGuiKey_Space) &&
                io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16) {
-        d.editing = false;  // a click on nothing closes the editor
+        deckCommit();  // a click on nothing keeps the words and closes the box
     }
 
     // frames: the part being edited, else the one under the mouse ("click to add title" when empty)
@@ -253,65 +263,97 @@ void Shell::deckCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active) {
     dl->AddRectFilled(a, b, ImGui::ColorConvertFloat4ToU32({c.x, c.y, c.z, 0.08f}));
     dl->AddRect(a, b, accent, 0, 0, 2);
 
-    // the text box floats under the part (above it near the bottom of the view)
-    const float unit = ImGui::GetFontSize();
-    const float boxW = std::min(unit * 30, canvas_.viewSize.x - unit * 2);
+    // the words are typed right on the slide: a box over the part in the slide's colours and size
     const bool lines = d.kind == "bullets" || d.kind == "right" || d.kind == "object";
-    const float boxH = unit * (lines ? 11 : 7);
-    const float x = std::clamp(a.x, canvas_.viewMin.x + 8, canvas_.viewMin.x + canvas_.viewSize.x - boxW - 8);
-    float y = b.y + 6;
-    if (y + boxH > canvas_.viewMin.y + canvas_.viewSize.y) y = std::max(canvas_.viewMin.y + 8, a.y - boxH - 6);
-    ImGui::SetNextWindowPos({x, y}, d.focus ? ImGuiCond_Always : ImGuiCond_Appearing);
-    ImGui::SetNextWindowSize({boxW, 0}, ImGuiCond_Appearing);
-    bool open = true;
-    const std::string title = std::string(partName(d.kind)) + (d.kind == "object" ? " " + std::to_string(d.object) : "") + " - slide " +
-                              std::to_string(d.slide) + "###deckpartedit";
-    if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+    const float px = std::clamp(d.fontSize * perPoint, 6.0f, 200.0f);
+    pushFontPx(px);
+    const ImVec2 pad = ImGui::GetStyle().FramePadding;
+    const float boxW = std::max(60.0f, b.x - a.x);
+    const float textH = ImGui::CalcTextSize(d.text.empty() ? " " : d.text.c_str(), nullptr, false, boxW - pad.x * 2).y;
+    const float boxH = std::max(b.y - a.y, textH + ImGui::GetTextLineHeight() + pad.y * 2);
+    ImGui::SetNextWindowPos(a);
+    ImGui::SetNextWindowSize({boxW, boxH});
+    const ImU32 bg = ImGui::ColorConvertFloat4ToU32(d.bg);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, bg);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertFloat4ToU32(d.fg));
+    ImGui::PushStyleColor(ImGuiCol_Border, accent);
+    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImGui::ColorConvertFloat4ToU32({c.x, c.y, c.z, 0.35f}));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2);
+    bool commit = false;
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse;
+    if (ImGui::Begin("##deckinplace", nullptr, flags)) {
         if (d.focus) {
             ImGui::SetKeyboardFocusHere();
             d.focus = false;
         }
-        const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-        bool save = false;
+        const bool typing = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        // Esc keeps the words (the box would put the old text back otherwise)
+        const bool escape = typing && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const std::string typed = d.text;
+        ImGui::PushID(d.generation);
         if (lines) {
-            ImGui::InputTextMultiline("##parttext", &d.text, {-1, unit * 6});
-            save = focused && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Enter);
+            ImGui::InputTextMultiline("##parttext", &d.text, {-1, -1}, ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_NoHorizontalScroll);
+            commit = typing && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false);
         } else {
             ImGui::SetNextItemWidth(-1);
-            save = ImGui::InputText("##parttext", &d.text, ImGuiInputTextFlags_EnterReturnsTrue);
+            commit = ImGui::InputText("##parttext", &d.text, ImGuiInputTextFlags_EnterReturnsTrue);
         }
-        save = ImGui::Button("Save") || save;
-        ImGui::SetItemTooltip(lines ? "Put the new text in (Ctrl+Enter)" : "Put the new text in (Enter)");
+        ImGui::PopID();
+        if (escape) d.text = typed, commit = true;
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(5);
+    ImGui::PopFont();
+
+    // a thin bar under the box: what the keys do, and Delete for text boxes and shapes
+    ImGui::SetNextWindowPos({a.x, a.y + boxH + 4});
+    ImGui::SetNextWindowBgAlpha(0.9f);
+    bool remove = false;
+    if (ImGui::Begin("##deckpartbar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
+        ImGui::TextUnformatted(partName(d.kind));
         ImGui::SameLine();
-        const bool cancel = ImGui::Button("Cancel") || (focused && ImGui::IsKeyPressed(ImGuiKey_Escape));
-        bool remove = false;
+        ImGui::TextDisabled("%s", d.kind == "bullets" || d.kind == "right" ? "one bullet per line, 2 spaces in for a sub-bullet. Ctrl+Enter or Esc: done"
+                                  : lines ? "**bold**, *italic*. Ctrl+Enter or Esc: done"
+                                          : "**bold**, *italic*. Enter or Esc: done");
         if (d.kind == "object") {
             ImGui::SameLine();
-            remove = ImGui::Button("Delete");
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled(d.kind == "bullets" || d.kind == "right" ? "one bullet per line, 2 spaces in for a sub-bullet" : "**bold**, *italic*");
-        auto done = [&](Result r, const char* what) {
-            resultFor_ = what;
-            r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
-            if (r.ok) d.editing = false;
-            result_ = std::move(r);
-            canvas_.dirty = true;
-            d.hoverAt = {-1, -1};
-        };
-        if (save && d.kind == "object") {
-            done(run("office.deck_object_edit", {{"doc", currentDoc_}, {"slide", static_cast<std::int64_t>(d.slide)}, {"object", std::to_string(d.object)}, {"text", d.text}}),
-                 "Edit");
-        } else if (save) {
-            done(run("office.deck_edit_slide", {{"doc", currentDoc_}, {"slide", static_cast<std::int64_t>(d.slide)}, {d.kind, d.text}}), "Edit");
-        } else if (remove) {
-            done(run("office.deck_object_delete", {{"doc", currentDoc_}, {"slide", static_cast<std::int64_t>(d.slide)}, {"object", std::to_string(d.object)}}), "Delete");
-        } else if (cancel) {
-            d.editing = false;
+            remove = ImGui::SmallButton("Delete");
         }
     }
     ImGui::End();
-    if (!open) d.editing = false;
+    if (remove) {
+        Result r = run("office.deck_object_delete", {{"doc", currentDoc_}, {"slide", static_cast<std::int64_t>(d.slide)}, {"object", std::to_string(d.object)}});
+        resultFor_ = "Delete";
+        r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+        result_ = std::move(r);
+        canvas_.dirty = true;
+        d.hoverAt = {-1, -1};
+        d.editing = false;
+    } else if (commit) {
+        deckCommit();
+    }
+}
+
+// Puts what's typed in the open part back into the slide (one undo step) and closes the box.
+void Shell::deckCommit() {
+    DeckView& d = deck_;
+    if (!d.editing) return;
+    d.editing = false;
+    std::string text = d.text;
+    while (!text.empty() && text.back() == '\n') text.pop_back();
+    if (text == d.original) return;
+    Result r = d.kind == "object"
+                   ? run("office.deck_object_edit", {{"doc", currentDoc_}, {"slide", static_cast<std::int64_t>(d.slide)}, {"object", std::to_string(d.object)}, {"text", text}})
+                   : run("office.deck_edit_slide", {{"doc", currentDoc_}, {"slide", static_cast<std::int64_t>(d.slide)}, {d.kind, text}});
+    resultFor_ = "Edit";
+    r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+    result_ = std::move(r);
+    canvas_.dirty = true;
+    d.hoverAt = {-1, -1};
 }
 
 }  // namespace wetwaresuite::gui

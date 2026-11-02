@@ -191,11 +191,13 @@ const PanelName kPanels[] = {
     {"calc", "Calculator", "Calculator"},   {"code", "Code editor", "Code (IDE)"},
     {"explorer", "Files", "File manager"},  {"terminal", "Terminal", "Terminal"},
     {"monitor", "This computer", "System monitor"}, {"clock", "Clock and timers", "Clock"},
+    {"pipeline", "Pipeline builder", "Pipeline builder"},  // automate's; shown when automate is in the app
 };
 
 }  // namespace
 
 bool Shell::hasPanel(const std::string& tool) const {
+    if (tool == "pipeline") return std::find(tools_.begin(), tools_.end(), "automate") != tools_.end();
     for (const auto& p : kPanels) {
         if (tool == p.tool) return std::find(tools_.begin(), tools_.end(), tool) != tools_.end();
     }
@@ -292,6 +294,7 @@ void Shell::toolPanelView() {
     else if (panel_ == "terminal") terminalPanel();
     else if (panel_ == "monitor") monitorPanel();
     else if (panel_ == "clock") clockPanel();
+    else if (panel_ == "pipeline") pipelinePanel();
     else homeView();
 }
 
@@ -306,7 +309,8 @@ bool Shell::settling() {
 
 int Shell::tickMs() const {
     if (transport_.playing && !showHome_) return 15;  // the playhead (and a timeline's picture) moves
-    if (canvas_.game.playing && !showHome_) return 20;  // a sprite animation is playing (game_view.cpp)
+    if (canvas_.game.playing && !showHome_) return 20;
+    if (dope_.playing && !showHome_) return 15;  // a model's animation is playing (dopesheet.cpp)  // a sprite animation is playing (game_view.cpp)
     if (video_ && video_->pending() && !showHome_) return 15;  // a timeline frame is being drawn
     if (!exportJob_.id.empty()) return 100;           // the export's progress bar
     if (stripsPending_ && !showHome_) return 150;     // thumbnails still coming in

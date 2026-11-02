@@ -118,5 +118,81 @@ int main() {
         CHECK(schema["properties"]["doc"]["description"].get<std::string>().find("used last") != std::string::npos);
     }
 
+    // a big registry lists find_tools / describe_tools / run_tool instead of every command
+    {
+        Session big;
+        std::string last;
+        auto add = [&](const std::string& id, const std::string& title, const std::string& description) {
+            big.registry().add({id, title, description, {{"size", ParamType::Int, "pixels", true}}, true},
+                               [&last, id](const Params& p) {
+                                   const auto size = std::get<std::int64_t>(p.at("size"));
+                                   return std::make_unique<FunctionAction>([&last, id, size] {
+                                       last = id + " " + std::to_string(size);
+                                       return Result::success("ran " + id);
+                                   });
+                               });
+        };
+        add("photo.resize", "Resize", "Change an image's size in pixels. Keeps the aspect ratio.");
+        add("photo.crop", "Crop", "Cut an image down to a rectangle.");
+        add("cad.fillet", "Fillet", "Round the edges of a part.");
+        for (int i = 0; i < 160; ++i) add("filler.cmd" + std::to_string(i), "Filler", "padding so the registry is big");
+
+        mcp::Server autoServer(big, {"big", "0", "", mcp::ToolMode::Auto});
+        CHECK(autoServer.catalog());
+        json init = call(autoServer, {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}, {"params", json::object()}});
+        const std::string instructions = init["result"]["instructions"];
+        CHECK(instructions.find("find_tools") != std::string::npos);
+        CHECK(instructions.find("photo (2)") != std::string::npos);
+        json l = call(autoServer, {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}});
+        CHECK(l["result"]["tools"].size() == 7);
+        CHECK(l["result"]["tools"][0]["name"] == "find_tools");
+
+        auto tool = [&](const std::string& name, const json& args) {
+            return call(autoServer, {{"jsonrpc", "2.0"}, {"id", 3}, {"method", "tools/call"},
+                                     {"params", {{"name", name}, {"arguments", args}}}});
+        };
+        json found = tool("find_tools", {{"query", "resize images"}});
+        CHECK(found["result"]["isError"] == false);
+        CHECK(found["result"]["structuredContent"]["tools"][0]["name"] == "photo_resize");
+        // the first sentence is enough to choose
+        CHECK(found["result"]["structuredContent"]["tools"][0]["description"] == "Change an image's size in pixels.");
+        json family = tool("find_tools", {{"query", "photo"}});
+        CHECK(family["result"]["structuredContent"]["total"] == 2);
+        json limited = tool("find_tools", {{"query", "filler"}, {"limit", 5}});
+        CHECK(limited["result"]["structuredContent"]["tools"].size() == 5);
+        CHECK(tool("find_tools", {{"query", "zebra"}})["result"]["isError"] == true);
+
+        json described = tool("describe_tools", {{"names", "photo_crop, cad_fillet,nope"}});
+        CHECK(described["result"]["structuredContent"]["tools"].size() == 2);
+        CHECK(described["result"]["structuredContent"]["tools"][1]["inputSchema"]["required"][0] == "size");
+        CHECK(described["result"]["content"][0]["text"].get<std::string>().find("not found: nope") != std::string::npos);
+
+        json ran = tool("run_tool", {{"name", "cad_fillet"}, {"arguments", {{"size", 3}}}});
+        CHECK(ran["result"]["isError"] == false);
+        CHECK(last == "cad.fillet 3");
+        CHECK(tool("run_tool", {{"name", "nope"}})["result"]["isError"] == true);
+        CHECK(tool("run_tool", {{"name", "run_tool"}})["result"]["isError"] == true);
+        // commands still answer to their own names
+        CHECK(tool("photo_resize", {{"size", 64}})["result"]["isError"] == false);
+        CHECK(last == "photo.resize 64");
+        CHECK(tool("undo", json::object())["result"]["isError"] == false);
+
+        mcp::Server allServer(big, {"big", "0", "", mcp::ToolMode::All});
+        CHECK(!allServer.catalog());
+        CHECK(call(allServer, {{"jsonrpc", "2.0"}, {"id", 4}, {"method", "tools/list"}})["result"]["tools"].size() == 167);
+
+        // small registries keep listing everything under Auto; --catalog forces it
+        mcp::Server smallAuto(session, {"s", "0", "", mcp::ToolMode::Auto});
+        CHECK(!smallAuto.catalog());
+        mcp::Server smallCatalog(session, {"s", "0", "", mcp::ToolMode::Catalog});
+        CHECK(smallCatalog.catalog());
+
+        std::vector<std::string> args = {"--http", "--catalog", "--port", "9"};
+        CHECK(mcp::takeToolModeArgs(args) == mcp::ToolMode::Catalog);
+        CHECK(args.size() == 3);
+        std::vector<std::string> none = {"--http"};
+        CHECK(mcp::takeToolModeArgs(none) == mcp::ToolMode::Auto);
+    }
+
     return check::summary("mcp");
 }

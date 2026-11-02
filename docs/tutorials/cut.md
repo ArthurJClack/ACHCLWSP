@@ -1110,6 +1110,55 @@ Claude calls `cut_presets` to see the names, `cut_render` with `preset=youtube_1
 
 **The window.** **Export** on the right takes the same `preset`, `range` and `output` (the preset list shows each platform's limits). While it runs, a progress bar with **Cancel** shows under the form and over the timeline, and you can keep editing. **Export Frame** saves the frame at the playhead.
 
+## Task 15: 4K footage on a slow PC: proxies and the graphics card
+
+Big sources (taller than 1080 or wider than 1920 px) get **proxies**: small 540p copies that playback, scrubbing and previews read instead, so 4K plays smoothly. Exports always use the originals. The window makes them by itself in the background as soon as a big clip lands on the timeline (the play bar shows **Proxies 0/2...** while it works); scripts make them with `cut.proxies`. They're kept in your cache folder (`~/.cache/wetwaresuite/proxies`, `%LOCALAPPDATA%\wetwaresuite\cache\proxies`, `~/Library/Caches/wetwaresuite/proxies`, or `WETWARESUITE_PROXY_DIR`), named after the source, so an edited source gets a fresh one.
+
+Exports to H.264 (.mp4, .mov, .mkv) use the **graphics card's encoder** when ffmpeg can drive it: NVIDIA (NVENC), Intel (Quick Sync), AMD (AMF) or Apple (VideoToolbox). Each is tried once on a tiny clip the first time, so a build that lists NVENC on a PC without an NVIDIA card isn't picked. If the card's encoder fails mid-export it starts again on the CPU and says so (`hw_fallback`). `quality=best` always uses the CPU (libx264 makes smaller, cleaner files when time doesn't matter).
+
+Decoding uses the card too: HD and bigger sources, and the proxies made from them, are read with ffmpeg's hardware decoder (VideoToolbox on a Mac, D3D11VA on Windows, CUDA or VA-API on Linux) when the machine has one, and ffmpeg drops back to the CPU by itself for a file the card can't take. The export result says `hw_decode: true` when it was on. `WETWARESUITE_HW_DECODE=off` turns it off, `=on` forces it on.
+
+```text
+# 4k.txt: proxies for a 4K edit, then a quick export on the graphics card
+cut.open path=drone_4k.mp4 -> d
+cut.proxies doc=$d action=make
+cut.proxies doc=$d
+cut.render doc=$d output=drone.mp4 quality=draft
+cut.render doc=$d output=drone_cpu.mp4 encoder=cpu
+```
+
+`cut.proxies action=off` makes previews read the full files again, `action=clear` deletes this timeline's proxies. `encoder=` picks one (`auto`, `cpu`, `nvenc`, `qsv`, `amf`, `videotoolbox`), and `WETWARESUITE_HW_ENCODER=none` turns the graphics card off everywhere.
+
+## Task 16: a media bin, keyframes you drag, ducking, voice cleanup and clip markers
+
+```text
+# bin.txt: bring files in, place them, clean up the voice and duck the music under it
+cut.new width=1920 height=1080 -> e
+cut.bin_add doc=$e path=interview.mp4
+cut.bin_add doc=$e path=music.mp3
+cut.bin doc=$e
+cut.add_clip doc=$e path=interview.mp4
+cut.add_audio doc=$e path=music.mp3 track=a2
+# take 12 dB of hiss and room tone out of the interview's sound (c2)
+cut.set_clip doc=$e clip=c2 denoise=12
+# the music drops 12 dB while anything on the other audio tracks plays
+cut.set_track doc=$e track=a2 duck_under=auto duck_db=-12
+# a fade in on the interview: keyframes at 0 and 2 s, then slide the second one to 1 s
+cut.keyframe doc=$e clip=c1 property=opacity value=0 t=0
+cut.keyframe doc=$e clip=c1 property=opacity value=1 t=2
+cut.move_keyframe doc=$e clip=c1 from=2 to=1
+# a clip marker: it moves when c1 moves
+cut.add_marker doc=$e t=4 clip=c1 name="good line"
+```
+
+- **The media bin** is the row of tiles over the timeline: every file brought in (`cut.bin_add`, **+ Media**, dropped files) stays there even after its clips are deleted. **Drag a tile onto a track** to put it there, at the time under the mouse. It saves with the timeline.
+- **Keyframes**: drag a yellow diamond along its clip to move it (it snaps to the playhead). The selected clip shows its first animated setting as a yellow line, so you see the ease between keyframes.
+- **Ducking**: the **D** switch on an audio track (music) ducks it under the other audio tracks (voices, a video's own sound). From scripts, `duck_under=` takes `auto`, a track id or `off`.
+- **Voice cleanup**: the clip's **Clean up noise** slider (under Sound) or `denoise=` takes steady noise out: hiss, hum, fans and room tone, like the sound app's noise reduction.
+- **Clip markers**: with a clip selected, **Marker** (**M**) puts a marker on that clip, and it moves when the clip moves. A marker you move by hand stays where you put it; deleting the clip leaves it on the timeline.
+
+![the media bin over the timeline, a dragged keyframe's curve and the duck switch](images/video-bin-keys.png)
+
 ## The window
 
 `wetwaresuite-video` (or `wetwaresuite-video edit.wwcut`) opens the video app: the menus and the **Edit** ribbon on top, the preview in the middle with the timeline under it, and the selected action's form on the right.
@@ -1237,7 +1286,7 @@ cut.split_clip doc=cut1 clip=c1 at=4                   -> at must be inside the 
 | `cut.close` | close (undo reopens) | `doc` |
 | `cut.info` | describe tracks, clips, markers, playhead | `doc` |
 | `cut.settings` | change size, fps, background, master volume | `doc`, `width`, `height`, `fps`, `background`, `master_volume` |
-| `cut.set_track` | lock, mute, hide, solo, track volume | `doc`, `track`, `locked`, `muted`, `hidden`, `solo`, `volume` |
+| `cut.set_track` | lock, mute, hide, solo, track volume, ducking | `doc`, `track`, `locked`, `muted`, `hidden`, `solo`, `volume`, `duck_under` (auto, a track id, off), `duck_db` (-12) |
 | `cut.set_cursor` | move the playhead | `doc`, `t`, `frames`, `to` (start, end, next_edit, prev_edit, next_marker, prev_marker, in, out) |
 | `cut.add_marker`, `cut.set_marker`, `cut.remove_marker`, `cut.markers` | markers | `doc`, `t`, `name`, `color`, `duration`, `marker`, `all` |
 | `cut.set_in_out` | in and out points | `doc`, `in`, `out`, `clear` |
@@ -1284,6 +1333,9 @@ cut.split_clip doc=cut1 clip=c1 at=4                   -> at must be inside the 
 | `cut.transition` | blend with the clip before | `doc`, `clip`, `type` (crossfade), `duration` (1), `linked` |
 | `cut.transform` | box, scale, rotation, crops, opacity, blend, picture-in-picture | `doc`, `clip`, `pip`, `size`, `margin`, `x`, `y`, `width`, `height`, `scale`, `rotation`, `crop_*`, `opacity`, `blend`, `flip_h`, `flip_v` |
 | `cut.keyframe`, `cut.remove_keyframe`, `cut.keyframes` | animate a property | `doc`, `clip`, `property`, `value`, `t` or `at`, `ease`, `all` |
+| `cut.move_keyframe` | slide the keyframes at one moment of a clip | `doc`, `clip`, `from`, `to`, `property` |
+| `cut.bin_add`, `cut.bin_remove`, `cut.bin` | the media bin | `doc`, `path` |
+| `cut.proxies` | small copies of 4K sources for previews | `doc`, `action` (status, make, on, off, clear), `wait` |
 | `cut.filter` | colour | `doc`, `clip` (all if left out), `exposure`, `temperature`, `tint`, `wheel_lift`, `wheel_gamma`, `wheel_gain`, `brightness`, `contrast`, `saturation`, `gamma`, `grayscale`, `curve`, `curve_r`, `curve_g`, `curve_b`, `lut`, `reset` |
 | `cut.effect` | blur, sharpen, vignette, mirror | `doc`, `clip`, `blur`, `sharpen`, `vignette`, `flip_h`, `flip_v`, `reset` |
 | `cut.chroma_key` | green screen | `doc`, `clip`, `color`, `similarity`, `softness`, `spill`, `off` |
@@ -1299,7 +1351,7 @@ cut.split_clip doc=cut1 clip=c1 at=4                   -> at must be inside the 
 | `cut.preview` | one frame as an attached PNG | `doc`, `t`, `width` (640) |
 | `cut.export_frame` | one frame as an image file | `doc`, `output`, `t` (playhead), `width`, `transparent` |
 | `cut.presets` | list the export presets | |
-| `cut.render` | export | `doc`, `output`, `preset`, `quality`, `mode`, `range`, `start`, `end`, `width`, `height`, `reframe`, `at`, `subtitles`, `gif_fps`, `gif_width`, `overwrite` |
+| `cut.render` | export | `doc`, `output`, `preset`, `quality`, `mode`, `range`, `start`, `end`, `width`, `height`, `reframe`, `at`, `subtitles`, `gif_fps`, `gif_width`, `encoder` (auto, cpu, nvenc, qsv, amf, videotoolbox), `overwrite` |
 
 ### Clip properties
 
@@ -1310,6 +1362,7 @@ cut.split_clip doc=cut1 clip=c1 at=4                   -> at must be inside the 
 | `duration` | all | timeline length (s); sets `out = in + duration x speed` |
 | `speed`, `reverse` | video, audio | 0.05 to 20; sound keeps its pitch |
 | `volume`, `mute`, `pan` | video, audio | 1 = as recorded, 0.3 = quiet, up to 10; pan -1 to 1 |
+| `denoise` | video, audio | voice cleanup: dB of steady noise (hiss, hum, fans, room tone) taken out, 0..40 (12 is a good start) |
 | `fade_in`, `fade_out` | all | seconds; pictures fade from/to transparent, sound from/to silence |
 | `opacity`, `blend` | pictures, titles | 0 to 1; blend modes as in task 11 |
 | `x`, `y`, `width`, `height` | pictures, titles (`x`,`y`) | the picture box in pixels; `width` 0 = full frame |
@@ -1344,12 +1397,12 @@ All of them take `overwrite=true` to replace an existing output. Run `wetwaresui
 
 ## Limitations
 
-- Live playback draws each frame on the CPU at preview size: smooth for simple HD edits, choppy on heavy effects or 4K, where it skips frames to keep up with the sound.
+- Live playback draws each frame on the CPU at preview size: smooth for simple HD edits and for 4K once its proxies are made, choppy on heavy effects, where it skips frames to keep up with the sound.
 - Scrubbing shows nearby frames of each source while you drag; the exact frame of a long file with few keyframes can take half a second to show once you stop.
-- Rendering draws every frame on the CPU and pipes it to ffmpeg: fine for HD edits of minutes, slow for long 4K ones. There are no proxies; use `preset=draft` while you iterate.
+- Rendering draws every frame on the CPU and pipes it to ffmpeg (which encodes on the graphics card when it can): fine for HD edits of minutes, slow for long 4K ones, since exports read the full-size sources. Use `preset=draft` while you iterate.
 - Nested sequences are edited as a whole; to change what's inside, `cut.unnest`, edit, and nest again.
-- Markers stay where they are when clips move around them.
-- Sound is mixed at the levels you set; there's no automatic ducking or noise reduction (the sound app has those).
+- Only clip markers (added on a clip) move with clips; plain markers stay at their time.
+- Ducking listens to the whole of the other tracks (no per-clip choice) with fixed attack and release; noise cleanup estimates the noise from each clip's quietest parts, so a clip with no pauses gets less taken out.
 - Stream-copy cuts (`mode=copy`, `cut.trim_file copy=true`, `cut.concat_files` of identical files) start on keyframes, so they can begin a little before the time you asked for.
 - `.wwcut` files store absolute paths to the media; moving the media breaks the project (edit the paths in the JSON, or relative paths are read relative to the `.wwcut` file).
 - Frame rates are constant: variable-frame-rate phone footage is converted to the timeline's rate.

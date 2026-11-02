@@ -425,6 +425,34 @@ What comes back from a file: format 0 and 1 files are read, with running status 
 
 Claude calls `beats_midi_import`, looks at the track list it returns, then calls `beats_track_set`, `beats_set` and `beats_render`.
 
+### Playing it in: a MIDI keyboard or the computer keys
+
+Plug in a MIDI keyboard (nothing to install: ALSA on Linux, WinMM on Windows, CoreMIDI on macOS) or use the virtual `keyboard` input. In the window, the piano roll's **Rec** button listens to the first keyboard it finds, and **Computer keys** turns A W S E D F T G Y H U J K into a piano (Z and X change octave). With the song stopped it's step entry: each note or chord goes in half a beat after the last. With the song playing it keeps your timing from the playhead and snaps to 16ths when you stop.
+
+The same from a script, with `time=` placing each key exactly (seconds since `midi_open`):
+
+```text
+# keys.txt: a C then an E, played live at 120 bpm, then a chord entered step by step
+beats.new bpm=120 -> s
+beats.pattern_add song=$s name=keys
+beats.midi_open device=keyboard
+beats.midi_key pitch=C4 time=1.0
+beats.midi_key pitch=C4 on=false time=1.5
+beats.midi_key pitch=E4 time=1.5
+beats.midi_key pitch=E4 on=false time=1.74
+beats.midi_take song=$s pattern=keys since=0 at=0
+beats.midi_key pitch=C4 time=5.0
+beats.midi_key pitch=G4 time=5.02
+beats.midi_key pitch=C4 on=false time=5.3
+beats.midi_key pitch=G4 on=false time=5.3
+beats.midi_take song=$s pattern=keys mode=step at=4 step=0.5
+beats.notes song=$s pattern=keys
+```
+
+`midi_take` turns everything played since the last read into notes in one undo step: C4 on beat 2 for a beat, E4 on beat 3 (0.24 s at 120 bpm snaps to half a beat), and a C4+G4 chord on beat 4. `beats.midi_devices` lists the inputs, `beats.midi_read` shows the raw note-ons and offs.
+
+**Piano roll in the window.** Drag on empty space to box-select (Shift adds), Shift-click a note to add or take it away, Ctrl+A selects all; dragging any selected note moves them all, arrows nudge the selection (up/down a semitone, left/right a 16th, Shift for an octave or a bar), and the velocity slider, Delete and the +/-12 buttons work on the selection. Edits made while the song plays are heard straight away (`beats.refresh` swaps the new mix in at the same spot).
+
 ## Task 7: master the mix in the audio editor
 
 `beats.bounce` renders the song into an audio document (`aud1`), so every `audio.*` command can finish it.
@@ -770,7 +798,7 @@ Fields left out take their defaults (`rate` 44100, volume 0 dB, no effects). A t
 
 ## Limitations
 
-- No MIDI input or real-time recording. `beats.play` mixes the song before it starts, so edits are heard on the next play, not mid-loop.
+- MIDI input takes notes only (no sustain pedal, pitch bend or controllers), and live recording snaps to the grid when you stop. `beats.play` mixes the whole song up front; edits made while it plays are swapped in by `beats.refresh` (the window does it after each edit), so a very long song can hiccup for a moment on a slow PC.
 - Sound quality is "good sketch" rather than studio. The synth uses PolyBLEP oscillators with one filter per note, unison and one LFO, but no glide, second filter or modulation matrix. The drum kit is synthesized and simple, and the sampler and pad tuning pitch by resampling, so pitch and length change together.
 - One tempo and one time signature per song, with no tempo changes or tempo automation.
 - No sends or group buses: each track has its own rack, and the master has one. Automation points are joined by straight lines.

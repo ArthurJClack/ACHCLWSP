@@ -393,6 +393,11 @@ void testAlignTransform() {
     const std::string a = f.field(f.run("vector.add_rect doc=vec1 x=10 y=10 width=20 height=20"), "shape");
     const std::string b = f.field(f.run("vector.add_rect doc=vec1 x=60 y=50 width=40 height=20"), "shape");
     const std::string c = f.field(f.run("vector.add_rect doc=vec1 x=200 y=90 width=10 height=30"), "shape");
+    {  // every shape's box, for the window's smart guides
+        Result boxes = f.run("vector.boxes doc=vec1 except=" + a);
+        const std::string text = f.field(boxes, "boxes");
+        CHECK(boxes.ok && text.find(b + " 60 50 40 20") != std::string::npos && text.find(a + " ") == std::string::npos);
+    }
     CHECK(f.run("vector.align doc=vec1 shapes=" + a + "," + b + "," + c + " horizontal=left").ok);
     CHECK(near(f.box(b).x0, 10) && near(f.box(c).x0, 10));
     CHECK(f.run("vector.align doc=vec1 shapes=" + a + "," + b + " vertical=bottom to=key key=" + c).ok);

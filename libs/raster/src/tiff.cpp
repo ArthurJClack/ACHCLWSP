@@ -356,7 +356,7 @@ Image decodeTiff(const std::string& bytes) {
     return img;
 }
 
-std::string encodeTiff(const Image& img) {
+std::string encodeTiff(const Image& img, int bits) {
     if (img.empty()) throw std::runtime_error("image is empty");
     const int W = img.width(), H = img.height();
     bool opaque = true;
@@ -369,20 +369,35 @@ std::string encodeTiff(const Image& img) {
         }
     }
     const int spp = opaque ? 3 : 4;
-    const int rowsPerStrip = std::max(1, std::min(H, 65536 / std::max(1, W * spp)));
-    const std::size_t rowBytes = static_cast<std::size_t>(W) * spp;
+    const bool deep = bits == 16;
+    const int bps = deep ? 2 : 1;  // bytes per sample
+    const int rowsPerStrip = std::max(1, std::min(H, 65536 / std::max(1, W * spp * bps)));
+    const std::size_t rowBytes = static_cast<std::size_t>(W) * spp * bps;
 
     std::vector<std::string> strips;
     for (int y0 = 0; y0 < H; y0 += rowsPerStrip) {
         std::string raw;
         for (int y = y0; y < std::min(H, y0 + rowsPerStrip); ++y) {
             std::string row(rowBytes, '\0');
-            for (int x = 0; x < W; ++x) {
-                const std::uint8_t* p = img.pixel(x, y);
-                for (int s = 0; s < spp; ++s) row[static_cast<std::size_t>(x) * spp + s] = static_cast<char>(p[s]);
-            }
-            for (std::size_t i = rowBytes; i-- > static_cast<std::size_t>(spp);) {  // horizontal predictor
-                row[i] = static_cast<char>(static_cast<unsigned char>(row[i]) - static_cast<unsigned char>(row[i - spp]));
+            if (deep) {  // 16-bit little-endian samples (v * 257), predictor on whole samples
+                std::vector<std::uint16_t> v(static_cast<std::size_t>(W) * spp);
+                for (int x = 0; x < W; ++x) {
+                    const std::uint8_t* p = img.pixel(x, y);
+                    for (int s = 0; s < spp; ++s) v[static_cast<std::size_t>(x) * spp + s] = static_cast<std::uint16_t>(p[s] * 257);
+                }
+                for (std::size_t i = v.size(); i-- > static_cast<std::size_t>(spp);) v[i] = static_cast<std::uint16_t>(v[i] - v[i - spp]);
+                for (std::size_t i = 0; i < v.size(); ++i) {
+                    row[i * 2] = static_cast<char>(v[i] & 0xFF);
+                    row[i * 2 + 1] = static_cast<char>(v[i] >> 8);
+                }
+            } else {
+                for (int x = 0; x < W; ++x) {
+                    const std::uint8_t* p = img.pixel(x, y);
+                    for (int s = 0; s < spp; ++s) row[static_cast<std::size_t>(x) * spp + s] = static_cast<char>(p[s]);
+                }
+                for (std::size_t i = rowBytes; i-- > static_cast<std::size_t>(spp);) {  // horizontal predictor
+                    row[i] = static_cast<char>(static_cast<unsigned char>(row[i]) - static_cast<unsigned char>(row[i - spp]));
+                }
             }
             raw += row;
         }
@@ -419,7 +434,7 @@ std::string encodeTiff(const Image& img) {
         if (out.size() % 2) out += '\0';
         return at;
     };
-    const std::uint32_t bpsAt = block(std::vector<std::uint32_t>(static_cast<std::size_t>(spp), 8), true);
+    const std::uint32_t bpsAt = block(std::vector<std::uint32_t>(static_cast<std::size_t>(spp), deep ? 16u : 8u), true);
     const std::uint32_t offAt = strips.size() > 1 ? block(offsets, false) : offsets[0];
     const std::uint32_t cntAt = strips.size() > 1 ? block(counts, false) : counts[0];
     const std::uint32_t resAt = block({72, 1}, false);

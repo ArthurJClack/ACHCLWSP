@@ -1,4 +1,4 @@
-# PDF editor: view, mark up, edit, redact, fill in and sign PDFs
+# PDF editor: view, mark up, edit, redact, fill in, sign, lock and read scanned PDFs
 
 `pdf` is an Acrobat-style editor for any PDF. You can:
 
@@ -40,6 +40,15 @@ The tools:
 | Redact | Drag over what must go. A black box is drawn, and the text under it is removed from the page when you save. Copying, searching or opening the file in another editor won't bring it back. |
 | Sign | Drag a box (or click) and type your name to make a handwriting-style signature. Use **Draw** to sign by hand. |
 | Picture | Click where it goes, then pick the file in the form on the right. |
+
+The **Tools** group on the ribbon has the Acrobat extras:
+
+- **Read scanned text** finds the words on scanned pages and adds an invisible text layer under them, so the page can be searched, selected and copied like any other. It runs on the pages that have no text yet. It reads clean printed text best (scans at 300 dpi, ordinary fonts). Handwriting and non-Latin scripts aren't read.
+- **Password** locks the saved copy with a password (AES-256, which every current reader opens). You can also say whether people may print, copy text or make changes. A file you opened with its password stays locked when you save it. Untick it, or use `remove=true`, to save an unlocked copy.
+- **Sign digitally** adds a certificate signature when you save. Readers show who signed the file and whether it changed afterwards. The first time, give your name and the suite makes you a signing identity (a key and a self-signed certificate, kept in the suite's settings folder). Pair it with the **Sign** tool for a visible signature too.
+- **Check signatures** lists the digital signatures in a file and says whether each one is still intact.
+
+Opening a password-protected PDF asks for the password.
 
 The colour square picks the colour for the next edit. Ctrl+Z and Ctrl+Y undo and redo any step, including page changes. Every action is also in the **PDF editor** menu, with a form for its full set of options.
 
@@ -105,8 +114,32 @@ With `text=`, `pdf.highlight` and `pdf.redact` work on the matches of that text.
 | `pdf.marks`, `pdf.mark_move`, `pdf.mark_edit`, `pdf.mark_delete` | List, move, change and remove the edits made here. |
 | `pdf.annotations`, `pdf.annotation_delete` | List and remove comments and links the file already had. |
 | `pdf.page_rotate`, `pdf.page_delete`, `pdf.page_move`, `pdf.page_insert` | Page changes. `pdf.page_insert path=other.pdf pages=1-3 after=2` merges in pages from another PDF. |
+| `pdf.open path= password=` | Open a password-protected PDF with its open (user) or owner password. |
+| `pdf.protect password= owner= print= copy= edit=`, `pdf.protect remove=true` | Lock the saved copy with AES-256, or save it unlocked. |
+| `pdf.ocr pages= force= dpi=` | Read scanned pages and add an invisible, searchable text layer (pages with text are skipped unless `force=true`). |
+| `pdf.identity new=true name= email= organisation=`, `pdf.identity export=cert.pem` | Make your signing identity, or write out its certificate so others can trust your signatures. |
+| `pdf.sign_digital reason= location= contact= identity= name=`, `off=true` | Put a digital signature on the file when it's saved. |
+| `pdf.signatures path=` | Check the digital signatures in a file: who, when, and whether it changed since. |
 
 `wetwaresuite help pdf.<command>` lists every parameter.
+
+### Scans, passwords and signatures
+
+```
+# make a scanned contract searchable, sign it and save
+pdf.open path=scan.pdf
+pdf.ocr
+pdf.sign_digital name="Ann Example" reason=Approved
+pdf.save path=contract-signed.pdf
+pdf.signatures path=contract-signed.pdf
+
+# send a locked copy: needs the password to open, no copying text
+pdf.open path=report.pdf
+pdf.protect password="open sesame" copy=false
+pdf.save path=report-locked.pdf
+```
+
+The signature covers the whole file. Changing a single byte afterwards makes `pdf.signatures` (and Acrobat) say it was altered. Because the certificate is self-signed, Acrobat shows the signer as "unknown" until the person checking adds your certificate (`pdf.identity export=me.pem`) to their trusted list. That's the same as any self-made certificate. A file can't be both password-protected and digitally signed here, so pick one per copy. The identity lives in the suite's settings folder; set `WETWARESUITE_IDENTITY=/path/to/identity.pem` to keep it somewhere else.
 
 ### Forms
 
@@ -129,7 +162,8 @@ Claude calls `pdf_open`, then `pdf_redact text="0412 555 019" page=0`, `pdf_fiel
 
 ## What it can't do yet
 
-- Password-protected (encrypted) PDFs don't open.
+- Certificate-based (public key) encryption isn't supported, only passwords.
+- Digital signatures use your own self-signed certificate. There is no timestamp server and no long-term validation data.
 - Edited text is written in the suite's built-in fonts, not the PDF's own embedded font, so a changed line may look slightly different from the text around it. When the new words are shorter or longer, the rest of the line doesn't move.
 - Text inside a form XObject can be covered with white-out but not removed (`pdf.replace_text` says so when that happens).
-- Scanned pages have no text layer to search or edit.
+- Scanned text is read with the built-in letter shapes. Small text (under about 8 pt at 300 dpi), unusual fonts and handwriting read badly or not at all.

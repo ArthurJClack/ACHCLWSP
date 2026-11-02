@@ -193,6 +193,7 @@ void registerSchematicCommands(Session& session) {
               {"pins", ParamType::Int, "pin count for ic, header (1 row) and header2 (2 rows, total pins)", false},
               {"pin_names", ParamType::String, "ic: pin names in pin order, comma-separated", false},
               {"fields", ParamType::String, "extra BOM fields, e.g. mpn=RC0805FR-0710KL; note=1%", false},
+              {"unit", ParamType::Int, "multi-unit parts (opamp_dual, nand_quad, ...): place only this unit (1 = A); with ref= it joins that part", false},
               previewParam()},
              true},
             circuitCommand(
@@ -200,6 +201,47 @@ void registerSchematicCommands(Session& session) {
                 [](CircuitDoc& doc, const Params& p) {
                     Circuit& c = doc.circuit;
                     std::string error;
+                    if (const int units = symbolUnits(stringParam(p, "symbol")); units > 0) {
+                        // one package, several units: every unit side by side (or the one asked for), one ref and one footprint
+                        const std::string name = canonicalSymbol(stringParam(p, "symbol"));
+                        const int only = static_cast<int>(intParam(p, "unit", 0));
+                        if (has(p, "unit") && (only < 1 || only > units)) return Result::failure(name + " has units 1 to " + std::to_string(units));
+                        std::string ref = has(p, "ref") ? stringParam(p, "ref") : nextRef(c, "U");
+                        const Part* existing = c.part(ref);
+                        if (existing && (existing->symbol != name || only == 0)) return Result::failure(ref + " already exists");
+                        if (existing) {
+                            for (const auto& q : c.parts)
+                                if (q.ref == existing->ref && q.unit == only) return Result::failure(ref + " already has unit " + std::string(1, static_cast<char>('A' + only - 1)));
+                            ref = existing->ref;
+                        }
+                        double x0, y0, x1, y1;
+                        sheetBounds(c, x0, y0, x1, y1);
+                        if (c.parts.empty() && c.wires.empty()) x1 = 0, y0 = 0;
+                        Pt at{std::round(has(p, "x") ? numberParam(p, "x") : x1 + 7), std::round(has(p, "y") ? numberParam(p, "y") : y0 + 3)};
+                        std::string pins;
+                        for (int u = only ? only : 1; u <= (only ? only : units); ++u) {
+                            Part part;
+                            part.symbol = name;
+                            part.unit = u;
+                            auto sym = findSymbolUnit(name, u);
+                            part.ref = ref;
+                            part.value = has(p, "value") ? stringParam(p, "value") : sym->value;
+                            // the footprint lives on unit A only (as KiCad does)
+                            if (u == 1 || (existing == nullptr && only > 1)) part.footprint = has(p, "footprint") ? stringParam(p, "footprint") : sym->footprint;
+                            if (existing) part.value = existing->value;
+                            part.rot = snapRot(intParam(p, "rot", 0));
+                            part.mirror = boolParam(p, "mirror", false);
+                            if (has(p, "fields")) part.fields = parseFields(stringParam(p, "fields"));
+                            part.pos = at;
+                            at.x += 8;
+                            c.parts.push_back(part);
+                            pins += "\n  unit " + std::string(1, static_cast<char>('A' + u - 1)) + ": " + pinList(c, c.parts.back());
+                        }
+                        Result r = edited("placed " + ref + " (" + name + ", " + (only ? "unit " + std::string(1, static_cast<char>('A' + only - 1)) : std::to_string(units) + " units") + ")" + pins, p);
+                        r.value = ref;
+                        r.with("ref", ref).with("units", static_cast<std::int64_t>(only ? 1 : units));
+                        return r;
+                    }
                     Part part;
                     part.symbol = stringParam(p, "symbol");
                     part.pins = static_cast<int>(intParam(p, "pins", 0));

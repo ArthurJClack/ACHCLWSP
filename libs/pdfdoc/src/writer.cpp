@@ -223,8 +223,23 @@ std::string unicodeFontDict(const std::function<int(std::string)>& addObject, co
         return "<< " + dict + (dict.empty() ? "" : " ") + "/Length " + std::to_string(z.size()) + " /Filter /FlateDecode >>\nstream\n" +
                z + "\nendstream";
     };
-    const std::string sub = font.subset(keep);
+    // big fonts (CJK has tens of thousands of glyphs) get renumbered, so the per-glyph tables shrink
+    // too; the text keeps using the old numbers as CIDs and a CIDToGIDMap points them at the new ones
+    std::vector<int> oldOf;
+    const bool compact = font.glyphCount() > 2000 && !keep.empty();
+    const std::string sub = compact ? font.subsetCompact(keep, oldOf) : font.subset(keep);
     const int file = addObject(stream("/Length1 " + std::to_string(sub.size()), sub));
+    std::string cidToGid = "/Identity";
+    if (compact) {
+        std::string map(static_cast<std::size_t>(*keep.rbegin() + 1) * 2, '\0');
+        for (std::size_t n = 1; n < oldOf.size(); ++n) {
+            const auto cid = static_cast<std::size_t>(oldOf[n]);
+            if (cid * 2 + 1 >= map.size()) continue;
+            map[cid * 2] = static_cast<char>((n >> 8) & 0xFF);
+            map[cid * 2 + 1] = static_cast<char>(n & 0xFF);
+        }
+        cidToGid = std::to_string(addObject(stream("", map))) + " 0 R";
+    }
     const VMetrics m = font.metrics();
     double box[4];
     font.bbox(box);
@@ -242,7 +257,7 @@ std::string unicodeFontDict(const std::function<int(std::string)>& addObject, co
     const int cid = addObject("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /" + name +
                               " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor " +
                               std::to_string(desc) + " 0 R /DW " + num(std::round(font.glyphAdvance(0))) + " /W " + widths +
-                              " /CIDToGIDMap /Identity >>");
+                              " /CIDToGIDMap " + cidToGid + " >>");
 
     auto hex4 = [](unsigned v) {
         char buf[8];
@@ -294,7 +309,7 @@ std::string glyphText(const TrueType& font, const std::string& utf8) {
     return out + ">";
 }
 
-bool needsUnicode(unsigned cp) { return cp >= 0x100 && winAnsi(cp) < 0 && builtinSans()->glyphIndex(cp) != 0; }
+bool needsUnicode(unsigned cp) { return cp >= 0x100 && winAnsi(cp) < 0 && unicodeFontIndex(cp) >= 0; }
 
 std::string infoText(const std::string& utf8) {
     bool fits = true;
@@ -316,6 +331,7 @@ std::string infoText(const std::string& utf8) {
 
 std::string UnicodeFallback::show(const std::string& utf8, const std::string& fontResource, double size) {
     std::string out, plain, wide;
+    int wideFont = -1;
     auto flushPlain = [&] {
         if (plain.empty()) return;
         out += (out.empty() ? "" : " ") + text(plain) + " Tj";
@@ -323,15 +339,19 @@ std::string UnicodeFallback::show(const std::string& utf8, const std::string& fo
     };
     auto flushWide = [&] {
         if (wide.empty()) return;
-        if (!id_) id_ = w_.reserve();
-        out += (out.empty() ? "" : " ") + std::string("/FU ") + num(size) + " Tf " + glyphText(*builtinSans(), wide) + " Tj /" +
-               fontResource + " " + num(size) + " Tf";
+        Used& u = used_[wideFont];
+        if (!u.id) u.id = w_.reserve();
+        out += (out.empty() ? "" : " ") + std::string("/") + resourceName(wideFont) + " " + num(size) + " Tf " +
+               glyphText(*unicodeFontAt(wideFont), wide) + " Tj /" + fontResource + " " + num(size) + " Tf";
         wide.clear();
     };
     for (unsigned cp : utf8Decode(utf8)) {
-        if (needsUnicode(cp)) {
+        const int f = cp >= 0x100 && winAnsi(cp) < 0 ? unicodeFontIndex(cp) : -1;
+        if (f >= 0) {
             flushPlain();
-            chars_.insert(cp);
+            if (f != wideFont) flushWide();
+            wideFont = f;
+            used_[f].chars.insert(cp);
             wide += utf8Encode(cp);
         } else {
             flushWide();
@@ -343,11 +363,32 @@ std::string UnicodeFallback::show(const std::string& utf8, const std::string& fo
     return out.empty() ? "() Tj" : out;
 }
 
-std::string UnicodeFallback::resource() const { return id_ ? " /FU " + std::to_string(id_) + " 0 R" : std::string{}; }
+std::string UnicodeFallback::resourceName(int font) { return font == 0 ? "FU" : "FU" + std::to_string(font); }
+
+int UnicodeFallback::id() const {
+    auto it = used_.find(0);
+    return it == used_.end() ? 0 : it->second.id;
+}
+
+std::string UnicodeFallback::resource() const {
+    std::string r;
+    for (const auto& [font, u] : used_) r += " /" + resourceName(font) + " " + std::to_string(u.id) + " 0 R";
+    return r;
+}
+
+std::vector<std::pair<std::string, int>> UnicodeFallback::resources() const {
+    std::vector<std::pair<std::string, int>> r;
+    for (const auto& [font, u] : used_) r.emplace_back(resourceName(font), u.id);
+    return r;
+}
 
 void UnicodeFallback::finish() {
-    if (!id_) return;
-    w_.set(id_, unicodeFontDict([this](std::string body) { return w_.add(std::move(body)); }, *builtinSans(), chars_, {}));
+    for (auto& [font, u] : used_) {
+        if (u.finished) continue;
+        w_.set(u.id, unicodeFontDict([this](std::string body) { return w_.add(std::move(body)); }, *unicodeFontAt(font), u.chars,
+                                     font == 0 ? std::string() : "F" + std::to_string(font)));
+        u.finished = true;
+    }
 }
 
 }  // namespace wetwaresuite::pdfdoc

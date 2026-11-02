@@ -95,8 +95,8 @@ PathResult tracePath(const World& w, V3 o, V3 d, int maxBounces, Rng& rng) {
         if (m.transmission > 0 && rng.uniform() < m.transmission) {
             if (bounce >= maxBounces) break;
             V3 hn = n;
-            if (m.roughness >= kMirror) {
-                hn = sampleGgx(n, ggxAlpha(m.roughness), rng);
+            if (s.rough >= kMirror) {
+                hn = sampleGgx(n, ggxAlpha(s.rough), rng);
                 if (dot(hn, wo) <= 0) hn = n;
             }
             const float eta = entering ? 1.0f / m.ior : m.ior;
@@ -126,7 +126,7 @@ PathResult tracePath(const World& w, V3 o, V3 d, int maxBounces, Rng& rng) {
 
         const float nv = std::max(dot(n, wo), 1e-4f);
         const V3 f0 = lerp(V3{0.04f, 0.04f, 0.04f}, s.base, m.metallic);
-        const bool mirror = m.roughness < kMirror;
+        const bool mirror = s.rough < kMirror;
         const float ps = m.metallic >= 0.999f ? 1.0f
                                               : m.metallic + (1 - m.metallic) * std::clamp(luminance(schlick(f0, nv)), 0.05f, 0.95f);
         V3 wi;
@@ -135,7 +135,7 @@ PathResult tracePath(const World& w, V3 o, V3 d, int maxBounces, Rng& rng) {
             wi = normalize(reflect(d, n));
             weight = schlick(f0, nv) / ps;
         } else {
-            const float a = ggxAlpha(m.roughness);
+            const float a = ggxAlpha(s.rough);
             const bool spec = !mirror && rng.uniform() < ps;
             if (spec) {
                 const V3 hv = sampleGgx(n, a, rng);

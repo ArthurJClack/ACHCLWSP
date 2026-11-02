@@ -33,6 +33,8 @@ std::string lower(std::string s) {
     return s;
 }
 
+constexpr double kPiLib = 3.14159265358979323846;
+
 struct B {
     Symbol s;
     B& line(std::vector<Pt> pts, bool closed = false, bool fill = false) {
@@ -791,6 +793,111 @@ struct CatalogRow {
     std::vector<std::string> aliases;
 };
 
+// ---- multi-unit parts: one package, several gates/amplifiers drawn as separate units -------------
+
+struct UnitDef {
+    std::string title, prefix, value, footprint;
+    int units = 0;  // including the power unit (the last)
+};
+
+// pins per unit: {number, name} for in1, in2 (or -/+), out
+Symbol opampUnit(const std::string& name, char letter, const std::string& minus, const std::string& plus, const std::string& out) {
+    B b;
+    b.s.name = name;
+    b.s.prefix = "U";
+    b.s.category = "ic";
+    b.line({{-1.5, -2}, {-1.5, 2}, {2, 0}}, true);
+    const std::string l(1, letter);
+    b.pin(minus, "-" + l, {-3, -1}, {-1.5, -1}, PinType::Input)
+        .pin(plus, "+" + l, {-3, 1}, {-1.5, 1}, PinType::Input)
+        .pin(out, "OUT" + l, {3, 0}, {2, 0}, PinType::Output);
+    b.text({-1.05, -0.75}, "-", 0.8).text({-1.05, 1.25}, "+", 0.8);
+    b.s.refPos = {1.4, -1.6};
+    b.s.valuePos = {1.6, 1.9};
+    return b.s;
+}
+
+Symbol nandUnit(const std::string& name, char letter, const std::string& a, const std::string& bpin, const std::string& out) {
+    B b;
+    b.s.name = name;
+    b.s.prefix = "U";
+    b.s.category = "ic";
+    // a D shape with a bubble
+    b.line({{0, -1.5}, {-1.5, -1.5}, {-1.5, 1.5}, {0, 1.5}});
+    b.arc({0, 0}, 1.5, -kPiLib / 2, kPiLib / 2, 16);
+    b.circle({1.8, 0}, 0.3);
+    const std::string l(1, letter);
+    b.pin(a, "A" + l, {-3, -1}, {-1.5, -1}, PinType::Input)
+        .pin(bpin, "B" + l, {-3, 1}, {-1.5, 1}, PinType::Input)
+        .pin(out, "Y" + l, {3, 0}, {2.1, 0}, PinType::Output);
+    b.s.refPos = {0, -2.2};
+    b.s.valuePos = {0, 2.6};
+    return b.s;
+}
+
+Symbol inverterUnit(const std::string& name, char letter, const std::string& in, const std::string& out) {
+    B b;
+    b.s.name = name;
+    b.s.prefix = "U";
+    b.s.category = "ic";
+    b.line({{-1.2, -1.2}, {-1.2, 1.2}, {1, 0}}, true);
+    b.circle({1.3, 0}, 0.3);
+    const std::string l(1, letter);
+    b.pin(in, "A" + l, {-3, 0}, {-1.2, 0}, PinType::Input).pin(out, "Y" + l, {3, 0}, {1.6, 0}, PinType::Output);
+    b.s.refPos = {0, -1.9};
+    b.s.valuePos = {0, 2.2};
+    return b.s;
+}
+
+Symbol powerUnit(const std::string& name, const std::string& vplus, const std::string& vplusName, const std::string& vminus, const std::string& vminusName) {
+    B b;
+    b.s.name = name;
+    b.s.prefix = "U";
+    b.s.category = "ic";
+    b.rect({-1, -1.5}, {1, 1.5});
+    b.pin(vplus, vplusName, {0, -3}, {0, -1.5}, PinType::PowerIn).pin(vminus, vminusName, {0, 3}, {0, 1.5}, PinType::PowerIn);
+    b.s.showPinNames = true;
+    b.s.refPos = {2.4, -0.4};
+    b.s.valuePos = {2.9, 0.7};
+    return b.s;
+}
+
+const std::map<std::string, UnitDef>& unitDefs() {
+    static const std::map<std::string, UnitDef> defs = {
+        {"opamp_dual", {"Dual op-amp LM358 as units: A (1 out, 2 -, 3 +), B (7 out, 6 -, 5 +), C power (8 V+, 4 V-)", "U", "LM358", "SOIC-8", 3}},
+        {"opamp_quad", {"Quad op-amp LM324 as units: A (1/2/3), B (7/6/5), C (8/9/10), D (14/13/12) out/-/+, E power (4 V+, 11 V-)", "U", "LM324", "SOIC-14", 5}},
+        {"nand_quad", {"Quad NAND 74HC00 as units: A (1, 2 -> 3), B (4, 5 -> 6), C (9, 10 -> 8), D (12, 13 -> 11), E power (14 VCC, 7 GND)", "U", "74HC00", "SOIC-14", 5}},
+        {"inverter_hex", {"Hex inverter 74HC04 as units: A (1 -> 2), B (3 -> 4), C (5 -> 6), D (9 -> 8), E (11 -> 10), F (13 -> 12), G power (14 VCC, 7 GND)", "U", "74HC04", "SOIC-14", 7}},
+    };
+    return defs;
+}
+
+Symbol makeUnit(const std::string& name, int unit) {
+    const UnitDef& d = unitDefs().at(name);
+    const char letter = static_cast<char>('A' + unit - 1);
+    Symbol s;
+    if (name == "opamp_dual") {
+        static const char* p[2][3] = {{"2", "3", "1"}, {"6", "5", "7"}};
+        s = unit <= 2 ? opampUnit(name, letter, p[unit - 1][0], p[unit - 1][1], p[unit - 1][2]) : powerUnit(name, "8", "V+", "4", "V-");
+    } else if (name == "opamp_quad") {
+        static const char* p[4][3] = {{"2", "3", "1"}, {"6", "5", "7"}, {"9", "10", "8"}, {"13", "12", "14"}};
+        s = unit <= 4 ? opampUnit(name, letter, p[unit - 1][0], p[unit - 1][1], p[unit - 1][2]) : powerUnit(name, "4", "V+", "11", "V-");
+    } else if (name == "nand_quad") {
+        static const char* p[4][3] = {{"1", "2", "3"}, {"4", "5", "6"}, {"9", "10", "8"}, {"12", "13", "11"}};
+        s = unit <= 4 ? nandUnit(name, letter, p[unit - 1][0], p[unit - 1][1], p[unit - 1][2]) : powerUnit(name, "14", "VCC", "7", "GND");
+    } else {
+        static const char* p[6][2] = {{"1", "2"}, {"3", "4"}, {"5", "6"}, {"9", "8"}, {"11", "10"}, {"13", "12"}};
+        s = unit <= 6 ? inverterUnit(name, letter, p[unit - 1][0], p[unit - 1][1]) : powerUnit(name, "14", "VCC", "7", "GND");
+    }
+    s.title = d.title + " (unit " + std::string(1, letter) + (unit == d.units ? ", power" : "") + ")";
+    s.value = d.value;
+    s.footprint = d.footprint;
+    s.prefix = d.prefix;
+    s.showPinNumbers = true;
+    finishSymbol(s);
+    return s;
+}
+
 const std::vector<CatalogRow>& rows() {
     static const std::vector<CatalogRow> r = {
         {{"resistor", "passive", "resistor (R_0805)", "r, res"}, {"r", "res"}},
@@ -816,6 +923,10 @@ const std::vector<CatalogRow>& rows() {
         {{"lm317", "ic", "adjustable regulator LM317, 1 = ADJ, 2 = OUT, 3 = IN (TO-220)", ""}, {"lm317t"}},
         {{"ne555", "ic", "555 timer, 1 GND, 2 TR, 3 Q, 4 R, 5 CV, 6 THR, 7 DIS, 8 VCC (DIP-8)", "555, timer"}, {"555", "timer", "lm555", "na555"}},
         {{"lm358", "ic", "dual op-amp LM358, 1 = OUTA ... 8 = V+ (SOIC-8)", "dual_opamp"}, {"dual_opamp", "lm358n"}},
+        {{"opamp_dual", "ic", "LM358 as 3 units: op-amps A, B and a power unit C (SOIC-8); placing it places every unit", "lm358_units"}, {"lm358_units"}},
+        {{"opamp_quad", "ic", "LM324 as 5 units: op-amps A..D and a power unit E (SOIC-14)", "lm324, quad_opamp"}, {"lm324", "quad_opamp", "lm324n"}},
+        {{"nand_quad", "ic", "74HC00 as 5 units: NAND gates A..D and a power unit E (SOIC-14)", "74hc00, nand"}, {"74hc00", "nand", "74ls00", "7400"}},
+        {{"inverter_hex", "ic", "74HC04 as 7 units: inverters A..F and a power unit G (SOIC-14)", "74hc04, not, inverter"}, {"74hc04", "inverter", "not_gate", "7404", "74ls04"}},
         {{"atmega328p", "ic", "ATmega328P-PU (DIP-28); pins also D0..D13, A0..A5", "atmega328, mega328"}, {"atmega328", "mega328", "atmega328p-pu"}},
         {{"atmega328p_au", "ic", "ATmega328P-AU (TQFP-32)", "atmega328p-au"}, {"atmega328p-au"}},
         {{"attiny85", "ic", "ATtiny85 (DIP-8)", "tiny85"}, {"tiny85", "attiny85-20pu"}},
@@ -873,6 +984,7 @@ std::shared_ptr<const Symbol> findSymbol(const std::string& name, int pins, cons
         if (error) *error = "no symbol called '" + name + "' (circuit.symbols lists the library)";
         return nullptr;
     }
+    if (unitDefs().count(canon)) return findSymbolUnit(canon, 1);
     std::string key = canon + "#" + std::to_string(pins);
     if (canon == "power") key += "#" + lower(name);
     for (const auto& n : pinNames) key += "|" + n;
@@ -959,6 +1071,25 @@ Symbol makeBoxSymbol(const std::string& name, const std::string& prefix, const s
     for (auto& p : s.pins) p.type = PinType::Passive;
     computeBounds(s);
     return s;
+}
+
+int symbolUnits(const std::string& name) {
+    const std::string canon = canonicalSymbol(name);
+    auto it = unitDefs().find(canon.empty() ? lower(name) : canon);
+    return it == unitDefs().end() ? 0 : it->second.units;
+}
+
+std::shared_ptr<const Symbol> findSymbolUnit(const std::string& name, int unit) {
+    const std::string canon = canonicalSymbol(name);
+    const std::string key = canon.empty() ? lower(name) : canon;
+    auto it = unitDefs().find(key);
+    if (it == unitDefs().end() || unit < 1 || unit > it->second.units) return nullptr;
+    static std::mutex mutex;
+    static std::map<std::pair<std::string, int>, std::shared_ptr<const Symbol>> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& slot = cache[{key, unit}];
+    if (!slot) slot = std::make_shared<const Symbol>(makeUnit(key, unit));
+    return slot;
 }
 
 }  // namespace wetwaresuite::circuit

@@ -58,11 +58,14 @@ inline std::string lower(std::string s) {
     return s;
 }
 
-// A footprint read from a KiCad board that some part already uses, by name (null if none).
+// A footprint read from a KiCad board or made in the footprint editor that some part already uses,
+// or one from the user footprint library, by name (null if none).
 inline std::shared_ptr<const Footprint> importedFootprint(const Circuit& c, const std::string& name) {
     for (const auto& part : c.parts) {
         if (part.customFootprint && part.customFootprint->name == name) return part.customFootprint;
     }
+    // then the user's own library (built-in footprints win over a file with the same name)
+    if (!name.empty() && !findFootprint(name)) return findUserFootprint(name);
     return nullptr;
 }
 
@@ -166,9 +169,11 @@ void registerFileCommands(Session& session);
 void registerSchematicCommands(Session& session);
 void registerSchematicMarkCommands(Session& session);
 void registerSchematicQueryCommands(Session& session);
+void registerBusCommands(Session& session);
 void registerPcbCommands(Session& session);
 void registerPcbOutputCommands(Session& session);
 void registerBoardToolCommands(Session& session);
 void registerViewCommands(Session& session);
+void registerFootprintEditCommands(Session& session);
 
 }  // namespace wetwaresuite::circuit::cmd

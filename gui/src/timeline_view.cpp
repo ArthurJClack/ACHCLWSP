@@ -6,8 +6,11 @@
 // tracks (Document::timeline) and names the command for each edit
 // (Document::timelineCommand), so every drag is one ordinary, undoable command.
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <iterator>
 
 #include "shell.hpp"
 #include "wetwaresuite/core/cli.hpp"
@@ -17,6 +20,13 @@ namespace wetwaresuite::gui {
 namespace {
 
 constexpr float kEdge = 6.0f;  // px at each end of a clip that trim instead of move
+
+// A clip's gain line: -24 dB at the bottom, +12 dB at the top, 0 dB a third of the way down.
+float gainY(double db, float top, float bottom) {
+    const double f = (std::clamp(db, -24.0, 12.0) + 24.0) / 36.0;
+    return bottom - static_cast<float>(f) * (bottom - top);
+}
+double gainAt(float y, float top, float bottom) { return std::clamp(-24.0 + 36.0 * (bottom - y) / std::max(1.0f, bottom - top), -24.0, 12.0); }
 
 std::string clockText(double s) {
     char buf[32];
@@ -34,6 +44,8 @@ double niceStep(double secondsPerPixel) {
 }
 
 // Rows are taller when clips show thumbnails or waveforms.
+float mediaBinHeight() { return ImGui::GetFontSize() * 2.8f + ImGui::GetStyle().ScrollbarSize + 6; }
+
 float rowHeight(const TimelineLayout& layout) {
     for (const auto& t : layout.tracks)
         for (const auto& c : t.clips)
@@ -47,6 +59,7 @@ float Shell::timelineHeight(const TimelineLayout& layout) const {
     const float row = rowHeight(layout);
     float chrome = ImGui::GetFrameHeightWithSpacing() + ImGui::GetFontSize() * 1.6f + 8;
     if (!exportJob_.id.empty()) chrome += ImGui::GetFrameHeightWithSpacing();  // the export's progress bar
+    if (layout.tools && !layout.media.empty()) chrome += mediaBinHeight() + ImGui::GetStyle().ItemSpacing.y;
     return chrome + row * static_cast<float>(std::max<std::size_t>(1, layout.tracks.size()));
 }
 
@@ -161,8 +174,9 @@ void Shell::timelineView(const TimelineLayout& layout) {
                  !io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_K, false))) {
             runTimelineEdit(layout, {TimelineEditKind::Razor, {}, {}, {}, 0, 0, st.cursor});
         }
-        if (tool("Marker", "Add a marker at the cursor (M)", true, keys && ImGui::IsKeyPressed(ImGuiKey_M, false))) {
-            runTimelineEdit(layout, {TimelineEditKind::Marker, {}, {}, {}, 0, 0, st.cursor});
+        if (tool("Marker", "Add a marker at the cursor (M); on the selected clip it moves with the clip", true, keys && ImGui::IsKeyPressed(ImGuiKey_M, false))) {
+            // over the selected clip it rides along with it (a clip marker)
+            runTimelineEdit(layout, {TimelineEditKind::Marker, st.selClip, st.selTrack, {}, 0, 0, st.cursor});
         }
         if (tool("In", "Mark the in point at the cursor (I)", true, keys && ImGui::IsKeyPressed(ImGuiKey_I, false))) {
             runTimelineEdit(layout, {TimelineEditKind::InPoint, {}, {}, {}, 0, 0, st.cursor});
@@ -211,6 +225,59 @@ void Shell::timelineView(const TimelineLayout& layout) {
         if (!room) ImGui::SetItemTooltip("%s", tips);
     }
 
+    // the media bin: a row of the files brought in, dragged from here onto a track
+    if (layout.tools && !layout.media.empty()) {
+        const float unit = ImGui::GetFontSize();
+        const float tileH = unit * 2.8f, tileW = unit * 8.5f;
+        ImGui::BeginChild("##bin", {0, mediaBinHeight()}, ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+        ImDrawList* bdl = ImGui::GetWindowDrawList();
+        for (std::size_t i = 0; i < layout.media.size(); ++i) {
+            const std::string& path = layout.media[i];
+            if (i) ImGui::SameLine();
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::InvisibleButton("##tile", {tileW, tileH});
+            const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+            const bool hot = ImGui::IsItemHovered();
+            // a thumbnail from a clip that plays it, else a kind-coloured block
+            const ClipStrip* thumb = nullptr;
+            bool sound = false;
+            for (const auto& t : layout.tracks)
+                for (const auto& c : t.clips)
+                    if (!thumb && c.source == path) {
+                        if (c.picture) thumb = clipStrip(c.id);
+                        sound = sound || (c.sound && !c.picture);
+                    }
+            std::string ext = std::filesystem::path(path).extension().string();
+            for (auto& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            static const char* sounds[] = {".wav", ".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".wma", ".aif", ".aiff"};
+            sound = sound || std::find(std::begin(sounds), std::end(sounds), ext) != std::end(sounds);
+            bdl->AddRectFilled(a, b, ImGui::GetColorU32(hot ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), 4);
+            const float thumbW = tileH * 16 / 9;
+            const ImVec2 ta{a.x + 3, a.y + 3}, tb{a.x + 3 + thumbW - 6, b.y - 3};
+            if (thumb && !thumb->frames.empty() && thumb->frames[thumb->frames.size() / 3].tex) {
+                bdl->AddImage(thumb->frames[thumb->frames.size() / 3].id(), ta, tb);
+            } else {
+                bdl->AddRectFilled(ta, tb, sound ? IM_COL32(60, 140, 90, 255) : IM_COL32(70, 100, 160, 255), 3);
+                bdl->AddText({ta.x + 4, ta.y + 2}, IM_COL32(255, 255, 255, 220), sound ? "sound" : "picture");
+            }
+            std::string name = std::filesystem::path(path).filename().string();
+            const float textRoom = b.x - tb.x - 8;
+            if (ImGui::CalcTextSize(name.c_str()).x > textRoom) {
+                while (name.size() > 3 && ImGui::CalcTextSize((name + "...").c_str()).x > textRoom) name.pop_back();
+                name += "...";
+            }
+            bdl->AddText({tb.x + 5, a.y + (tileH - unit) / 2}, ImGui::GetColorU32(ImGuiCol_Text), name.c_str());
+            ImGui::SetItemTooltip("%s\nDrag onto a track to put it on the timeline", path.c_str());
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("WW_MEDIA", path.c_str(), path.size() + 1);
+                ImGui::TextUnformatted(std::filesystem::path(path).filename().string().c_str());
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+
     // geometry
     std::size_t toggleCount = 0;
     for (const auto& t : layout.tracks) toggleCount = std::max(toggleCount, t.toggles.size());
@@ -241,6 +308,16 @@ void Shell::timelineView(const TimelineLayout& layout) {
     st.scroll = std::clamp(st.scroll, 0.0, std::max(0.0, end * 1.05 - laneW / st.zoom));
     auto toX = [&](double t) { return o.x + nameW + static_cast<float>((t - st.scroll) * st.zoom); };
     auto toT = [&](float x) { return st.scroll + (x - o.x - nameW) / st.zoom; };
+    // a file dragged from the media bin: lands on the track and time under the mouse
+    bool binDrop = false;
+    std::string binPath;
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("WW_MEDIA", ImGuiDragDropFlags_AcceptBeforeDelivery)) {
+            binPath = static_cast<const char*>(pl->Data);
+            binDrop = pl->IsDelivery();
+        }
+        ImGui::EndDragDropTarget();
+    }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const bool dark = darkLook();
@@ -266,6 +343,22 @@ void Shell::timelineView(const TimelineLayout& layout) {
     const auto rowAt = [&](float y) { return static_cast<int>(std::floor((y - o.y - rulerH) / rowH)); };
     const int hoverRow = rowAt(io.MousePos.y);
     const double hoverT = toT(io.MousePos.x);
+    if (!binPath.empty()) {
+        // where it would land: the row under the mouse (the model picks a track of the right kind), at that time
+        const double at = std::max(0.0, hoverT);
+        const float x = toX(at);
+        const int row = layout.tracks.empty() ? 0 : std::clamp(hoverRow, 0, static_cast<int>(layout.tracks.size()) - 1);
+        const float y0 = o.y + rulerH + rowH * static_cast<float>(std::max(0, row));
+        dl->AddRectFilled({x, y0 + 3}, {x + 3, y0 + rowH - 3}, ImGui::GetColorU32(ImGuiCol_DragDropTarget));
+        if (binDrop) {
+            TimelineEdit e;
+            e.kind = TimelineEditKind::AddFile;
+            e.name = binPath;
+            e.track = layout.tracks.empty() ? std::string() : layout.tracks[static_cast<std::size_t>(std::max(0, row))].id;
+            e.place = at;
+            runTimelineEdit(layout, e);
+        }
+    }
     // the track switches sit right-aligned in the name column, one square each
     const auto toggleRect = [&](std::size_t row, std::size_t i, std::size_t count) {
         const float y0 = o.y + rulerH + rowH * static_cast<float>(row);
@@ -306,6 +399,37 @@ void Shell::timelineView(const TimelineLayout& layout) {
                 st.headroom = c.headroom;
                 st.tailroom = c.tailroom;
                 const bool narrow = x1 - x0 < kEdge * 3;
+                // fade handles sit on the clip's top edge, the gain line across it
+                const float cy0 = o.y + rulerH + rowH * static_cast<float>(hoverRow) + 3, cy1 = cy0 + rowH - 8;
+                const float fiX = toX(c.start + std::max(0.0, c.fadeIn)), foX = toX(c.start + c.length - std::max(0.0, c.fadeOut));
+                const bool top = io.MousePos.y < cy0 + kEdge * 1.5f;
+                // a keyframe diamond along the clip's bottom edge: slide it
+                const float keyY = o.y + rulerH + rowH * static_cast<float>(hoverRow) + rowH - 9;
+                bool onKey = false;
+                for (double k : c.keyframes) {
+                    if (std::fabs(io.MousePos.x - toX(k)) < 6 && std::fabs(io.MousePos.y - keyY) < 7) {
+                        st.drag = TimelineState::Drag::Key;
+                        st.origValue = st.dragValue = k;
+                        onKey = true;
+                        break;
+                    }
+                }
+                if (onKey) break;
+                if (c.fadeIn >= 0 && top && std::fabs(io.MousePos.x - fiX) < kEdge) {
+                    st.drag = TimelineState::Drag::FadeIn;
+                    st.origValue = st.dragValue = c.fadeIn;
+                    break;
+                }
+                if (c.fadeOut >= 0 && top && std::fabs(io.MousePos.x - foX) < kEdge) {
+                    st.drag = TimelineState::Drag::FadeOut;
+                    st.origValue = st.dragValue = c.fadeOut;
+                    break;
+                }
+                if (c.gainHandle && std::fabs(io.MousePos.y - gainY(c.gainDb, cy0, cy1)) < 4 && io.MousePos.x > x0 + kEdge && io.MousePos.x < x1 - kEdge) {
+                    st.drag = TimelineState::Drag::Gain;
+                    st.origValue = st.dragValue = c.gainDb;
+                    break;
+                }
                 if (!narrow && io.MousePos.x < x0 + kEdge && c.trimStart) st.drag = TimelineState::Drag::TrimStart;
                 else if (!narrow && io.MousePos.x > x1 - kEdge) st.drag = TimelineState::Drag::TrimEnd;
                 else st.drag = TimelineState::Drag::Move;
@@ -324,6 +448,44 @@ void Shell::timelineView(const TimelineLayout& layout) {
         scrubTime_ = -1;
         if (layout.cursor >= 0) runTimelineEdit(layout, {TimelineEditKind::Cursor, {}, {}, {}, 0, 0, st.cursor});
         if (timelinePlaying()) seekTo(st.cursor);  // the picture and sound jump there too
+        st.drag = TimelineState::Drag::None;
+    }
+
+    // fade and gain handles: the value follows the mouse, released = one clip_set
+    const bool handleDrag = st.drag == TimelineState::Drag::FadeIn || st.drag == TimelineState::Drag::FadeOut || st.drag == TimelineState::Drag::Gain;
+    if (handleDrag && active) {
+        if (st.drag == TimelineState::Drag::FadeIn) st.dragValue = std::clamp(hoverT - st.origStart, 0.0, st.origLength);
+        else if (st.drag == TimelineState::Drag::FadeOut) st.dragValue = std::clamp(st.origStart + st.origLength - hoverT, 0.0, st.origLength);
+        else if (hoverRow >= 0) {
+            const float cy0 = o.y + rulerH + rowH * static_cast<float>(hoverRow) + 3, cy1 = cy0 + rowH - 8;
+            st.dragValue = std::round(gainAt(io.MousePos.y, cy0, cy1) * 2) / 2;  // half-dB steps
+        }
+        ImGui::SetTooltip(st.drag == TimelineState::Drag::Gain ? "gain %+.1f dB" : "fade %.2f s", st.dragValue);
+    }
+    if (handleDrag && ImGui::IsItemDeactivated()) {
+        if (std::fabs(st.dragValue - st.origValue) > 1e-4) {
+            TimelineEdit e{TimelineEditKind::SetProperty, st.selClip, st.selTrack};
+            e.name = st.drag == TimelineState::Drag::FadeIn ? "fade_in" : st.drag == TimelineState::Drag::FadeOut ? "fade_out" : "gain";
+            e.at = st.dragValue;
+            runTimelineEdit(layout, e);
+        }
+        st.drag = TimelineState::Drag::None;
+    }
+
+    // a keyframe diamond: slides along its clip (snapping to the cursor), released = one move_keyframe
+    if (st.drag == TimelineState::Drag::Key && active) {
+        double t = std::clamp(hoverT, st.origStart, st.origStart + st.origLength);
+        if (std::fabs(t - st.cursor) * st.zoom < 8) t = std::clamp(st.cursor, st.origStart, st.origStart + st.origLength);
+        st.dragValue = t;
+        ImGui::SetTooltip("keyframe at %.2f s into the clip", st.dragValue - st.origStart);
+    }
+    if (st.drag == TimelineState::Drag::Key && ImGui::IsItemDeactivated()) {
+        if (std::fabs(st.dragValue - st.origValue) > 1e-4) {
+            TimelineEdit e{TimelineEditKind::MoveKey, st.selClip, st.selTrack};
+            e.at = st.origValue;
+            e.start = st.dragValue;
+            runTimelineEdit(layout, e);
+        }
         st.drag = TimelineState::Drag::None;
     }
 
@@ -465,16 +627,55 @@ void Shell::timelineView(const TimelineLayout& layout) {
                     dl->PopClipRect();
                 }
             }
+            if (c.fadeIn >= 0 || c.gainHandle) {
+                // fades as shaded wedges with a handle on top, gain as a line (dragged: the new value)
+                const bool editing = isSel && active && handleDrag;
+                const double fi = editing && st.drag == TimelineState::Drag::FadeIn ? st.dragValue : std::max(0.0, c.fadeIn);
+                const double fo = editing && st.drag == TimelineState::Drag::FadeOut ? st.dragValue : std::max(0.0, c.fadeOut);
+                const double g = editing && st.drag == TimelineState::Drag::Gain ? st.dragValue : c.gainDb;
+                const float cy0 = y0 + 3, cy1 = y1 - 5;
+                const float fx = std::min(x1, toX(c.start + fi)), gx = std::max(x0, toX(c.start + c.length - fo));
+                const ImU32 shade = IM_COL32(0, 0, 0, 80), edgeCol = IM_COL32(255, 255, 255, 200), knob = IM_COL32(255, 255, 255, 235);
+                if (fi > 0) {
+                    dl->AddTriangleFilled({x0, cy0}, {fx, cy0}, {x0, cy1}, shade);
+                    dl->AddLine({x0, cy1}, {fx, cy0}, edgeCol, 1.5f);
+                }
+                if (fo > 0) {
+                    dl->AddTriangleFilled({gx, cy0}, {x1, cy0}, {x1, cy1}, shade);
+                    dl->AddLine({gx, cy0}, {x1, cy1}, edgeCol, 1.5f);
+                }
+                if (isSel || x1 - x0 > 40) {
+                    dl->AddRectFilled({fx - 3, cy0}, {fx + 3, cy0 + 6}, knob, 1);
+                    dl->AddRectFilled({gx - 3, cy0}, {gx + 3, cy0 + 6}, knob, 1);
+                }
+                if (c.gainHandle && (isSel || std::fabs(g) > 0.01)) {
+                    const float gy = gainY(g, cy0, cy1);
+                    dl->AddLine({fx, gy}, {gx, gy}, IM_COL32(255, 230, 120, isSel ? 230 : 120), isSel ? 1.5f : 1.0f);
+                }
+            }
             if (c.transitionIn > 0) {
                 // the blend with the clip before: a darker wedge over its start
                 const float xt = std::min(x1, toX(c.start + c.transitionIn));
                 dl->AddTriangleFilled({x0, y1 - 3}, {xt, y0 + 3}, {xt, y1 - 3}, IM_COL32(0, 0, 0, 90));
                 dl->AddLine({x0, y1 - 3}, {xt, y0 + 3}, IM_COL32(255, 255, 255, 160), 1.5f);
             }
+            if (isSel && c.curve.size() > 1) {
+                // the animated value across the clip, so the shape between keyframes shows
+                const float cy0 = y0 + 8, cy1 = y1 - 12;
+                std::vector<ImVec2> pts;
+                for (std::size_t i = 0; i < c.curve.size(); ++i) {
+                    const double t = c.start + c.length * static_cast<double>(i) / static_cast<double>(c.curve.size() - 1);
+                    pts.push_back({toX(t), cy1 - (cy1 - cy0) * c.curve[i]});
+                }
+                dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), IM_COL32(255, 220, 90, 200), ImDrawFlags_None, 1.5f);
+                dl->AddText({std::max(x0, o.x + nameW) + 4, y1 - 12 - ImGui::GetFontSize()}, IM_COL32(255, 220, 90, 230), c.curveName.c_str());
+            }
             for (double k : c.keyframes) {
-                const float kx = toX(k), ky = y1 - 7;
+                const bool sliding = isSel && st.drag == TimelineState::Drag::Key && active && std::fabs(k - st.origValue) < 1e-6;
+                const float kx = toX(sliding ? st.dragValue : k), ky = y1 - 7;
                 if (kx < x0 - 1 || kx > x1 + 1) continue;
-                dl->AddQuadFilled({kx, ky - 4}, {kx + 4, ky}, {kx, ky + 4}, {kx - 4, ky}, IM_COL32(255, 220, 90, 255));
+                const float r = sliding ? 5.5f : 4.0f;
+                dl->AddQuadFilled({kx, ky - r}, {kx + r, ky}, {kx, ky + r}, {kx - r, ky}, IM_COL32(255, 220, 90, 255));
             }
             const bool linked = !isSel && !c.link.empty() && !selLink.empty() && c.link == selLink;
             if (isSel) dl->AddRect({x0, y0 + 3}, {x1, y1 - 3}, ImGui::ColorConvertFloat4ToU32(accent_), 4, 0, 2.5f);

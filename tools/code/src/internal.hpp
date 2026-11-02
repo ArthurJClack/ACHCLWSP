@@ -91,6 +91,7 @@ void registerEditCommands(Session& s, StatePtr st);
 void registerProjectCommands(Session& s, StatePtr st);
 void registerRunCommands(Session& s, StatePtr st);
 void registerGitCommands(Session& s, StatePtr st);
+void registerLspCommands(Session& s, StatePtr st);
 
 }  // namespace detail
 }  // namespace wetwaresuite::code

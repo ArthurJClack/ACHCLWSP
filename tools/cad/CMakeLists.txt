@@ -1,5 +1,5 @@
 add_library(wetwaresuite_cad src/expr.cpp src/model.cpp src/commands.cpp src/repair.cpp src/blend.cpp src/solver.cpp src/sketch.cpp
-            src/features.cpp src/sketch_commands.cpp src/assembly.cpp src/assembly_commands.cpp src/drawing.cpp src/pick.cpp)
+            src/features.cpp src/sketch_commands.cpp src/assembly.cpp src/assembly_commands.cpp src/drawing.cpp src/pick.cpp src/config.cpp src/sheetmetal.cpp)
 add_library(wetwaresuite::cad ALIAS wetwaresuite_cad)
 target_include_directories(wetwaresuite_cad PUBLIC include)
 target_link_libraries(wetwaresuite_cad PUBLIC wetwaresuite::core wetwaresuite::mesh PRIVATE wetwaresuite::blueprint nlohmann_json::nlohmann_json)

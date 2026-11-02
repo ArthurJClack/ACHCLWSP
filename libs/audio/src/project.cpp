@@ -32,6 +32,7 @@ double Project::seconds() const {
 double Project::tailSeconds() const {
     double tail = 0;
     for (const auto& t : tracks) tail = std::max(tail, rackTail(t.fx));
+    for (const auto& b : buses) tail = std::max(tail, rackTail(b.fx));
     return std::min(15.0, tail + rackTail(masterFx));
 }
 
@@ -206,10 +207,23 @@ Buffer mixdown(const Project& p) {
     Buffer out(p.channels, frames, p.rate);
     bool anySolo = false;
     for (const auto& t : p.tracks) anySolo = anySolo || t.solo;
+    std::vector<Buffer> busIn;
+    for (std::size_t i = 0; i < p.buses.size(); ++i) busIn.emplace_back(p.channels, frames, p.rate);
     for (std::size_t i = 0; i < p.tracks.size(); ++i) {
         const Track& t = p.tracks[i];
         if (anySolo ? !t.solo : t.mute) continue;
-        mixInto(out, renderTrack(p, static_cast<int>(i)), 0, 0.0);
+        const Buffer tr = renderTrack(p, static_cast<int>(i));
+        mixInto(out, tr, 0, 0.0);
+        for (const auto& snd : t.sends)
+            if (snd.bus >= 0 && snd.bus < static_cast<int>(busIn.size()) && snd.levelDb > -90) mixInto(busIn[static_cast<std::size_t>(snd.bus)], tr, 0, snd.levelDb);
+    }
+    for (std::size_t i = 0; i < p.buses.size(); ++i) {
+        const Bus& b = p.buses[i];
+        if (b.mute) continue;
+        Buffer& in = busIn[i];
+        applyRack(in, b.fx, b.automation);
+        if (const Automation* lane = findLane(b.automation, "volume")) applyVolumeLane(in, *lane);
+        mixInto(out, in, 0, b.gainDb);
     }
     if (p.masterGainDb != 0) gain(out, p.masterGainDb, all(out));
     applyRack(out, p.masterFx, p.masterAutomation);
@@ -290,6 +304,7 @@ json rackJson(const Rack& r) {
         json prm = json::object();
         for (const auto& [k, v] : e.params) prm[k] = v;
         a.push_back({{"type", e.type}, {"bypass", e.bypass}, {"params", prm}});
+        if (!e.plugin.empty()) a.back()["plugin"] = e.plugin;
     }
     return a;
 }
@@ -300,7 +315,8 @@ Rack rackOf(const json& a) {
     for (const auto& je : a) {
         Effect e;
         e.type = je.value("type", std::string());
-        if (!findEffectType(e.type)) throw std::runtime_error("unknown effect \"" + e.type + "\" in the file");
+        e.plugin = je.value("plugin", std::string());
+        if (!findEffectType(e.type) && !(e.type == "clap" && !e.plugin.empty())) throw std::runtime_error("unknown effect \"" + e.type + "\" in the file");
         e.bypass = je.value("bypass", false);
         const json prm = je.value("params", json::object());
         for (const auto& [k, v] : prm.items())
@@ -387,6 +403,17 @@ void saveProject(const Project& p, const fs::path& path) {
                           {"duck_under", t.duckUnder}, {"duck_db", t.duckDb}, {"duck_threshold", t.duckThresholdDb},
                           {"duck_attack", t.duckAttack}, {"duck_release", t.duckRelease}, {"envelope", env},
                           {"fx", rackJson(t.fx)}, {"automation", lanesJson(t.automation)}, {"clips", clips}});
+        if (!t.sends.empty()) {
+            json sends = json::array();
+            for (const auto& snd : t.sends) sends.push_back({{"bus", snd.bus}, {"level", snd.levelDb}});
+            tracks.back()["sends"] = sends;
+        }
+    }
+    if (!p.buses.empty()) {
+        json buses = json::array();
+        for (const auto& b : p.buses)
+            buses.push_back({{"name", b.name}, {"gain", b.gainDb}, {"mute", b.mute}, {"fx", rackJson(b.fx)}, {"automation", lanesJson(b.automation)}});
+        j["buses"] = buses;
     }
     j["tracks"] = tracks;
     j["master_fx"] = rackJson(p.masterFx);
@@ -417,6 +444,15 @@ Project loadProject(const fs::path& path) {
     p.masterGainDb = j.value("master_gain", 0.0);
     p.masterFx = rackOf(j.value("master_fx", json::array()));
     p.masterAutomation = lanesOf(j.value("master_automation", json::array()));
+    for (const auto& jb : j.value("buses", json::array())) {
+        Bus b;
+        b.name = jb.value("name", std::string());
+        b.gainDb = jb.value("gain", 0.0);
+        b.mute = jb.value("mute", false);
+        b.fx = rackOf(jb.value("fx", json::array()));
+        b.automation = lanesOf(jb.value("automation", json::array()));
+        p.buses.push_back(std::move(b));
+    }
     for (const auto& jm : j.value("markers", json::array())) p.markers.push_back({jm.value("name", std::string()), jm.value("start", 0.0), jm.value("end", -1.0)});
     for (const auto& jt : j.value("tracks", json::array())) {
         Track t;
@@ -432,6 +468,7 @@ Project loadProject(const fs::path& path) {
         t.duckRelease = jt.value("duck_release", 0.6);
         t.fx = rackOf(jt.value("fx", json::array()));
         t.automation = lanesOf(jt.value("automation", json::array()));
+        for (const auto& js : jt.value("sends", json::array())) t.sends.push_back({js.value("bus", 0), js.value("level", 0.0)});
         for (const auto& e : jt.value("envelope", json::array())) {
             if (e.is_array() && e.size() == 2) t.envelope.push_back({e[0].get<double>(), e[1].get<double>()});
         }

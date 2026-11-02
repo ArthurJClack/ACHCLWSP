@@ -1,7 +1,10 @@
 // The scene model: presets, names, world geometry, camera fitting, JSON.
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cmath>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -112,9 +115,15 @@ bool applyPreset(Material& m, const std::string& name) {
     } else {
         return false;
     }
+    const std::string normal = m.normalMap, rough = m.roughnessMap, nm = m.name;
+    const double ns = m.normalStrength;
     m = d;
     m.texture = tex;
     m.textureScale = texScale;
+    m.normalMap = normal;
+    m.normalStrength = ns;
+    m.roughnessMap = rough;
+    m.name = nm;
     return true;
 }
 
@@ -214,6 +223,167 @@ mesh::Mesh objectMesh(const Object& o, double autoPlane) {
 }
 
 }  // namespace
+
+namespace {
+
+std::string trimmed(std::string s) {
+    while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return s.substr(i);
+}
+
+// The file name at the end of a map_* line (options like -bm 0.5 come first).
+std::string mapFile(const std::string& rest, double* bumpScale) {
+    std::istringstream in(rest);
+    std::vector<std::string> words;
+    std::string w;
+    while (in >> w) words.push_back(w);
+    for (std::size_t i = 0; i + 1 < words.size(); ++i) {
+        if (words[i] == "-bm" && bumpScale) bumpScale[0] = std::atof(words[i + 1].c_str());
+    }
+    return words.empty() ? std::string() : words.back();
+}
+
+double srgb(double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); }
+
+std::map<std::string, Material> readMtl(const fs::path& file) {
+    std::map<std::string, Material> out;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return out;
+    const fs::path dir = file.parent_path();
+    auto path = [&](const std::string& f) {
+        if (f.empty()) return std::string();
+        fs::path p(f);
+        if (p.is_relative()) p = dir / p;
+        return p.lexically_normal().string();
+    };
+    Material* m = nullptr;
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trimmed(line);
+        if (line.empty() || line[0] == '#') continue;
+        const std::size_t sp = line.find_first_of(" \t");
+        const std::string key = line.substr(0, sp);
+        const std::string rest = sp == std::string::npos ? "" : trimmed(line.substr(sp));
+        std::istringstream v(rest);
+        if (key == "newmtl") {
+            m = &out[rest];
+            m->name = rest;
+            continue;
+        }
+        if (!m) continue;
+        double a = 0, b = 0, c = 0;
+        if (key == "Kd" && (v >> a >> b >> c)) m->color = {srgb(a), srgb(b), srgb(c)};
+        else if (key == "Ke" && (v >> a >> b >> c)) {
+            const double s = std::max({a, b, c});
+            if (s > 0) m->emission = {srgb(a / s), srgb(b / s), srgb(c / s)}, m->emissionStrength = s;
+        } else if (key == "Ns" && (v >> a)) m->roughness = std::clamp(std::pow(2.0 / (std::max(a, 0.0) + 2), 0.25), 0.0, 1.0);
+        else if (key == "Pr" && (v >> a)) m->roughness = std::clamp(a, 0.0, 1.0);
+        else if (key == "Pm" && (v >> a)) m->metallic = std::clamp(a, 0.0, 1.0);
+        else if (key == "Ni" && (v >> a)) m->ior = std::clamp(a, 1.0, 3.0);
+        else if (key == "d" && (v >> a)) m->opacity = std::clamp(a, 0.0, 1.0);
+        else if (key == "Tr" && (v >> a)) m->opacity = std::clamp(1.0 - a, 0.0, 1.0);
+        else if (key == "map_Kd") m->texture = path(mapFile(rest, nullptr));
+        else if (key == "map_Pr") m->roughnessMap = path(mapFile(rest, nullptr));
+        else if (key == "map_Bump" || key == "map_bump" || key == "bump" || key == "norm" || key == "map_Kn") {
+            double scale[1] = {1.0};
+            m->normalMap = path(mapFile(rest, scale));
+            m->normalStrength = std::clamp(scale[0], 0.0, 4.0);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+mesh::Mesh loadMeshFile(const fs::path& file, std::vector<Material>& parts, std::vector<int>& partOf) {
+    parts.clear();
+    partOf.clear();
+    std::string ext = file.extension().string();
+    for (auto& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (ext != ".obj") return mesh::load(file);
+    std::ifstream in(file, std::ios::binary);
+    if (!in) throw std::runtime_error("can't open " + file.string());
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+    // split faces by usemtl, keeping every vertex line so indices still match
+    std::string shared;
+    std::vector<std::string> groupNames;
+    std::vector<std::string> groupFaces;
+    std::vector<std::string> libs;
+    int cur = -1;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string tl = trimmed(line);
+        if (tl.rfind("usemtl", 0) == 0) {
+            const std::string name = trimmed(tl.substr(6));
+            auto it = std::find(groupNames.begin(), groupNames.end(), name);
+            if (it == groupNames.end()) {
+                groupNames.push_back(name);
+                groupFaces.emplace_back();
+                cur = static_cast<int>(groupNames.size()) - 1;
+            } else {
+                cur = static_cast<int>(it - groupNames.begin());
+            }
+            continue;
+        }
+        if (tl.rfind("mtllib", 0) == 0) {
+            libs.push_back(trimmed(tl.substr(6)));
+            continue;
+        }
+        if (tl.rfind("f ", 0) == 0 || tl.rfind("f\t", 0) == 0) {
+            if (cur < 0) {
+                groupNames.emplace_back();
+                groupFaces.emplace_back();
+                cur = 0;
+            }
+            groupFaces[static_cast<std::size_t>(cur)] += tl + "\n";
+            shared += "#\n";  // keeps negative indices pointing at the same vertices
+            continue;
+        }
+        shared += tl + "\n";
+    }
+    if (groupNames.size() < 2) return mesh::load(file);
+    std::map<std::string, Material> lib;
+    for (const auto& l : libs) {
+        fs::path p(l);
+        if (p.is_relative()) p = file.parent_path() / p;
+        for (auto& [k, m] : readMtl(p)) lib.emplace(k, m);
+    }
+    // negative (relative) indices need the face in its original place, so they fall back to one material
+    if (text.find("f -") != std::string::npos) return mesh::load(file);
+    mesh::Mesh all;
+    for (std::size_t g = 0; g < groupNames.size(); ++g) {
+        mesh::Mesh part = mesh::readObj(shared + groupFaces[g]);
+        if (part.empty()) continue;
+        const auto base = static_cast<std::uint32_t>(all.positions.size());
+        const bool keepN = (all.empty() || all.hasNormals()) && part.hasNormals();
+        const bool keepT = (all.empty() || all.hasUvs()) && part.hasUvs();
+        if (!keepN) all.normals.clear();
+        if (!keepT) all.uvs.clear();
+        all.positions.insert(all.positions.end(), part.positions.begin(), part.positions.end());
+        if (keepN) all.normals.insert(all.normals.end(), part.normals.begin(), part.normals.end());
+        if (keepT) all.uvs.insert(all.uvs.end(), part.uvs.begin(), part.uvs.end());
+        for (std::uint32_t i : part.indices) all.indices.push_back(base + i);
+        Material m;
+        auto it = lib.find(groupNames[g]);
+        if (it != lib.end()) m = it->second;
+        m.name = groupNames[g].empty() ? "default" : groupNames[g];
+        partOf.insert(partOf.end(), part.triangleCount(), static_cast<int>(parts.size()));
+        parts.push_back(m);
+    }
+    if (all.empty()) throw std::runtime_error("that mesh has no triangles");
+    if (parts.size() < 2) {
+        if (parts.size() == 1) {
+            parts.clear();
+            partOf.clear();
+        }
+    }
+    return all;
+}
 
 void centerMesh(mesh::Mesh& m) {
     const mesh::Bounds b = mesh::bounds(m);
@@ -323,6 +493,9 @@ json materialJson(const Material& m, const fs::path& base) {
     if (m.transmission > 0) j["transmission"] = m.transmission, j["ior"] = m.ior;
     if (m.opacity < 1) j["opacity"] = m.opacity;
     if (!m.texture.empty()) j["texture"] = relPath(m.texture, base), j["texture_scale"] = m.textureScale;
+    if (!m.normalMap.empty()) j["normal_map"] = relPath(m.normalMap, base), j["normal_strength"] = m.normalStrength;
+    if (!m.roughnessMap.empty()) j["roughness_map"] = relPath(m.roughnessMap, base);
+    if (!m.name.empty()) j["name"] = m.name;
     return j;
 }
 
@@ -339,6 +512,10 @@ Material materialFrom(const json& j, const fs::path& base) {
     m.opacity = std::clamp(get(j, "opacity", m.opacity), 0.0, 1.0);
     m.texture = resolve(get<std::string>(j, "texture", ""), base);
     m.textureScale = get(j, "texture_scale", m.textureScale);
+    m.normalMap = resolve(get<std::string>(j, "normal_map", ""), base);
+    m.normalStrength = std::clamp(get(j, "normal_strength", m.normalStrength), 0.0, 4.0);
+    m.roughnessMap = resolve(get<std::string>(j, "roughness_map", ""), base);
+    m.name = get<std::string>(j, "name", "");
     return m;
 }
 
@@ -394,6 +571,7 @@ std::string toJson(const Scene& s, const fs::path& base) {
     j["sky"] = {{"type", k.type},         {"zenith", hexColor(k.zenith)}, {"horizon", hexColor(k.horizon)},
                 {"ground", hexColor(k.ground)}, {"strength", k.strength},  {"visible", k.visible},
                 {"background", hexColor(k.background)}, {"transparent", k.transparent}};
+    if (!k.hdri.empty()) j["sky"]["hdri"] = relPath(k.hdri, base), j["sky"]["rotation"] = k.rotation;
     json objs = json::array();
     for (const auto& o : s.objects) {
         json jo = {{"name", o.name}, {"type", o.type}};
@@ -409,6 +587,11 @@ std::string toJson(const Scene& s, const fs::path& base) {
         if (!o.visible) jo["visible"] = false;
         if (!o.smooth) jo["smooth"] = false;
         jo["material"] = materialJson(o.material, base);
+        if (!o.parts.empty()) {
+            json parts = json::array();
+            for (const auto& m : o.parts) parts.push_back(materialJson(m, base));
+            jo["parts"] = parts;
+        }
         objs.push_back(jo);
     }
     j["objects"] = objs;
@@ -461,7 +644,12 @@ Scene fromJson(const std::string& text, const fs::path& base) {
         if (j.contains("sky")) {
             const auto& k = j["sky"];
             s.sky.type = get<std::string>(k, "type", s.sky.type);
-            if (s.sky.type != "gradient" && s.sky.type != "color" && s.sky.type != "none") throw std::runtime_error("sky type is gradient, color or none");
+            if (s.sky.type != "gradient" && s.sky.type != "color" && s.sky.type != "none" && s.sky.type != "hdri") {
+                throw std::runtime_error("sky type is gradient, color, none or hdri");
+            }
+            s.sky.hdri = resolve(get<std::string>(k, "hdri", ""), base);
+            s.sky.rotation = get(k, "rotation", 0.0);
+            if (s.sky.type == "hdri" && s.sky.hdri.empty()) s.sky.type = "gradient";
             if (k.contains("color")) s.sky.zenith = s.sky.horizon = getColor(k, "color", s.sky.zenith);
             s.sky.zenith = getColor(k, "zenith", s.sky.zenith);
             s.sky.horizon = getColor(k, "horizon", s.sky.horizon);
@@ -494,10 +682,21 @@ Scene fromJson(const std::string& text, const fs::path& base) {
                 o.path = resolve(get<std::string>(jo, "path", ""), base);
                 if (o.path.empty()) throw std::runtime_error("mesh object '" + o.name + "' has no path");
                 try {
-                    mesh::Mesh m = mesh::load(o.path);
+                    std::vector<int> partOf;
+                    mesh::Mesh m = loadMeshFile(o.path, o.parts, partOf);
                     o.centered = get(jo, "center", false);
                     if (o.centered) centerMesh(m);
                     o.mesh = std::make_shared<const mesh::Mesh>(std::move(m));
+                    if (!o.parts.empty()) {
+                        o.partOf = std::make_shared<const std::vector<int>>(std::move(partOf));
+                        // saved edits win over the .mtl, matched by name
+                        for (const auto& jp : jo.value("parts", json::array())) {
+                            Material pm = materialFrom(jp, base);
+                            for (auto& part : o.parts) {
+                                if (part.name == pm.name) part = pm;
+                            }
+                        }
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error("object '" + o.name + "': " + e.what());
                 }

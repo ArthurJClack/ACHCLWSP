@@ -61,6 +61,7 @@ struct BrushSettings {
     double spacing = 0.25;  // dab spacing as a fraction of radius
     bool invert = false;    // draw/inflate dig in, pinch pushes out, crease raises a ridge
     int symmetry = 0;       // mirror bits, mirrored about the origin planes
+    std::vector<double> pressure;  // optional, one per path point: scales the strength (a pen's pressure, 0..1)
 };
 
 struct StrokeStats {

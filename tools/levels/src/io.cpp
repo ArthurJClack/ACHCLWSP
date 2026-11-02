@@ -1115,9 +1115,12 @@ std::string layerAttrsXml(const Layer& l) {
 std::string toTmx(const Map& m, const fs::path& dir, const std::string& encoding) {
     std::ostringstream o;
     o << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    o << "<map version=\"1.10\" tiledversion=\"1.10.2\" orientation=\"orthogonal\" renderorder=\"right-down\" width=\"" << m.width
-      << "\" height=\"" << m.height << "\" tilewidth=\"" << m.tileWidth << "\" tileheight=\"" << m.tileHeight
-      << "\" infinite=\"0\"";
+    o << "<map version=\"1.10\" tiledversion=\"1.10.2\" orientation=\"" << (m.orientation.empty() ? "orthogonal" : m.orientation)
+      << "\" renderorder=\"right-down\" width=\"" << m.width << "\" height=\"" << m.height << "\" tilewidth=\"" << m.tileWidth
+      << "\" tileheight=\"" << m.tileHeight << "\" infinite=\"0\"";
+    if (m.orientation == "hexagonal") o << " hexsidelength=\"" << m.hexSideLength << "\"";
+    if (m.orientation == "staggered" || m.orientation == "hexagonal")
+        o << " staggeraxis=\"" << m.staggerAxis << "\" staggerindex=\"" << m.staggerIndex << "\"";
     if (!m.background.empty()) o << " backgroundcolor=\"" << esc(m.background) << "\"";
     o << " nextlayerid=\"" << m.nextLayerId << "\" nextobjectid=\"" << m.nextObjectId << "\">\n";
     propsXml(o, m.props, " ");
@@ -1167,7 +1170,8 @@ Map fromTmx(const std::string& text, const fs::path& dir) {
     XmlNode root = XmlParser(text).parse();
     if (root.name != "map") throw std::runtime_error("not a TMX map (root element is <" + root.name + ">)");
     const std::string orient = root.get("orientation", "orthogonal");
-    if (orient != "orthogonal") throw std::runtime_error(orient + " maps aren't supported (only orthogonal)");
+    if (orient != "orthogonal" && orient != "isometric" && orient != "staggered" && orient != "hexagonal")
+        throw std::runtime_error(orient + " maps aren't supported");
     LayerCtx ctx;
     int width = root.getInt("width"), height = root.getInt("height");
     if (root.get("infinite") == "1") {
@@ -1183,6 +1187,10 @@ Map fromTmx(const std::string& text, const fs::path& dir) {
     Map m = newMap(width, height, root.getInt("tilewidth", 16), root.getInt("tileheight", 16));
     checkSize(m);
     m.background = root.get("backgroundcolor");
+    m.orientation = orient;
+    m.staggerAxis = root.get("staggeraxis", "y");
+    m.staggerIndex = root.get("staggerindex", "odd");
+    m.hexSideLength = root.getInt("hexsidelength", 0);
     m.nextLayerId = root.getInt("nextlayerid", 1);
     m.nextObjectId = root.getInt("nextobjectid", 1);
     m.props = propsFromXml(root);
@@ -1210,7 +1218,12 @@ std::string toTmj(const Map& m, const fs::path& dir, const std::string& encoding
     j["type"] = "map";
     j["version"] = "1.10";
     j["tiledversion"] = "1.10.2";
-    j["orientation"] = "orthogonal";
+    j["orientation"] = m.orientation.empty() ? "orthogonal" : m.orientation;
+    if (m.orientation == "hexagonal") j["hexsidelength"] = m.hexSideLength;
+    if (m.orientation == "staggered" || m.orientation == "hexagonal") {
+        j["staggeraxis"] = m.staggerAxis;
+        j["staggerindex"] = m.staggerIndex;
+    }
     j["renderorder"] = "right-down";
     j["width"] = m.width;
     j["height"] = m.height;
@@ -1274,7 +1287,8 @@ Map fromTmj(const std::string& text, const fs::path& dir) {
     json j = json::parse(text, nullptr, false);
     if (j.is_discarded() || !j.is_object()) throw std::runtime_error("not valid JSON");
     const std::string orient = j.value("orientation", std::string("orthogonal"));
-    if (orient != "orthogonal") throw std::runtime_error(orient + " maps aren't supported (only orthogonal)");
+    if (orient != "orthogonal" && orient != "isometric" && orient != "staggered" && orient != "hexagonal")
+        throw std::runtime_error(orient + " maps aren't supported");
     LayerCtx ctx;
     int width = j.value("width", 0), height = j.value("height", 0);
     if (j.value("infinite", false)) {
@@ -1289,6 +1303,10 @@ Map fromTmj(const std::string& text, const fs::path& dir) {
     Map m = newMap(width, height, j.value("tilewidth", 16), j.value("tileheight", 16));
     checkSize(m);
     m.background = j.value("backgroundcolor", std::string());
+    m.orientation = orient;
+    m.staggerAxis = j.value("staggeraxis", std::string("y"));
+    m.staggerIndex = j.value("staggerindex", std::string("odd"));
+    m.hexSideLength = j.value("hexsidelength", 0);
     m.nextLayerId = j.value("nextlayerid", 1);
     m.nextObjectId = j.value("nextobjectid", 1);
     m.props = propsFromTiledJson(j.value("properties", json::array()));
@@ -1976,6 +1994,14 @@ std::string toGodotScene(const Map& m, const fs::path& dir, const std::string& n
         tilesetId = "TileSet_" + std::to_string(++subN);
         sub << "[sub_resource type=\"TileSet\" id=\"" << tilesetId << "\"]\n";
         sub << "tile_size = Vector2i(" << m.tileWidth << ", " << m.tileHeight << ")\n";
+        // Godot's names for Tiled's grid shapes: diamonds, shifted rows/columns, hexagons
+        if (m.orientation == "isometric") {
+            sub << "tile_shape = 1\ntile_layout = 5\n";
+        } else if (m.orientation == "staggered" || m.orientation == "hexagonal") {
+            sub << "tile_shape = " << (m.orientation == "hexagonal" ? 3 : 1) << "\n";
+            if (m.staggerIndex == "even") sub << "tile_layout = 1\n";
+            if (m.staggerAxis == "x") sub << "tile_offset_axis = 1\n";
+        }
         if (physics) sub << "physics_layer_0/collision_layer = 1\n";
         for (const auto& [t, sidx] : sourceId) {
             (void)t;

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "wetwaresuite/raster/filters.hpp"
 #include "wetwaresuite/raster/ops.hpp"
 #include "wetwaresuite/raster/parallel.hpp"
 #include "wetwaresuite/raster/selection.hpp"
@@ -93,6 +94,20 @@ const std::map<std::string, std::vector<AdjustmentField>>& fieldTable() {
           num("cyan", -100, 100, "0", "cyan -100..100 for that range"), num("magenta", -100, 100, "0", "magenta -100..100"),
           num("yellow", -100, 100, "0", "yellow -100..100"), num("black", -100, 100, "0", "black -100..100"),
           choice("method", {"relative", "absolute"}, "relative", "relative scales with the ink already there")}},
+        // filters: with clip on they act as live (smart) filters on one layer, editable and removable any time
+        {"gaussian_blur", {num("radius", 0, 250, "4", "blur radius in pixels 0..250")}},
+        {"motion_blur",
+         {num("angle", -180, 180, "0", "direction in degrees"), num("distance", 0, 500, "12", "streak length in pixels 0..500")}},
+        {"sharpen",
+         {num("radius", 0.1, 100, "1.5", "unsharp mask radius in pixels"), num("amount", 0, 500, "80", "strength % 0..500"),
+          num("threshold", 0, 255, "0", "skip edges softer than this 0..255")}},
+        {"high_pass", {num("radius", 0.1, 250, "3", "keep detail finer than this radius")}},
+        {"median", {num("radius", 1, 50, "2", "despeckle radius 1..50")}},
+        {"noise",
+         {num("amount", 0, 100, "10", "noise strength % 0..100"), flag("gaussian", "true", "gaussian (soft) instead of uniform"),
+          flag("monochrome", "false", "same noise on every channel"), num("seed", 0, 1e9, "1", "random seed")}},
+        {"oil_paint", {num("radius", 1, 20, "3", "brush size 1..20")}},
+        {"find_edges", {}},
     };
     return t;
 }
@@ -414,7 +429,9 @@ const std::vector<std::string>& selectiveColorRanges() {
 const std::vector<std::string>& adjustmentLayerTypes() {
     static const std::vector<std::string> t = {"brightness_contrast", "levels",     "curves",        "exposure",       "vibrance",
                                                "hue_saturation",      "color_balance", "black_white", "photo_filter",  "channel_mixer",
-                                               "invert",              "posterize",  "threshold",     "gradient_map",   "selective_color"};
+                                               "invert",              "posterize",  "threshold",     "gradient_map",   "selective_color",
+                                               "gaussian_blur",       "motion_blur", "sharpen",      "high_pass",      "median",
+                                               "noise",               "oil_paint",  "find_edges"};
     return t;
 }
 
@@ -611,6 +628,24 @@ void applyAdjustment(Image& img, const std::string& type, const Settings& s) {
         gradientMap(img, s);
     } else if (type == "selective_color") {
         selectiveColor(img, s);
+    } else if (type == "gaussian_blur") {
+        gaussianBlur(img, numberOf(type, s, "radius"));
+    } else if (type == "motion_blur") {
+        motionBlur(img, numberOf(type, s, "angle"), numberOf(type, s, "distance"));
+    } else if (type == "sharpen") {
+        unsharpMaskThreshold(img, numberOf(type, s, "radius"), numberOf(type, s, "amount"),
+                             static_cast<int>(numberOf(type, s, "threshold")));
+    } else if (type == "high_pass") {
+        highPass(img, numberOf(type, s, "radius"));
+    } else if (type == "median") {
+        medianFilter(img, static_cast<int>(numberOf(type, s, "radius")));
+    } else if (type == "noise") {
+        addNoise(img, numberOf(type, s, "amount"), settingBool(s, "gaussian", true), settingBool(s, "monochrome", false),
+                 static_cast<std::uint32_t>(numberOf(type, s, "seed")));
+    } else if (type == "oil_paint") {
+        oilPaint(img, static_cast<int>(numberOf(type, s, "radius")));
+    } else if (type == "find_edges") {
+        findEdges(img);
     }
 }
 

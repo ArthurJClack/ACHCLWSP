@@ -378,6 +378,13 @@ void Shell::openFile(const std::string& path) {
             return;
         }
         if (firstError.empty()) firstError = r.message;
+        // a locked PDF: ask for its password and try again
+        const CommandInfo* info = find(id);
+        if (r.message.find("password-protected") != std::string::npos && info &&
+            std::any_of(info->params.begin(), info->params.end(), [](const ParamSpec& ps) { return ps.name == "password"; })) {
+            passwordAsk_ = {true, path, id, {}, {}};
+            return;
+        }
     }
     result_ = Result::failure("Couldn't open " + path + ": " + friendlyError(firstError));
     suggestOtherApp(path, false);
@@ -461,6 +468,11 @@ void Shell::dropFile(const std::string& path) {
 void Shell::askFolder(const std::string& purpose) {
     auto* req = new DialogRequest{{DialogTarget::PanelFolder, purpose, 0}};
     SDL_ShowOpenFolderDialog(onDialog, req, window_, nullptr, false);
+}
+
+void Shell::askFile(const std::string& purpose) {
+    auto* req = new DialogRequest{{DialogTarget::PanelFolder, purpose, 0}};  // answered through folderChosen too
+    SDL_ShowOpenFileDialog(onDialog, req, window_, nullptr, 0, nullptr, false);
 }
 
 void Shell::showFieldDialog(std::size_t index) {

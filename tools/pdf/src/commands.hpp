@@ -68,5 +68,8 @@ void registerEditCommands(Session& s);
 void registerCoverCommands(Session& s);
 void registerMarkCommands(Session& s);
 void registerPageCommands(Session& s);
+void registerSignCommands(Session& s);
+void registerOcrCommands(Session& s);
+std::shared_ptr<PdfDoc> findPdfDoc(Session& s, const Params& p, std::string& id, std::string& error);
 
 }  // namespace wetwaresuite::pdf::tool

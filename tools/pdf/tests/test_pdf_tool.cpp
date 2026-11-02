@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <cstdlib>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -194,6 +195,71 @@ int main() {
         CHECK(again.ok);
         Result f2 = run("pdf.fields", {});
         CHECK(contains(f2.message, "Ann Example") && contains(f2.message, "Yes"));
+    }
+
+    // ---- passwords ----
+    {
+        CHECK(run("pdf.open", {{"path", (dir / "in.pdf").string()}}).ok);
+        CHECK(run("pdf.protect", {{"password", str("open sesame")}, {"copy", false}}).ok);
+        CHECK(run("pdf.save", {{"path", (dir / "locked.pdf").string()}}).ok);
+        Result noPass = run("pdf.open", {{"path", (dir / "locked.pdf").string()}});
+        CHECK(!noPass.ok && contains(noPass.message, "password"));
+        CHECK(!run("pdf.open", {{"path", (dir / "locked.pdf").string()}, {"password", str("wrong")}}).ok);
+        Result unlocked = run("pdf.open", {{"path", (dir / "locked.pdf").string()}, {"password", str("open sesame")}});
+        CHECK(unlocked.ok);
+        CHECK(contains(run("pdf.text", {}).message, "Hello World"));
+        // saving a file opened with its password keeps it locked; remove=true takes it off
+        CHECK(run("pdf.save", {{"path", (dir / "still.pdf").string()}}).ok);
+        CHECK(!run("pdf.open", {{"path", (dir / "still.pdf").string()}}).ok);
+        CHECK(run("pdf.open", {{"path", (dir / "still.pdf").string()}, {"password", str("open sesame")}}).ok);
+        CHECK(run("pdf.protect", {{"remove", true}}).ok);
+        CHECK(run("pdf.save", {{"path", (dir / "open.pdf").string()}}).ok);
+        CHECK(contains(pageText(dir / "open.pdf"), "Hello World"));
+    }
+
+    // ---- digital signatures (a throwaway identity, not the user's) ----
+    {
+        const std::string idPath = (dir / "identity.pem").string();
+#ifdef _WIN32
+        _putenv_s("WETWARESUITE_IDENTITY", idPath.c_str());
+#else
+        setenv("WETWARESUITE_IDENTITY", idPath.c_str(), 1);
+#endif
+        CHECK(run("pdf.open", {{"path", (dir / "in.pdf").string()}}).ok);
+        CHECK(!run("pdf.sign_digital", {}).ok);  // no identity yet and no name to make one
+        Result sd = run("pdf.sign_digital", {{"name", str("Test Signer")}, {"reason", str("Approved")}});
+        CHECK(sd.ok && strField(sd, "signer") == "Test Signer");
+        CHECK(fs::exists(idPath));
+        CHECK(!run("pdf.protect", {{"password", str("x")}}).ok || !run("pdf.save", {{"path", (dir / "both.pdf").string()}}).ok);
+        run("pdf.protect", {{"remove", true}});
+        CHECK(run("pdf.save", {{"path", (dir / "signed.pdf").string()}}).ok);
+        Result sigs = run("pdf.signatures", {{"path", (dir / "signed.pdf").string()}});
+        CHECK(sigs.ok && intField(sigs, "signatures") == 1 && contains(sigs.message, "Test Signer"));
+        const Value* valid = sigs.field("valid");
+        CHECK(valid && std::holds_alternative<bool>(*valid) && std::get<bool>(*valid));
+        Result none = run("pdf.signatures", {{"path", (dir / "in.pdf").string()}});
+        CHECK(none.ok && intField(none, "signatures") == 0);
+        Result who = run("pdf.identity", {});
+        CHECK(who.ok && contains(who.message, "Test Signer"));
+    }
+
+    // ---- reading scanned text ----
+    {
+        auto scan = std::make_shared<pdf::ImageData>();
+        scan->pixels = raster::Image(1240, 300, {255, 255, 255, 255});
+        pdf::drawText(scan->pixels, 80, 140, "Scanned receipt total 42", pdf::Font{}, 46, {20, 20, 20, 255});
+        std::vector<pdf::Page> pages(1);
+        pages[0].width = 595.28;
+        pages[0].height = 144;
+        pages[0].image(0, 0, 595.28, 144, scan);
+        writeBytes(dir / "scan.pdf", pdf::writePdf(pages));
+        CHECK(run("pdf.open", {{"path", (dir / "scan.pdf").string()}}).ok);
+        CHECK(!contains(run("pdf.text", {}).message, "receipt"));
+        Result ocr = run("pdf.ocr", {});
+        CHECK(ocr.ok && intField(ocr, "pages") == 1);
+        CHECK(contains(run("pdf.find", {{"text", str("receipt")}}).message, "receipt") || intField(run("pdf.find", {{"text", str("receipt")}}), "count") > 0);
+        CHECK(run("pdf.save", {{"path", (dir / "searchable.pdf").string()}}).ok);
+        CHECK(contains(pageText(dir / "searchable.pdf"), "receipt"));
     }
 
     // ---- over MCP ----

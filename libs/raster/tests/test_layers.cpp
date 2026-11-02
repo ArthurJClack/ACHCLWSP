@@ -141,7 +141,7 @@ void testGroups() {
 
 void testAdjustments() {
     const int W = 20, H = 10;
-    CHECK(adjustmentLayerTypes().size() == 15);
+    CHECK(adjustmentLayerTypes().size() == 23);
     std::vector<Layer> layers = {{"red", Image(W, H, {255, 0, 0, 255})}};
     Layer adj("Invert");
     adj.kind = LayerKind::Adjustment;
@@ -202,6 +202,22 @@ void testAdjustments() {
     CHECK(!checkAdjustment("gradient_map", {{"colors", "#000"}}).empty() && checkAdjustment("gradient_map", {{"colors", "#000,rgb(1,2,3)"}}).empty());
     CHECK(checkAdjustment("hue_saturation", {{"hue", "30"}, {"range", "greens"}}).empty());
     CHECK(!allAdjustmentFields().empty());
+
+    // smart filters: a blur layer softens the edge live and the pixels underneath stay sharp
+    std::vector<Layer> sharp = {{"bw", Image(W, H, {0, 0, 0, 255})}};
+    for (int y = 0; y < H; ++y)
+        for (int x = W / 2; x < W; ++x) sharp[0].image.set(x, y, {255, 255, 255, 255});
+    Layer blur("Blur");
+    blur.kind = LayerKind::Adjustment;
+    blur.settings = {{"type", "gaussian_blur"}, {"radius", "3"}};
+    blur.clip = true;
+    sharp.push_back(blur);
+    const Color edge = composite(sharp, W, H).at(W / 2, 5);
+    CHECK(edge.r > 30 && edge.r < 225);
+    CHECK(sharp[0].image.at(W / 2, 5).r == 255);
+    CHECK(run("find_edges", {}, {90, 90, 90, 255}).a == 255);
+    CHECK(checkAdjustment("gaussian_blur", {{"radius", "300"}}).find("0..250") != std::string::npos);
+    CHECK(checkAdjustment("sharpen", {{"amount", "120"}}).empty());
 }
 
 void testStyles() {

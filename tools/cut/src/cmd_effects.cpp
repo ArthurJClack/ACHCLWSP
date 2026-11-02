@@ -175,6 +175,39 @@ void registerKeyframeCommands(Session& session) {
                 return Result::success("removed the keyframe of " + prop + " at " + num(t) + "s on " + c->id);
             }));
 
+    reg.add({"cut.move_keyframe", "Move Keyframe",
+             "Slide the keyframes at one moment of a clip (every property's, or just `property`) to another moment, "
+             "keeping their values and eases (what dragging a diamond on the timeline does). from and to are seconds "
+             "into the clip.",
+             {docParam(), clipParam(), {"from", ParamType::Number, "the keyframes' time, seconds into the clip", true},
+              {"to", ParamType::Number, "where they go, seconds into the clip", true},
+              {"property", ParamType::String, "only this property's keyframe", false, animatableProperties()}, previewParam()},
+             true},
+            cutCommand(session, [](Timeline& tl, const Params& p) {
+                Clip* c = requireClip(tl, p);
+                const double from = numberParam(p, "from"), to = numberParam(p, "to");
+                if (to < -1e-3 || to > c->length() + 1e-3) return Result::failure("to must be inside the clip: 0.." + num(c->length()) + "s");
+                const std::string only = stringParam(p, "property");
+                const double tol = 0.5 / tl.settings.fps + 1e-4;
+                int moved = 0;
+                for (auto& [prop, ks] : c->keys) {
+                    if (!only.empty() && prop != only) continue;
+                    auto hit = std::find_if(ks.begin(), ks.end(), [&](const Key& k) { return std::abs(k.t - from) <= tol; });
+                    if (hit == ks.end()) continue;
+                    Key k = *hit;
+                    ks.erase(hit);
+                    k.t = std::clamp(to, 0.0, c->length());
+                    // a keyframe already at the new time gives way
+                    ks.erase(std::remove_if(ks.begin(), ks.end(), [&](const Key& o) { return std::abs(o.t - k.t) < 1e-4; }), ks.end());
+                    ks.push_back(k);
+                    std::sort(ks.begin(), ks.end(), [](const Key& a, const Key& b) { return a.t < b.t; });
+                    ++moved;
+                }
+                if (!moved) return Result::failure("no keyframe on " + c->id + " at " + num(from) + "s (cut.keyframes lists them)");
+                Result r = clipResult("moved " + std::to_string(moved) + " keyframe(s) on " + c->id + " from " + num(from) + "s to " + num(to) + "s", tl, p, c->id);
+                return r.with("moved", static_cast<std::int64_t>(moved));
+            }));
+
     reg.add({"cut.keyframes", "List Keyframes", "List a clip's keyframes: property, time into the clip, value and ease.",
              {docParam(), clipParam()}, false, true},
             cutCommand(session, [](Timeline& tl, const Params& p) {

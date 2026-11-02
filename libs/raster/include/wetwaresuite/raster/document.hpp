@@ -2,6 +2,7 @@
 // commands share: dirty-region undo, doc/layer params, previews.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -42,6 +43,12 @@ public:
     void markChanged(const PixelRect& r) { changes_.rect.add(r); }
     void markAllChanged() { changes_.all = true; }
 
+    // What the file it came from held: 16 for 16-bit PNG/TIFF/PSD (saves keep 16 bits unless told
+    // otherwise; edits themselves run at 8 bits per channel), and its embedded colour profile, which
+    // was converted to sRGB on open ("" = none).
+    int sourceBits = 8;
+    std::string colorProfile;
+
     std::string kind() const override { return "image"; }
     std::string summary() const override;
     std::unique_ptr<Attachment> preview() const override;
@@ -60,7 +67,9 @@ std::shared_ptr<ImageDoc> newImage(int width, int height, Color background);
 std::shared_ptr<ImageDoc> openImage(const std::filesystem::path& path);
 // .ora keeps everything; .psd keeps the layers (`notes` says what it couldn't keep: adjustment
 // layers, editable text...); other formats are flattened. .psd opens layer by layer when it can.
-void saveImage(const ImageDoc& doc, const std::filesystem::path& path, int quality = 90, std::vector<std::string>* notes = nullptr);
+// bits: 8 or 16 per channel for .png/.tif; 0 = what the source file had (doc.sourceBits).
+void saveImage(const ImageDoc& doc, const std::filesystem::path& path, int quality = 90, std::vector<std::string>* notes = nullptr,
+               int bits = 0);
 bool canOpenImage(const std::filesystem::path& path);
 bool canSaveImage(const std::filesystem::path& path);
 

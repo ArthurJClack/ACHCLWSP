@@ -6,7 +6,9 @@
 - **Animated pixel art**: Aseprite-style sprites with frames, durations, layers, animation tags and a palette (optionally indexed colour). Open and save `.aseprite`/`.ase`, draw pixels, and export sprite sheets with Aseprite JSON, Godot SpriteFrames and animated GIFs.
 - **Textures and 2D art**: pack sprite sheets with a JSON atlas engines can read, cut sheets back into frames, make normal maps, make textures tile, reduce pictures to pixel-art palettes, outline sprites, resize to powers of two, pack greyscale maps into one texture's channels (ORM maps) and trim transparent borders.
 
-In the window, an open sprite gets pixel tools on the canvas (Pencil, Eraser, Line, Box, Ellipse, Bucket, Pick) with frames, onion skin, playback, layers and palette swatches beside it; every click runs the same commands shown here. Meshes and textures have no canvas tools yet. Each task below is shown three ways:
+Sprites and meshes made here go straight into Godot scenes with [scenes](scene.md) (`scene.add type=Sprite2D props="texture=..."`, `mesh=model.glb`).
+
+In the window, an open sprite gets pixel tools on the canvas (Pencil, Eraser, Line, Box, Ellipse, Bucket, Shade, Pick) with frames, onion skin, playback (each tag plays in its own direction and repeat count), layers and palette swatches (right-click one to swap it) beside it; every click runs the same commands shown here. Meshes and textures have no canvas tools yet. Each task below is shown three ways:
 
 - **CLI**: single `wetwaresuite` commands that read files and write files.
 - **Batch**: a script for multi-step work with `-> name` captures and `$name` reuse (see [headless and batch](headless-and-batch.md)).
@@ -533,6 +535,22 @@ saved export/hit.gif
 ...
 ```
 
+**Shading, palette swaps and tag loops.** Three Aseprite habits, the same in the window and in batch:
+
+```
+# the shading ink: each pixel under the stroke steps one entry along a ramp (once per stroke)
+forge.draw doc=$s tool=shade points=3,9,12,9 ramp=#1d2b53,#29adff,#c2c3c7,#fff1e8
+forge.draw doc=$s tool=shade points=3,12,12,12 step=-1          # darker, along the palette when no ramp=
+# a palette swap: every pixel of each old entry takes the new colour, in every frame (RGBA sprites too)
+forge.sprite_palette doc=$s action=swap colors=#000000,#2b1d53,#53257e,#518700
+forge.sprite_palette doc=$s action=swap index=12 color=#ff77a8    # one entry
+forge.sprite_palette doc=$s action=swap index=3 with=9            # trade two entries and their pixels
+# tags keep a direction and repeat count; sprite_info lists them (tag_directions, tag_repeats)
+forge.tag_add doc=$s name=wobble from=0 to=3 direction=pingpong repeat=2
+```
+
+In the window, the **Shade** tool (D) does the first (hold Shift for darker), right-clicking a swatch offers **Swap to** the current colour, and each tag row has its own **Play** button that runs the tag forward, reversed or ping-pong and stops after its repeats (0 loops forever).
+
 `forge.sprite_open` also reads a sprite sheet (`path=sheet.png columns=6`, or `cell_width=`/`cell_height=`), a folder of frame images (`input_dir=`) or a list (`files=`), so loose frames from another tool become one animation to tag and export.
 
 **Claude.**
@@ -540,6 +558,33 @@ saved export/hit.gif
 > Make me a 32x32 pixel-art coin on the DB16 palette that spins in 6 frames at 80 ms, save it as coin.aseprite and a GIF, and give me a sheet with Godot SpriteFrames.
 
 Claude calls `forge_sprite_new` with `palette=db16`, draws with `forge_draw` (checking each step with `preview=true`), adds frames with `forge_frame_add`, tags them with `forge_tag_add`, and saves with `forge_sprite_save` and `forge_sprite_export godot=coin.tres`.
+
+## Task 6: bake a high-poly model into normal and AO maps
+
+Sculpt or model the detail on a dense mesh, keep a light mesh for the game, and bake the detail into textures that make the light one look dense: a **normal map** (tangent space, OpenGL style with green up, which Godot and Blender read; `directx=true` flips green for Unreal) and an **ambient occlusion** map (how much sky each spot sees: creases go dark). The maps follow the low mesh's UVs, so unwrap it first: `model.uv_unwrap` in the model app (then export it as `.glb` or `.obj`), or one of `forge.mesh_uv`'s projections. Both meshes must sit in the same place, as they do when the low one is a decimated or retopologised copy of the high one.
+
+```text
+# a flat game panel (2 triangles) and its 115,000-triangle sculpt with rivets, grooves and a dome
+forge.mesh_open path=panel_low.obj -> low
+forge.mesh_uv doc=$low projection=planar axis=z
+forge.mesh_open path=panel_high.obj -> high
+forge.mesh_normals doc=$high crease=89
+forge.mesh_bake doc=$low high=$high normal=out/panel_normal.png ao=out/panel_ao.png size=512 samples=32 distance=0.2
+```
+
+```text
+baked 512x512 from 115200 onto 2 triangles
+  normal map: out/panel_normal.png
+  ambient occlusion: out/panel_ao.png
+texels: 262144
+missed: 0
+```
+
+![the baked normal and AO maps](images/forge-bake-panel.png)
+
+It takes about a second and a half on four cores. `distance` is how far apart the two surfaces may be (by default 4% of the model's size): if the message says many texels found no high surface, raise it. `samples` trades AO smoothness for time, `ao_distance` sets how far away something still casts shade, and `padding` grows colour a few pixels past each UV island so seams don't show when the texture is filtered. `high=` takes a file or an open mesh, `low=` a file instead of `doc=`.
+
+**With Claude:** "Bake normal and AO maps from statue_high.glb onto statue_low.glb at 1024 for Godot." Claude calls `forge_mesh_bake` with `low`, `high`, `normal`, `ao` and `size=1024`.
 
 ## More texture helpers
 
@@ -678,6 +723,23 @@ Not undoable (writes files). Writes `<name>_lod0.<ext>` .. `_lodN`.
 | `ascii` | boolean | no | false | STL/PLY as text |
 
 Returns `files`, `triangles` (per level), `levels`.
+
+#### forge.mesh_bake
+Bake a high-poly model's detail into a tangent-space normal map and an ambient occlusion map on the low-poly mesh's UVs. Writes the PNGs and returns them as attachments, with `texels` and `missed`.
+
+| Parameter | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `doc` | string | no | | the low-poly mesh (open, with UVs) |
+| `low` | string | no | | a low-poly model file instead of `doc` |
+| `high` | string | yes | | the high-poly model file, or an open mesh id |
+| `normal` | string | no | | where to write the normal map (.png) |
+| `ao` | string | no | | where to write the AO map (.png) |
+| `size` | integer | no | 512 | texture size, px (square) |
+| `samples` | integer | no | 24 | AO rays per texel |
+| `distance` | number | no | 4% of the model | how far apart the two surfaces may be |
+| `ao_distance` | number | no | 15% of the model | how far away something still darkens AO |
+| `padding` | integer | no | 4 | px grown past UV island edges |
+| `directx` | boolean | no | false | flip green for DirectX/Unreal |
 
 #### forge.mesh_batch
 Not undoable. Processes every model in a folder: weld, decimate, axes, scale, center, floor, normals, UVs, save.

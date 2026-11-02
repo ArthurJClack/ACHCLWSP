@@ -1,6 +1,6 @@
 # Levels: game levels and tilemaps
 
-`levels` builds 2D game levels, from the command line, from scripts, from Claude, or with click tools in the window. A level is a tile map: a grid of cells, each holding a tile cut from a tileset image, stacked in layers, plus object layers for things that aren't tiles (the player's spawn point, enemies, chests, doors, trigger zones). You can paint tiles one by one or with a random brush, fill, flood, draw lines, stamp blocks, auto-tile edges (16-tile, 47-tile blob, or Tiled Wang/terrain sets), animate tiles, give tiles collision shapes, scatter decoration at random, generate whole caves, dungeons and overworlds from a seed, and arrange maps into a world. Levels go out as Tiled TMX/TMJ (which Godot, Unity, Phaser, Defold, LÖVE, MonoGame and most engines import), a Godot 4 scene, a plain JSON file for your own loader, LDtk-lite JSON, CSV per layer, or a flat PNG.
+`levels` builds 2D game levels, from the command line, from scripts, from Claude, or with click tools in the window. A level is a tile map: a grid of cells, each holding a tile cut from a tileset image, stacked in layers, plus object layers for things that aren't tiles (the player's spawn point, enemies, chests, doors, trigger zones). You can paint tiles one by one or with a random brush, fill, flood, draw lines, stamp blocks, auto-tile edges (16-tile, 47-tile blob, or Tiled Wang/terrain sets), animate tiles, give tiles collision shapes, scatter decoration at random, generate whole caves, dungeons and overworlds from a seed, and arrange maps into a world. Levels go out as Tiled TMX/TMJ (which Godot, Unity, Phaser, Defold, LÖVE, MonoGame and most engines import), a Godot 4 scene, a plain JSON file for your own loader, LDtk-lite JSON, CSV per layer, or a flat PNG. To put a level into a Godot game with a player, enemies and a HUD around it, use [scenes](scene.md): `scene.add_level` instances it in a scene you edit like Godot's editor.
 
 Each task below is shown three ways:
 
@@ -676,10 +676,47 @@ Claude calls `levels_world_new`, `levels_world_add` for each map (making the new
 Opening a `.tmx`, `.tmj` or `.ldtk` file in the game app's window (a `.world` file opens each of its maps) shows the level on the canvas with click tools above it and the layers and tiles beside it:
 
 - **Paint** (click or drag over cells), **Rect** (drag a rectangle), **Erase** (drag over cells), **Fill** (flood fill) and **Pick** (take the tile under the mouse) work on the tile layer chosen on the right; the tile goes down where a ghost of it shows under the mouse.
+- **Terrain (T)** paints terrain like Tiled's terrain brush: drag over cells and they, and the cells around them, get the right edge and corner tiles as you go (the tileset's Wang set if it has one, else its 16- or 47-tile auto-tile sheet). Hold **Shift** to erase terrain; the edges around the hole follow.
+- **Stamp (C)**: drag over a block of the map to copy it, then click to stamp copies anywhere (Esc to pick a new block).
 - **Object** drags a box on the chosen object layer (or the top one); `+ Tiles` and `+ Objects` add layers.
-- The tileset shows beside the canvas: click a tile to paint with it. The grid can be turned off.
+- **Select (S)** works on objects: click one to select it, drag it to move it (Ctrl snaps to whole cells), drag its corner handle to resize it, Delete removes it. The panel on the right edits its name, type and custom properties (type a property and a value, press Enter; an empty value removes it).
+- The tileset shows beside the canvas: click a tile to paint with it, or drag over several (a tree, a house) and Paint stamps the whole block where you click. The grid can be turned off.
 
-Each stroke is one `levels.paint`, `levels.fill_rect`, `levels.erase`, `levels.flood_fill` or `levels.object_add` command, so Undo takes back a whole stroke and the history panel names it.
+Each stroke is one `levels.paint`, `levels.terrain`, `levels.stamp`, `levels.fill_rect`, `levels.erase`, `levels.flood_fill`, `levels.object_add`, `levels.object_move` or `levels.object_set` command, so Undo takes back a whole stroke and the history panel names it.
+
+The terrain brush is a command too, for scripts and Claude:
+
+```text
+levels.new width=20 height=12 -> m
+levels.tileset_placeholder doc=$m path=art/auto.png style=autotile
+levels.terrain doc=$m cells=2,2,3,2,4,2,3,3
+levels.terrain doc=$m cells=3,3 erase=true
+```
+
+```text
+painted terrain in 4 cells; auto-tiled 4 cells on ground with tiles auto:0..auto:15
+erased terrain in 1 cell; auto-tiled 1 cell on ground with tiles auto:0..auto:15
+```
+
+### Isometric and hexagonal maps
+
+`levels.new` takes `orientation=isometric` (diamonds), `staggered` (diamonds in shifted rows) or `hexagonal`, with `stagger_axis=y` (rows shift: pointy-top hexagons) or `x` (columns shift: flat-top), `stagger_index=odd|even` and `hex_side` (the flat side's length; half the tile by default). Tiled's TMX/TMJ files with those shapes open too. Cells keep their column and row numbers, so every paint, fill and stamp command works the same; the picture puts each tile where Tiled would. `levels.tileset_placeholder` cuts its tiles to the map's shape, and the Godot export sets the TileSet's tile shape and layout.
+
+```text
+levels.new width=8 height=8 tile_width=32 tile_height=16 orientation=isometric -> a
+levels.tileset_placeholder doc=$a path=iso.png style=colors tiles=8
+levels.fill_rect doc=$a x=0 y=0 width=8 height=8 tile=2
+levels.pick doc=$a px=128 py=8
+```
+
+```text
+cell 0,0
+x: 0
+y: 0
+outline: 128,0,144,8,128,16,112,8
+```
+
+`levels.pick` turns a pixel of the map picture into a cell (and its outline), which is how clicks land in the window: on these maps the cell under the mouse is outlined in its own shape and the grid is drawn as diamonds or hexagons.
 
 ## 10. Auto-tiling in detail
 
@@ -745,7 +782,7 @@ Which tiles are solid: `solid=any` (any tile on the `from` layers, default every
 
 | format | open | save | notes |
 | --- | --- | --- | --- |
-| Tiled TMX (`.tmx`) | yes | yes | orthogonal maps; tile data CSV, base64, base64+zlib or base64+gzip (read); writes `csv`, `base64` or `zlib`; embedded or external `.tsx` tilesets (read); infinite maps open as finite ones covering their chunks; group layers are flattened (their offsets, parallax and tint pass down); image layers, layer offsets, parallax and tint, tile animations, tile collision shapes, Wang sets, polygon/polyline/rotated objects and tile objects are kept |
+| Tiled TMX (`.tmx`) | yes | yes | orthogonal, isometric, staggered and hexagonal maps; tile data CSV, base64, base64+zlib or base64+gzip (read); writes `csv`, `base64` or `zlib`; embedded or external `.tsx` tilesets (read); infinite maps open as finite ones covering their chunks; group layers are flattened (their offsets, parallax and tint pass down); image layers, layer offsets, parallax and tint, tile animations, tile collision shapes, Wang sets, polygon/polyline/rotated objects and tile objects are kept |
 | Tiled JSON (`.tmj`, or `.json` from Tiled) | yes | yes | same coverage as TMX; external `.tsj`/`.tsx` tilesets read |
 | plain JSON (`.json`) | yes | yes | `format: wetwaresuite-level`: `data` is rows of gids (0 empty), tilesets with `firstGid`, objects with typed properties |
 | LDtk-lite (`.ldtk`, or `.json` from LDtk) | yes (one level) | yes | Tiles and auto-layer tiles, IntGrid (as collision grids), entities with fields; one tileset per tile layer (others are left out with a warning); image layers are left out; cells must be square |
@@ -1483,7 +1520,7 @@ List a world's levels with their positions and sizes, and render the whole world
 
 ## 14. Limitations
 
-- **Orthogonal maps only.** Isometric, hexagonal and staggered maps are refused with a message. Infinite (chunked) maps open as finite maps just big enough for their chunks and are saved finite.
+- **Isometric, staggered and hexagonal maps** draw, paint, pick cells and go in and out of TMX, TMJ and Godot, but auto-tiling, the terrain brush and the generators still think in squares, and objects on them are placed in plain pixels (Tiled puts isometric objects in projected coordinates). Infinite (chunked) maps open as finite maps just big enough for their chunks and are saved finite.
 - **The window's tools are basic.** Paint, rectangles, erase, fill, pick and boxes for objects; no stamps, terrain brush, object editing or selection there yet (use the commands, or the form for any command in the right panel).
 - **TMX/TMJ coverage.** Object templates and text objects are not kept (text objects open as boxes, without their text). Group layers are flattened into their children. Zstandard-compressed tile data can't be read. Image-collection tilesets (one image per tile) open without pixels, so their tiles draw as colours. Tile collision shapes ignore the tile's flips.
 - **LDtk-lite** writes and reads a single level of an LDtk project with the fields engines' loaders use (layer instances with grid tiles, IntGrid values, entities with fields). The LDtk editor may want more definitions than are written; treat it as an export for runtimes, not a round trip with the editor. Multi-world projects and levels in separate files aren't read. One tileset per tile layer and square cells.

@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "media.hpp"
+#include "proxy.hpp"
 #include "render_internal.hpp"
 #include "wetwaresuite/raster/codec.hpp"
 #include "wetwaresuite/raster/ops.hpp"
@@ -198,7 +199,8 @@ struct VideoReader::Proc {
 };
 
 VideoReader::VideoReader(std::string path, int width, int height, double rate)
-    : path_(std::move(path)), w_(width), h_(height), rate_(rate > 0 && rate <= 240 ? rate : 30) {}
+    : path_(std::move(path)), w_(width), h_(height), rate_(rate > 0 && rate <= 240 ? rate : 30),
+      big_(static_cast<long>(width) * height >= 1280L * 720L) {}
 
 VideoReader::~VideoReader() = default;
 
@@ -206,6 +208,11 @@ bool VideoReader::restart(double at, std::string& error) {
     proc_ = std::make_unique<Proc>();
     const std::string vf = "fps=" + tnum(rate_) + ",scale=" + std::to_string(w_) + ":" + std::to_string(h_) + ":flags=bilinear,format=rgba";
     std::vector<std::string> args = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"};
+    // big sources decode on the graphics card when there is one (small ones start faster on the CPU)
+    if (big_) {
+        const auto& hw = hardwareDecodeArgs();
+        args.insert(args.end(), hw.begin(), hw.end());
+    }
     if (at > 0) args.insert(args.end(), {"-ss", tnum(at)});
     args.insert(args.end(), {"-i", path_, "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"});
     if (!proc_->stream.start(args, false, true, error)) {
@@ -308,8 +315,9 @@ bool FrameContext::Impl::video(const std::string& path, double sourceTime, int w
         std::lock_guard<std::mutex> g(hookLock());
         if (hook()) return hook()(path, sourceTime, width, height, out);
     }
-    if (approximate && scrubFrame(path, sourceTime, width, height, out)) return true;
-    const std::string key = path + "|" + std::to_string(width) + "x" + std::to_string(height);
+    const std::string& file = preview ? previewSource(path) : path;
+    if (approximate && scrubFrame(file, sourceTime, width, height, out)) return true;
+    const std::string key = file + "|" + std::to_string(width) + "x" + std::to_string(height);
     auto it = readers.find(key);
     if (it == readers.end()) {
         if (!ffmpegPath()) throw std::runtime_error(missingFfmpeg());
@@ -319,7 +327,7 @@ bool FrameContext::Impl::video(const std::string& path, double sourceTime, int w
             readers.erase(oldest->first);
             readerUse.erase(oldest);
         }
-        it = readers.emplace(key, std::make_unique<VideoReader>(path, width, height, rate)).first;
+        it = readers.emplace(key, std::make_unique<VideoReader>(file, width, height, rate)).first;
     }
     readerUse[key] = ++useCounter;
     std::string err;
@@ -360,6 +368,8 @@ const Lut3d* FrameContext::Impl::lut(const std::string& path) {
 
 FrameContext& previewContext() {
     static FrameContext ctx;
+    static const bool marked = (ctx.impl().preview = true);
+    (void)marked;
     return ctx;
 }
 

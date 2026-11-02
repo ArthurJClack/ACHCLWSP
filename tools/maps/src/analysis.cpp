@@ -629,6 +629,7 @@ Geometry traceField(const FieldGrid& grid, std::vector<double> val) {
 }  // namespace
 
 Geometry bufferUnion(const std::vector<const Geometry*>& gs, double d, int resolution) {
+    if (d != 0 && exactFits(gs, 48)) return exactBuffer(gs, d, 48);
     Geometry out;
     out.type = GeomType::Polygon;
     BBox ll;
@@ -661,6 +662,7 @@ Geometry bufferUnion(const std::vector<const Geometry*>& gs, double d, int resol
 }
 
 Geometry overlay(const std::vector<const Geometry*>& a, const std::vector<const Geometry*>& b, OverlayOp op, int resolution) {
+    if (exactFits(a, b)) return exactOverlay(a, b, op);
     BBox ll;
     for (const Geometry* g : a) ll.add(bboxOf(*g));
     for (const Geometry* g : b) ll.add(bboxOf(*g));
@@ -694,6 +696,7 @@ Geometry buffer(const Geometry& g, double d, int resolution, int circleSegments)
         out.polygons.push_back(geodesicCircle(g.points[0], d, std::clamp(circleSegments, 8, 720)));
         return out;
     }
+    if (d != 0 && exactFits({&g}, circleSegments)) return exactBuffer({&g}, d, circleSegments);
     return bufferUnion({&g}, d, resolution);
 }
 

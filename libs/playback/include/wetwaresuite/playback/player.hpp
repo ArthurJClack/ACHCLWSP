@@ -51,6 +51,10 @@ public:
     // Starts playing (replacing whatever was playing). Returns false with error set
     // when the buffer is empty or no device (not even the silent one) could open.
     bool play(const PlayRequest& request, std::string& error);
+    // Swaps in a new version of what's playing (an edit was made) without stopping: the
+    // playhead keeps its time, and a range that ran to the old end runs to the new one.
+    // Returns false when nothing is playing or paused.
+    bool replace(std::shared_ptr<const audio::Buffer> buffer, std::string& error);
     void pause();
     void resume();
     void stop();
@@ -71,6 +75,40 @@ public:
 
 private:
     Player();
+    std::unique_ptr<Impl> impl_;
+};
+
+// Live input recording from a microphone or line in, one at a time per process.
+// With no sound card it records silence in real time, so scripts behave the same;
+// input "tone" records a 440 Hz test tone instead of a device (for checking levels).
+struct RecordStatus {
+    bool recording = false;
+    double seconds = 0;    // recorded so far
+    double peakDb = -200;  // loudest sample of the last ~50 ms, for a level meter
+    double maxPeakDb = -200;  // loudest since the start: 0 means it clipped
+    int rate = 0, channels = 0;
+    std::string device;
+    bool silent = false;
+};
+
+class Recorder {
+public:
+    static Recorder& instance();
+    ~Recorder();
+    Recorder(const Recorder&) = delete;
+    Recorder& operator=(const Recorder&) = delete;
+
+    // device: "default", a name from devices(), or "tone". maxSeconds caps the take.
+    bool start(int rate, int channels, const std::string& device, double maxSeconds, std::string& error);
+    // Ends the take and hands it over (empty when nothing was recording).
+    audio::Buffer stop();
+    RecordStatus status() const;
+    std::vector<std::string> devices();
+
+    struct Impl;
+
+private:
+    Recorder();
     std::unique_ptr<Impl> impl_;
 };
 

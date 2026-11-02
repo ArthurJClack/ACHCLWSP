@@ -115,6 +115,7 @@ std::string xmlEscape(const std::string& s) {
 constexpr double kUnit = 7.2;  // points per grid unit (0.1 in)
 
 const Color kWire = rgb(0x008400);
+const Color kBus = rgb(0x0000c8);
 const Color kBody = rgb(0x840000);
 const Color kFillBody = rgb(0xffffc2);
 const Color kText = rgb(0x006464);
@@ -324,6 +325,16 @@ pdf::Page schematicPage(const Circuit& c, const SheetStyle& style) {
                 if (!touch) continue;
                 for (const auto& p : w.pts) changed = hiPoints.insert(pkey(p)).second || changed;
             }
+        }
+    }
+    // buses: thick blue lines, their entries, the bus name
+    for (const auto& b : c.buses) {
+        for (std::size_t i = 1; i < b.pts.size(); ++i) sp.line(b.pts[i - 1], b.pts[i], kBus, 0.36);
+        for (const auto& [a, e] : b.entries) sp.line(a, e, kBus, 0.14);
+        if (b.pts.size() >= 2) {
+            const Pt a = b.pts[0], n = b.pts[1];
+            const bool horiz = std::abs(n.x - a.x) >= std::abs(n.y - a.y);
+            sp.text(a.x + (horiz ? 0.2 : 0.4), a.y - (horiz ? 0.4 : 0.2), b.name, 0.8, kBus, -1, true);
         }
     }
     // wires and junctions
@@ -610,7 +621,8 @@ private:
 };
 
 void drawPad(Canvas& cv, const WorldPad& p, Color c) {
-    if (p.shape == PadShape::Rect) cv.box(p.pos.x - p.w / 2, p.pos.y - p.h / 2, p.pos.x + p.w / 2, p.pos.y + p.h / 2, c);
+    if (p.angle != 0 && p.shape == PadShape::Rect) cv.polygon(padOutline(p), c);
+    else if (p.shape == PadShape::Rect) cv.box(p.pos.x - p.w / 2, p.pos.y - p.h / 2, p.pos.x + p.w / 2, p.pos.y + p.h / 2, c);
     else {
         const auto s = geom::padShape(p);
         cv.capsule(s.a, s.b, s.r, c);

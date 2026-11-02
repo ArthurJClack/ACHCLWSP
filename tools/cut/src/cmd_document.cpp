@@ -51,6 +51,7 @@ std::string trackText(const Track& t) {
     if (t.hidden) s += ", hidden";
     if (t.solo) s += ", solo";
     if (std::abs(t.volume - 1) > kEps) s += ", volume " + num(t.volume);
+    if (!t.duckUnder.empty()) s += ", ducks " + num(t.duckDb) + " dB under " + (t.duckUnder == "auto" ? std::string("the other tracks") : t.duckUnder);
     return s + ")";
 }
 
@@ -246,7 +247,10 @@ void registerDocumentCommands(Session& session) {
               {"muted", ParamType::Bool, "silence the track", false},
               {"hidden", ParamType::Bool, "don't show the track's picture", false},
               {"solo", ParamType::Bool, "play only soloed tracks (of the same kind)", false},
-              {"volume", ParamType::Number, "track volume: 1 = unchanged (0..4)", false}},
+              {"volume", ParamType::Number, "track volume: 1 = unchanged (0..4)", false},
+              {"duck_under", ParamType::String,
+               "auto ducking (audio tracks): auto = get quieter while the other audio tracks (voices) play, a track id = under that one, off", false},
+              {"duck_db", ParamType::Number, "how far it ducks, in dB (-40..0, default -12)", false}},
              true},
             cutCommand(session, [](Timeline& tl, const Params& p) {
                 Track& t = tl.ensureTrack(stringParam(p, "track"));
@@ -261,6 +265,20 @@ void registerDocumentCommands(Session& session) {
                     if (t.locked && !has(p, "locked")) return Result::failure("track " + t.id + " is locked; unlock it first");
                     t.volume = numberParam(p, "volume");
                     if (t.volume < 0 || t.volume > 4) return Result::failure("volume must be 0..4");
+                }
+                if (has(p, "duck_under")) {
+                    std::string d = stringParam(p, "duck_under");
+                    if (d == "off" || d == "none") d.clear();
+                    if (!d.empty() && t.kind != "audio") return Result::failure("only audio tracks duck (music on a2 ducking under a voice on a1)");
+                    if (!d.empty() && d != "auto") {
+                        const Track* key = tl.track(d);
+                        if (!key || key->kind != "audio" || key->id == t.id) return Result::failure("duck_under is auto, off or another audio track's id");
+                    }
+                    t.duckUnder = d;
+                }
+                if (has(p, "duck_db")) {
+                    t.duckDb = numberParam(p, "duck_db");
+                    if (t.duckDb < -40 || t.duckDb > 0) return Result::failure("duck_db must be -40..0");
                 }
                 Result r = Result::success(trackText(t));
                 return r.with("doc", stringParam(p, "doc")).with("track", t.id).with("locked", t.locked).with("muted", t.muted)
@@ -358,6 +376,7 @@ void registerCommands(Session& session) {
     registerAudioCommands(session);
     registerExportCommands(session);
     registerFileCommands(session);
+    registerProxyCommands(session);
 }
 
 }  // namespace wetwaresuite::cut

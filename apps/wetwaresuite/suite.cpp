@@ -19,6 +19,7 @@
 #include "wetwaresuite/forge/forge.hpp"
 #include "wetwaresuite/layout/layout.hpp"
 #include "wetwaresuite/levels/levels.hpp"
+#include "wetwaresuite/levels/scene.hpp"
 #include "wetwaresuite/maps/maps.hpp"
 #include "wetwaresuite/monitor/monitor.hpp"
 #include "wetwaresuite/library/library.hpp"
@@ -60,6 +61,7 @@ const std::set<std::string>& toolNames() {
         "office",
         "pdf",
         "levels",
+        "scene",
         "model",
         "sculpt",
         "beats",
@@ -109,6 +111,7 @@ void registerAll(Session& session, const std::set<std::string>& only) {
     if (want("office")) office::registerCommands(session);
     if (want("pdf")) pdf::registerCommands(session);
     if (want("levels")) levels::registerCommands(session);
+    if (want("scene")) scene::registerCommands(session);
     if (want("model")) model::registerCommands(session);
     if (want("sculpt")) sculpt::registerCommands(session);
     if (want("beats")) beats::registerCommands(session);

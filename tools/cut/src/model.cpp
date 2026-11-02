@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <iterator>
+#include <map>
 #include <filesystem>
 #include <stdexcept>
 
@@ -170,6 +171,11 @@ bool Timeline::timeline(TimelineLayout& out) const {
     out.outPoint = outPoint;
     out.markers.clear();
     for (const auto& m : markers) out.markers.push_back({m.id, m.t, m.name, m.color});
+    // the media bin: what was brought in, then any other file a clip plays
+    out.media = bin;
+    for (const auto& t : tracks)
+        for (const auto& c : t.clips)
+            if (!c.source.empty() && c.kind != "nest" && std::find(out.media.begin(), out.media.end(), c.source) == out.media.end()) out.media.push_back(c.source);
     // video tracks top-down as editors show them (v2 above v1), then audio
     std::vector<const Track*> order;
     for (auto it = tracks.rbegin(); it != tracks.rend(); ++it) if (it->kind == "video") order.push_back(&*it);
@@ -183,6 +189,7 @@ bool Timeline::timeline(TimelineLayout& out) const {
         if (t->kind == "video") tt.toggles.push_back({"hidden", "H", "Hide the track's picture", t->hidden});
         tt.toggles.push_back({"muted", "M", "Mute the track's sound", t->muted});
         tt.toggles.push_back({"solo", "S", "Solo: only soloed tracks of this kind play", t->solo});
+        if (t->kind == "audio") tt.toggles.push_back({"duck", "D", "Duck: this track (music) gets quieter while the other audio tracks (voices) talk", !t->duckUnder.empty()});
         for (const auto& c : t->clips) {
             TimelineClip tc;
             tc.id = c.id;
@@ -197,6 +204,7 @@ bool Timeline::timeline(TimelineLayout& out) const {
             tc.length = c.length();
             tc.link = c.link;
             tc.picture = c.kind == "video" || c.kind == "image";
+            if (c.kind != "nest") tc.source = c.source;
             tc.sound = c.kind == "audio" || (c.kind == "video" && c.ownSound && c.hasAudio);
             tc.sourceIn = c.hold ? c.in : c.reverse ? c.out : c.in;
             tc.speed = c.hold || c.kind == "image" ? 0 : c.reverse ? -c.speed : c.speed;
@@ -219,6 +227,20 @@ bool Timeline::timeline(TimelineLayout& out) const {
                 }
             }
             std::sort(tc.keyframes.begin(), tc.keyframes.end());
+            // the first animated property with more than one value, as a curve the window draws
+            for (const auto& [name, ks] : c.keys) {
+                if (ks.size() < 2) continue;
+                double lo = ks[0].v, hi = ks[0].v;
+                for (const auto& k : ks) lo = std::min(lo, k.v), hi = std::max(hi, k.v);
+                if (hi - lo < 1e-9) continue;
+                tc.curveName = name;
+                const int n = 64;
+                for (int i = 0; i < n; ++i) {
+                    const double v = evaluateKeys(ks, c.length() * i / (n - 1));
+                    tc.curve.push_back(static_cast<float>((v - lo) / (hi - lo)));
+                }
+                break;
+            }
             tt.clips.push_back(tc);
         }
         out.tracks.push_back(std::move(tt));
@@ -230,7 +252,12 @@ std::string Timeline::timelineCommand(const wetwaresuite::TimelineEdit& e) const
     switch (e.kind) {
         case TimelineEditKind::Cursor: return "cut.set_cursor t=" + t4(std::max(0.0, e.at));
         case TimelineEditKind::Razor: return "cut.razor at=" + t4(e.at) + (e.track.empty() ? "" : " tracks=" + e.track);
-        case TimelineEditKind::Marker: return "cut.add_marker t=" + t4(std::max(0.0, e.at));
+        case TimelineEditKind::Marker: {
+            // over the selected clip: a clip marker that moves with it
+            const Clip* c = e.clip.empty() ? nullptr : findClip(e.clip);
+            const bool on = c && e.at >= c->start - 1e-6 && e.at <= c->end() + 1e-6;
+            return "cut.add_marker t=" + t4(std::max(0.0, e.at)) + (on ? " clip=" + c->id : std::string());
+        }
         case TimelineEditKind::InPoint: return "cut.set_in_out in=" + t4(std::max(0.0, e.at));
         case TimelineEditKind::OutPoint: return "cut.set_in_out out=" + t4(std::max(0.0, e.at));
         case TimelineEditKind::AddFile: {
@@ -246,7 +273,13 @@ std::string Timeline::timelineCommand(const wetwaresuite::TimelineEdit& e) const
             }
             std::string line = std::string(sound ? "cut.add_audio" : "cut.add_clip") + " path=" + path;
             if (const Track* t = track(e.track); t && (t->kind == "audio") == sound) line += " track=" + t->id;
+            if (e.place >= 0) line += " start=" + t4(e.place);
             return line;
+        }
+        case TimelineEditKind::MoveKey: {
+            const Clip* c = findClip(e.clip);
+            if (!c || c->keys.empty()) return {};
+            return "cut.move_keyframe clip=" + c->id + " from=" + t4(e.at - c->start) + " to=" + t4(std::clamp(e.start - c->start, 0.0, c->length()));
         }
         case TimelineEditKind::SetProperty: {
             const Clip* c = findClip(e.clip);
@@ -256,6 +289,7 @@ std::string Timeline::timelineCommand(const wetwaresuite::TimelineEdit& e) const
         }
         case TimelineEditKind::Toggle: {
             const Track* t = track(e.track);
+            if (t && e.name == "duck") return "cut.set_track track=" + t->id + " duck_under=" + (t->duckUnder.empty() ? "auto" : "off");
             if (!t || (e.name != "locked" && e.name != "hidden" && e.name != "muted" && e.name != "solo")) return {};
             const bool now = e.name == "locked" ? t->locked : e.name == "hidden" ? t->hidden : e.name == "muted" ? t->muted : t->solo;
             return "cut.set_track track=" + t->id + " " + e.name + "=" + (now ? "false" : "true");
@@ -413,7 +447,18 @@ bool Timeline::sounds(const Track& t) const {
 
 Result TimelineEdit::apply() {
     before_ = {doc_->settings, doc_->tracks, doc_->markers, doc_->inPoint, doc_->outPoint, doc_->masterVolume,
-               doc_->nextClip, doc_->nextLink, doc_->nextMarker};
+               doc_->nextClip, doc_->nextLink, doc_->nextMarker, doc_->bin};
+    // clip markers: where each sat on its clip before the edit
+    struct Seat {
+        double t = 0, clipStart = 0;
+        bool had = false;
+    };
+    std::map<std::string, Seat> seats;
+    for (const auto& m : doc_->markers) {
+        if (m.clip.empty()) continue;
+        const Clip* c = static_cast<const Timeline&>(*doc_).findClip(m.clip);
+        seats[m.id] = {m.t, c ? c->start : m.t, c != nullptr};
+    }
     Result r;
     try {
         r = fn_(*doc_);
@@ -422,6 +467,24 @@ Result TimelineEdit::apply() {
     }
     if (r.ok) {
         doc_->sortClips();
+        // clip markers follow their clip; one moved on purpose stays where it was put
+        for (auto& m : doc_->markers) {
+            if (m.clip.empty()) continue;
+            const Clip* c = static_cast<const Timeline&>(*doc_).findClip(m.clip);
+            auto seat = seats.find(m.id);
+            if (!c) {
+                m.clip.clear();
+                continue;
+            }
+            if (seat == seats.end() || !seat->second.had || std::abs(m.t - seat->second.t) > 1e-6) {
+                if (m.t < c->start - 1e-6 || m.t > c->end() + 1e-6) m.clip.clear();
+                continue;
+            }
+            const double offset = seat->second.t - seat->second.clipStart;
+            if (offset > c->length() + 1e-6) m.clip.clear();  // cut off the end of a trimmed clip: it stays put
+            else m.t = c->start + offset;
+        }
+        std::sort(doc_->markers.begin(), doc_->markers.end(), [](const Marker& a, const Marker& b) { return a.t < b.t; });
         // a locked track keeps its clips exactly as they were
         for (const auto& old : before_.tracks) {
             if (!old.locked) continue;
@@ -449,6 +512,7 @@ void TimelineEdit::revert() {
     doc_->nextClip = before_.nextClip;
     doc_->nextLink = before_.nextLink;
     doc_->nextMarker = before_.nextMarker;
+    doc_->bin = before_.bin;
 }
 
 namespace {
@@ -475,6 +539,7 @@ json clipJson(const Clip& c) {
     put("volume", c.volume, d.volume);
     put("mute", c.mute, d.mute);
     put("pan", c.pan, d.pan);
+    put("denoise", c.denoise, d.denoise);
     put("fade_in", c.fadeIn, d.fadeIn);
     put("fade_out", c.fadeOut, d.fadeOut);
     put("opacity", c.opacity, d.opacity);
@@ -606,6 +671,7 @@ Clip clipFrom(const json& j, const fs::path& baseDir) {
     c.volume = j.value("volume", d.volume);
     c.mute = j.value("mute", d.mute);
     c.pan = j.value("pan", d.pan);
+    c.denoise = j.value("denoise", d.denoise);
     c.fadeIn = j.value("fade_in", d.fadeIn);
     c.fadeOut = j.value("fade_out", d.fadeOut);
     c.opacity = j.value("opacity", d.opacity);
@@ -711,6 +777,7 @@ json timelineJson(const Timeline& tl) {
         if (t.locked) tj["locked"] = true;
         if (t.solo) tj["solo"] = true;
         if (t.volume != 1) tj["volume"] = t.volume;
+        if (!t.duckUnder.empty()) tj["duck_under"] = t.duckUnder, tj["duck_db"] = t.duckDb;
         tracks.push_back(tj);
     }
     json j = {{"format", "wwcut"},
@@ -727,6 +794,7 @@ json timelineJson(const Timeline& tl) {
         json m = json::array();
         for (const auto& mk : tl.markers) {
             json mj = {{"id", mk.id}, {"t", mk.t}, {"name", mk.name}, {"color", mk.color}};
+            if (!mk.clip.empty()) mj["clip"] = mk.clip;
             if (mk.duration > 0) mj["duration"] = mk.duration;
             m.push_back(mj);
         }
@@ -736,6 +804,7 @@ json timelineJson(const Timeline& tl) {
     if (tl.inPoint >= 0) j["in_point"] = tl.inPoint;
     if (tl.outPoint >= 0) j["out_point"] = tl.outPoint;
     if (tl.masterVolume != 1) j["master_volume"] = tl.masterVolume;
+    if (!tl.bin.empty()) j["bin"] = tl.bin;
     return j;
 }
 
@@ -761,6 +830,8 @@ std::shared_ptr<Timeline> timelineFrom(const json& j, const fs::path& baseDir) {
             t.locked = tj.value("locked", false);
             t.solo = tj.value("solo", false);
             t.volume = tj.value("volume", 1.0);
+            t.duckUnder = tj.value("duck_under", std::string());
+            t.duckDb = tj.value("duck_db", -12.0);
             for (const auto& cj : tj.value("clips", json::array())) {
                 Clip c = clipFrom(cj, baseDir);
                 if (tl->findClip(c.id)) throw std::runtime_error("two clips are called " + c.id);
@@ -782,10 +853,17 @@ std::shared_ptr<Timeline> timelineFrom(const json& j, const fs::path& baseDir) {
             m.duration = mj.value("duration", 0.0);
             m.name = mj.value("name", std::string());
             m.color = mj.value("color", std::string("green"));
+            m.clip = mj.value("clip", std::string());
             if (m.id.size() > 1 && m.id[0] == 'm') highestMarker = std::max(highestMarker, std::atoi(m.id.c_str() + 1));
             tl->markers.push_back(m);
         }
         tl->nextMarker = std::max(j.value("next_marker", 1), highestMarker + 1);
+        for (const auto& bj : j.value("bin", json::array())) {
+            if (!bj.is_string()) continue;
+            fs::path p = bj.get<std::string>();
+            if (p.is_relative() && !baseDir.empty()) p = (baseDir / p).lexically_normal();
+            tl->bin.push_back(p.string());
+        }
         tl->inPoint = j.value("in_point", -1.0);
         tl->outPoint = j.value("out_point", -1.0);
         tl->masterVolume = j.value("master_volume", 1.0);
@@ -942,6 +1020,7 @@ std::vector<ClipProperty> Timeline::clipProperties(const std::string& clipId) co
     if (sound) {
         add("volume", "Volume", "Sound", c->volume, 0, 2);
         add("pan", "Pan", "Sound", c->pan, -1, 1);
+        add("denoise", "Clean up noise (dB)", "Sound", c->denoise, 0, 30);
         toggle("mute", "Mute", "Sound", c->mute);
     }
     return out;

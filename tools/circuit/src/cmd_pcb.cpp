@@ -132,7 +132,7 @@ void registerPcbCommands(Session& session) {
                           {"y", ParamType::Number, "centre y, mm", false},
                           {"dx", ParamType::Number, "move by, mm", false},
                           {"dy", ParamType::Number, "move by, mm", false},
-                          {"rot", ParamType::Int, "rotation 0, 90, 180, 270", false},
+                          {"rot", ParamType::Int, "rotation in degrees counter-clockwise, any angle (e.g. 45)", false},
                           {"side", ParamType::String, "top or bottom", false, {"top", "bottom"}}}),
              true},
             circuitCommand(
@@ -147,7 +147,7 @@ void registerPcbCommands(Session& session) {
                     if (has(p, "y")) part->pcb.pos.y = numberParam(p, "y");
                     part->pcb.pos.x += numberParam(p, "dx", 0);
                     part->pcb.pos.y += numberParam(p, "dy", 0);
-                    if (has(p, "rot")) part->pcb.rot = snapRot(intParam(p, "rot"));
+                    if (has(p, "rot")) part->pcb.rot = static_cast<int>(((intParam(p, "rot") % 360) + 360) % 360);
                     if (has(p, "side")) part->pcb.bottom = stringParam(p, "side") == "bottom";
                     return edited(part->ref + " at " + pt(part->pcb.pos) + " mm, rot " + std::to_string(part->pcb.rot) + (part->pcb.bottom ? ", bottom" : ", top"), p);
                 },
@@ -160,7 +160,8 @@ void registerPcbCommands(Session& session) {
                           {"points", ParamType::NumberList, "x1,y1,x2,y2,... in mm", true},
                           {"layer", ParamType::String, "F (top), B (bottom), In1 or In2", false, {"F", "B", "In1", "In2"}, std::string("F")},
                           {"width", ParamType::Number, "trace width, mm", false},
-                          {"net", ParamType::String, "net name (default: from the copper under the first point)", false}}),
+                          {"net", ParamType::String, "net name (default: from the copper under the first point)", false},
+                          {"shove", ParamType::Bool, "push other nets' traces aside instead of overlapping them", false, {}, false}}),
              true},
             circuitCommand(
                 session,
@@ -176,13 +177,25 @@ void registerPcbCommands(Session& session) {
                     if (net.empty()) net = netAt(c, nl, {v[v.size() - 2], v[v.size() - 1]}, layer);
                     const double width = has(p, "width") ? numberParam(p, "width") : (isPowerName(net) ? c.board.rules.powerTrace : c.board.rules.trace);
                     if (width <= 0) return Result::failure("width must be positive");
-                    int n = 0;
-                    for (std::size_t i = 2; i + 1 < v.size(); i += 2) {
-                        c.board.traces.push_back({{v[i - 2], v[i - 1]}, {v[i], v[i + 1]}, width, layer, net});
-                        ++n;
+                    std::vector<Trace> segs;
+                    for (std::size_t i = 2; i + 1 < v.size(); i += 2) segs.push_back({{v[i - 2], v[i - 1]}, {v[i], v[i + 1]}, width, layer, net});
+                    const int n = static_cast<int>(segs.size());
+                    std::string extra;
+                    ShoveReport shoved;
+                    if (boolParam(p, "shove", false)) {
+                        shoved = addTraceShoving(c, nl, segs);
+                        if (shoved.moved) extra += "; pushed " + std::to_string(shoved.moved) + " trace" + (shoved.moved == 1 ? "" : "s") + " aside";
+                        if (!shoved.blocked.empty()) {
+                            extra += "; still too close:";
+                            for (const auto& b : shoved.blocked) extra += " " + b;
+                        }
+                    } else {
+                        for (const auto& s : segs) c.board.traces.push_back(s);
                     }
-                    return edited(std::to_string(n) + " trace segments on " + layerName(layer) + (net.empty() ? " (no net: it touches no pad)" : " net " + net), p)
-                        .with("net", net);
+                    return edited(std::to_string(n) + " trace segments on " + layerName(layer) + (net.empty() ? " (no net: it touches no pad)" : " net " + net) + extra, p)
+                        .with("net", net)
+                        .with("shoved", static_cast<std::int64_t>(shoved.moved))
+                        .with("blocked", static_cast<std::int64_t>(shoved.blocked.size()));
                 },
                 View::Pcb));
 
@@ -469,9 +482,10 @@ void registerPcbOutputCommands(Session& session) {
 
     reg.add({"circuit.sim_op", "DC Operating Point",
              "Simulate the DC operating point (SPICE-lite): every net's voltage and each source's current. Handles resistors, "
-             "capacitors (open), inductors (short), diodes/LEDs, switches (field state=on), potentiometers (field wiper=0..1), "
+             "capacitors (open), inductors (short), diodes/LEDs, NPN/PNP transistors (fields beta, br, is), N/P MOSFETs (fields vth, k, "
+             "lambda), switches (field state=on), potentiometers (field wiper=0..1), "
              "op-amps (ideal), voltage/current sources and batteries; power symbols named like +5V or +3V3 become sources. Ground is GND.",
-             {docParam(), {"ignore_unsupported", ParamType::Bool, "leave out parts the simulator can't model (transistors, ICs)", false, {}, false}},
+             {docParam(), {"ignore_unsupported", ParamType::Bool, "leave out parts the simulator can't model (ICs, modules)", false, {}, false}},
              false, true},
             circuitCommand(
                 session,
@@ -495,6 +509,85 @@ void registerPcbOutputCommands(Session& session) {
                     return res;
                 },
                 View::Schematic, false));
+
+    reg.add({"circuit.sim_ac", "AC Sweep",
+             "Frequency response (a Bode plot): every part is linearised at the DC operating point and a voltage source "
+             "sweeps from start to stop. The source with field ac=<amplitude> drives it (else the first vsource, at 1 V). "
+             "Reports gain (dB) and phase per probed net, the -3 dB corner(s) and the peak; preview=true attaches the plot; "
+             "path= writes CSV.",
+             {docParam(),
+              {"start", ParamType::String, "first frequency, e.g. 10 (Hz)", false, {}, std::string("10")},
+              {"stop", ParamType::String, "last frequency, e.g. 1meg", false, {}, std::string("1meg")},
+              {"per_decade", ParamType::Int, "points per decade", false, {}, std::int64_t{20}},
+              {"probes", ParamType::String, "nets to record, comma-separated (default: up to 8)", false},
+              {"path", ParamType::String, "write freq,dB(net),deg(net)... CSV here", false},
+              {"ignore_unsupported", ParamType::Bool, "leave out parts the simulator can't model", false, {}, false},
+              previewParam()},
+             false},
+            [&session](const Params& p) -> std::unique_ptr<Action> {
+                auto doc = session.workspace().getAs<CircuitDoc>(stringParam(p, "doc"));
+                return std::make_unique<FunctionAction>([doc, p] {
+                    if (!doc) return Result::failure("no open circuit called '" + stringParam(p, "doc") + "'");
+                    try {
+                        const Netlist nl = buildNetlist(doc->circuit);
+                        SimOptions o;
+                        const auto f0 = parseValue(stringParam(p, "start", "10")), f1 = parseValue(stringParam(p, "stop", "1meg"));
+                        if (!f0 || !f1 || *f0 <= 0 || *f1 <= *f0) return Result::failure("start and stop must be frequencies with stop above start, e.g. start=10 stop=100k");
+                        o.acStart = *f0;
+                        o.acStop = *f1;
+                        o.acPerDecade = static_cast<int>(intParam(p, "per_decade", 20));
+                        if (has(p, "probes")) o.probes = splitList(stringParam(p, "probes"));
+                        o.ignoreUnsupported = boolParam(p, "ignore_unsupported", false);
+                        const SimResult r = simulate(doc->circuit, nl, o);
+                        std::string s = "ac sweep " + formatValue(o.acStart) + "Hz to " + formatValue(o.acStop) + "Hz, " + std::to_string(r.freqs.size()) + " points:";
+                        Result res = Result::success("");
+                        res.with("doc", stringParam(p, "doc"));
+                        for (std::size_t i = 0; i < r.acProbes.size(); ++i) {
+                            const auto& m = r.acMag[i];
+                            const auto peak = std::max_element(m.begin(), m.end());
+                            const std::size_t pk = static_cast<std::size_t>(peak - m.begin());
+                            s += "\n  " + r.acProbes[i] + ": " + formatValue(m.front()) + " dB at " + formatValue(r.freqs.front()) + "Hz";
+                            if (pk != 0 && pk + 1 != m.size()) s += ", peak " + formatValue(*peak) + " dB at " + formatValue(r.freqs[pk]) + "Hz";
+                            s += ", " + formatValue(m.back()) + " dB at " + formatValue(r.freqs.back()) + "Hz";
+                            // -3 dB corners from the peak, interpolated on the log scale
+                            std::vector<double> corners;
+                            for (std::size_t k = 1; k < m.size(); ++k) {
+                                const double a = m[k - 1] - (*peak - 3), b = m[k] - (*peak - 3);
+                                if ((a > 0) != (b > 0)) {
+                                    const double t = a / (a - b);
+                                    corners.push_back(std::pow(10.0, std::log10(r.freqs[k - 1]) + t * (std::log10(r.freqs[k]) - std::log10(r.freqs[k - 1]))));
+                                }
+                            }
+                            if (!corners.empty()) {
+                                s += ", -3 dB at";
+                                for (double f : corners) s += " " + formatValue(f) + "Hz";
+                                res.with("f3db(" + r.acProbes[i] + ")", corners.front());
+                            }
+                            res.with("gain_db(" + r.acProbes[i] + ")", *peak);
+                        }
+                        for (const auto& w : r.warnings) s += "\nnote: " + w;
+                        if (has(p, "path")) {
+                            std::ostringstream csv;
+                            csv << "freq";
+                            for (const auto& pr : r.acProbes) csv << ",dB(" << pr << "),deg(" << pr << ")";
+                            csv << "\n";
+                            for (std::size_t k = 0; k < r.freqs.size(); ++k) {
+                                csv << r.freqs[k];
+                                for (std::size_t i = 0; i < r.acProbes.size(); ++i) csv << "," << r.acMag[i][k] << "," << r.acPhase[i][k];
+                                csv << "\n";
+                            }
+                            std::string error;
+                            if (!writeFile(stringParam(p, "path"), csv.str(), error)) return Result::failure(error);
+                            s += "\nwrote " + stringParam(p, "path");
+                        }
+                        res.message = s;
+                        if (boolParam(p, "preview", false)) res.attach({"image/png", raster::encodePng(plotBode(r, 900, 520)), "bode.png"});
+                        return res;
+                    } catch (const std::exception& e) {
+                        return Result::failure(e.what());
+                    }
+                });
+            });
 
     reg.add({"circuit.sim_tran", "Transient Simulation",
              "Simulate over time with a fixed step (backward Euler): sources can be SIN(offset amplitude freq) or PULSE(v1 v2 delay "
@@ -568,10 +661,12 @@ void registerCommands(Session& session) {
     cmd::registerSchematicCommands(session);
     cmd::registerSchematicMarkCommands(session);
     cmd::registerSchematicQueryCommands(session);
+    cmd::registerBusCommands(session);
     cmd::registerPcbCommands(session);
     cmd::registerPcbOutputCommands(session);
     cmd::registerBoardToolCommands(session);
     cmd::registerViewCommands(session);
+    cmd::registerFootprintEditCommands(session);
 }
 
 }  // namespace wetwaresuite::circuit

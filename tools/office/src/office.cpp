@@ -54,7 +54,8 @@ bool SheetDoc::grid(CellGrid& out) const {
     painterSheet_ = -1;
     out.docParam = "doc";
     out.sheets.clear();
-    for (const auto& sh : data.sheets) out.sheets.push_back(sh.name);
+    out.frozen.clear();
+    for (const auto& sh : data.sheets) out.sheets.push_back(sh.name), out.frozen.emplace_back(sh.freezeRows, sh.freezeCols);
     out.active = data.sheets.empty() ? 0 : std::clamp(data.active, 0, static_cast<int>(data.sheets.size()) - 1);
     out.usedRows = out.usedCols = 0;
     if (!data.sheets.empty()) {

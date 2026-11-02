@@ -69,6 +69,40 @@ float segDistance(ImVec2 p, ImVec2 a, ImVec2 b) {
 
 constexpr float kArrow = 78;  // arrow length on screen, px
 
+// A rotate ring: a circle about the handle's axis, kArrow * 0.8 px across on screen.
+template <class ScreenOf>
+std::vector<ImVec2> ringPoints(const Handle& h, const ScreenOf& screenOf) {
+    const P3 a = h.dir;
+    const P3 u = std::fabs(a.x) < 0.9 ? P3{0, a.z, -a.y} : P3{a.z, 0, -a.x};  // square to the axis
+    const double ul = std::sqrt(u.x * u.x + u.y * u.y + u.z * u.z);
+    const P3 e1 = u * (1 / ul);
+    const P3 e2{a.y * e1.z - a.z * e1.y, a.z * e1.x - a.x * e1.z, a.x * e1.y - a.y * e1.x};
+    // world radius from the screen: one model unit is |screenOf(base + e) - screenOf(base)| px
+    const ImVec2 c0 = screenOf(h.base);
+    double perUnit = 0;
+    for (const P3& e : {e1, e2, a}) {
+        const ImVec2 q = screenOf(h.base + e);
+        perUnit = std::max(perUnit, static_cast<double>(std::hypot(q.x - c0.x, q.y - c0.y)));
+    }
+    const double r = perUnit > 1e-9 ? kArrow * 0.8 / perUnit : 1;
+    std::vector<ImVec2> pts;
+    for (int k = 0; k <= 48; ++k) {
+        const double t = k * 2 * 3.14159265358979323846 / 48;
+        pts.push_back(screenOf(h.base + e1 * (std::cos(t) * r) + e2 * (std::sin(t) * r)));
+    }
+    return pts;
+}
+
+// A scale box: on the axis, a bit over half an arrow out.
+template <class ScreenOf>
+ImVec2 scaleBoxAt(const Handle& h, const ScreenOf& screenOf) {
+    const ImVec2 a = screenOf(h.base), b = screenOf(h.base + h.dir);
+    float dx = b.x - a.x, dy = b.y - a.y;
+    const float l = std::sqrt(dx * dx + dy * dy);
+    if (l < 1e-6f) return {a.x, a.y - kArrow * 0.55f};
+    return {a.x + dx / l * kArrow * 0.55f, a.y + dy / l * kArrow * 0.55f};
+}
+
 }  // namespace
 
 // ---- the camera ---------------------------------------------------------------------
@@ -142,14 +176,44 @@ View3d::Face Shell::cadPickAt(ImVec2 local) {
     return cadPickRay(from, fwd);
 }
 
+View3d::Edge Shell::cadEdgeAt(ImVec2 local) {
+    View3d::Edge e;
+    const ViewCamera& c = view3d_.cam;
+    if (!view3d_.camOk || c.scale <= 0 || !find("cad.pick_edge")) return e;
+    const double a = (local.x - view3d_.camW / 2.0) / c.scale + c.cx;
+    const double b = (view3d_.camH / 2.0 - local.y) / c.scale + c.cy;
+    const P3 fwd = fromArray(c.forward);
+    const P3 from = fromArray(c.right) * a + fromArray(c.up) * b - fwd * 1e6;
+    const Result r = query("cad.pick_edge", {{"doc", currentDoc_}, {"ray", triple(from) + "," + triple(fwd)}, {"tolerance", 7.0 / c.scale}});
+    if (!r.ok || !yes(r, "hit")) return e;
+    e.hit = true;
+    e.outer = yes(r, "outer");
+    e.body = words(r, "body");
+    e.near = words(r, "near");
+    e.mid = point(numbers(r, "midpoint"));
+    e.out = point(numbers(r, "out"));
+    const NumberList segs = numbers(r, "segments");
+    for (std::size_t i = 0; i + 2 < segs.size(); i += 3) e.segments.push_back(point(segs, i));
+    return e;
+}
+
 // ---- which arrows show -----------------------------------------------------------------
 
 void Shell::cadHandles() {
+    if (!view3d_.edges.empty()) {  // one arrow for the size of the round (or bevel) on all the picked edges
+        const View3d::Edge& e = view3d_.edges.front();
+        view3d_.handles.push_back({Handle::Kind::Blend, e.mid, length(e.out) > 0 ? e.out : P3{0, 0, 1}, ImGui::ColorConvertFloat4ToU32(accent_), "", 0, 0, 1,
+                                   view3d_.chamfer ? "Drag to bevel the picked edges" : "Drag to round the picked edges"});
+        return;
+    }
     const View3d::Face& f = view3d_.picked;
     if (!f.hit) return;
     if (!view3d_.moveMode) {
         if (f.flat) view3d_.handles.push_back({Handle::Kind::PushPull, f.centre, f.normal, ImGui::ColorConvertFloat4ToU32(accent_), "", 0, 0, 1,
                                                "Drag to pull the face out or push it in"});
+        else if (find("cad.offset_face"))  // a curved face moves along its own normals (a hole gets wider, a boss fatter)
+            view3d_.handles.push_back({Handle::Kind::PushPull, f.point, f.normal, ImGui::ColorConvertFloat4ToU32(accent_), "", 0, 0, 1,
+                                       "Drag to move this curved face out or in"});
         return;
     }
     const P3 mid{(f.bounds[0] + f.bounds[3]) / 2, (f.bounds[1] + f.bounds[4]) / 2, (f.bounds[2] + f.bounds[5]) / 2};
@@ -172,6 +236,13 @@ void Shell::modelHandles() {
     view3d_.handles.push_back({Handle::Kind::Move, at, {1, 0, 0}, IM_COL32(225, 70, 70, 255), "x", 0, 0, 1, "Drag to move the selection along X (G then X)"});
     view3d_.handles.push_back({Handle::Kind::Move, at, {0, 1, 0}, IM_COL32(60, 175, 85, 255), "y", 0, 0, 1, "Drag to move the selection along Y (G then Y)"});
     view3d_.handles.push_back({Handle::Kind::Move, at, {0, 0, 1}, IM_COL32(60, 115, 230, 255), "z", 0, 0, 1, "Drag to move the selection along Z (G then Z)"});
+    // rotate rings and scale boxes, as Blender's transform gizmo (Ctrl while dragging snaps, Alt snaps a move to vertices)
+    view3d_.handles.push_back({Handle::Kind::Ring, at, {1, 0, 0}, IM_COL32(225, 70, 70, 255), "x", 0, 0, 1, "Drag the ring to turn the selection about X (Ctrl: 5 degree steps)"});
+    view3d_.handles.push_back({Handle::Kind::Ring, at, {0, 1, 0}, IM_COL32(60, 175, 85, 255), "y", 0, 0, 1, "Drag the ring to turn the selection about Y (Ctrl: 5 degree steps)"});
+    view3d_.handles.push_back({Handle::Kind::Ring, at, {0, 0, 1}, IM_COL32(60, 115, 230, 255), "z", 0, 0, 1, "Drag the ring to turn the selection about Z (Ctrl: 5 degree steps)"});
+    view3d_.handles.push_back({Handle::Kind::Scale, at, {1, 0, 0}, IM_COL32(225, 70, 70, 255), "x", 0, 0, 1, "Drag the box to stretch the selection along X"});
+    view3d_.handles.push_back({Handle::Kind::Scale, at, {0, 1, 0}, IM_COL32(60, 175, 85, 255), "y", 0, 0, 1, "Drag the box to stretch the selection along Y"});
+    view3d_.handles.push_back({Handle::Kind::Scale, at, {0, 0, 1}, IM_COL32(60, 115, 230, 255), "z", 0, 0, 1, "Drag the box to stretch the selection along Z"});
 }
 
 void Shell::formHandles() {
@@ -230,7 +301,12 @@ bool Shell::handleTrial(bool final) {
     const Handle& h = v.handles[static_cast<std::size_t>(v.dragging)];
     std::string command;
     Params p{{"doc", currentDoc_}};
-    if (h.kind == Handle::Kind::PushPull) {
+    if (h.kind == Handle::Kind::PushPull && !v.picked.flat) {
+        command = "cad.offset_face";
+        p["target"] = v.picked.body;
+        p["face"] = v.picked.face;
+        p["distance"] = exact(v.amount);
+    } else if (h.kind == Handle::Kind::PushPull) {
         command = "cad.push_pull";
         p["face"] = v.picked.face;
         p["distance"] = v.amount;
@@ -238,6 +314,17 @@ bool Shell::handleTrial(bool final) {
         command = "cad.transform";
         p["target"] = v.picked.body;
         p[h.axis] = exact(v.amount);
+    } else if (h.kind == Handle::Kind::Blend && !v.edges.empty()) {
+        if (v.amount <= 0) {  // a round has a size: dragging back in takes it off again
+            dropTrial();
+            return false;
+        }
+        command = v.chamfer ? "cad.chamfer" : "cad.fillet";
+        p["target"] = v.edges.front().body;
+        std::string near;
+        for (const auto& e : v.edges) near += (near.empty() ? "" : ",") + e.near;
+        p["near"] = near;
+        p[v.chamfer ? "distance" : "radius"] = exact(v.amount);
     } else {
         return false;
     }
@@ -249,7 +336,9 @@ bool Shell::handleTrial(bool final) {
         v.tryAmount = v.amount;
         return tryRun(command, p);
     }
-    const char* what = h.kind == Handle::Kind::PushPull ? (v.amount > 0 ? "Pull" : "Push") : "Move";
+    const char* what = h.kind == Handle::Kind::PushPull ? (v.amount > 0 ? "Pull" : "Push")
+                       : h.kind == Handle::Kind::Blend ? (v.chamfer ? "Chamfer" : "Fillet")
+                                                       : "Move";
     resultFor_ = what;
     if (keepTrial(command, p)) {
         result_ = trial_.result;
@@ -276,6 +365,7 @@ void Shell::handleRelease() {
     v.dragging = -1;
     canvas_.orbit.camera.reset();
     keepView(held);
+    if (done && h.kind == Handle::Kind::Blend) v.edges.clear();  // the edges are round now
     if (done && v.picked.hit) {  // keep working on the face (or body) where it went
         const P3 moved = h.kind == Handle::Kind::PushPull ? v.picked.point + v.picked.normal * v.amount : v.picked.point + h.dir * v.amount;
         const P3 fwd = fromArray(held.forward);
@@ -329,21 +419,38 @@ bool Shell::view3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
         if (hovered && v.camOk && !canvas_.grab) {
             float best = 9;
             for (std::size_t i = 0; i < v.handles.size(); ++i) {
-                ImVec2 a, b;
-                tipOf(v.handles[i], a, b);
-                const float d = segDistance(io.MousePos, a, b);
+                const Handle& hh = v.handles[i];
+                float d = 1e9f;
+                if (hh.kind == Handle::Kind::Ring) {
+                    const auto pts = ringPoints(hh, screenOf);
+                    for (std::size_t k = 0; k + 1 < pts.size(); ++k) d = std::min(d, segDistance(io.MousePos, pts[k], pts[k + 1]));
+                } else if (hh.kind == Handle::Kind::Scale) {
+                    const ImVec2 q = scaleBoxAt(hh, screenOf);
+                    d = std::max(std::fabs(io.MousePos.x - q.x), std::fabs(io.MousePos.y - q.y)) - 5;
+                } else {
+                    ImVec2 a, b;
+                    tipOf(hh, a, b);
+                    d = segDistance(io.MousePos, a, b);
+                }
                 if (d < best) best = d, v.hot = static_cast<int>(i);
             }
         }
         if (v.hot >= 0) ImGui::SetTooltip("%s", v.handles[static_cast<std::size_t>(v.hot)].tip);
         if (v.hot >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const Handle& h = v.handles[static_cast<std::size_t>(v.hot)];
-            if (model) {  // Blender's G with the axis locked, until the mouse is let go
-                canvas_.grab = 'G';
+            if (model) {  // Blender's G (or R, S) with the axis locked, until the mouse is let go
+                canvas_.grab = h.kind == Handle::Kind::Ring ? 'R' : h.kind == Handle::Kind::Scale ? 'S' : 'G';
                 canvas_.grabApplied = false;
                 canvas_.grabStart = io.MousePos;
                 canvas_.grabAxis = h.axis;
                 canvas_.grabByHandle = true;
+                canvas_.grabExact = h.kind == Handle::Kind::Ring || h.kind == Handle::Kind::Scale;
+                canvas_.grabCentre = screenOf(h.base);
+                const ImVec2 tip = screenOf(h.base + h.dir);
+                float dx = tip.x - canvas_.grabCentre.x, dy = tip.y - canvas_.grabCentre.y;
+                const float l = std::sqrt(dx * dx + dy * dy);
+                canvas_.grabDir = l > 1e-6f ? ImVec2{dx / l, dy / l} : ImVec2{1, 0};
+                canvas_.grabFacing = dotc(h.dir, c.forward) < 0 ? 1.0f : -1.0f;
                 return true;
             }
             v.dragging = v.hot;
@@ -392,9 +499,12 @@ bool Shell::view3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
         if (hovered && v.hot < 0 && !ImGui::IsAnyMouseDown() && (moved || v.hoverSeen != changes_)) {
             v.hoverAt = local;
             v.hoverSeen = changes_;
-            v.hover = cadPickAt(local);
+            // an edge near the mouse wins over the face it borders, as in SolidWorks
+            v.hoverEdge = cadEdgeAt(local);
+            v.hover = v.hoverEdge.hit ? View3d::Face{} : cadPickAt(local);
         }
-        if (!hovered) v.hover = {};
+        if (!hovered) v.hover = {}, v.hoverEdge = {};
+        if (!v.edges.empty() && v.pickedSeen != changes_ && !trial_.applied) v.edges.clear();  // the part changed under them
         if (v.picked.hit && v.pickedSeen != changes_ && !trial_.applied) {  // the part changed under it: pick it again
             v.pickedSeen = changes_;
             const P3 fwd = fromArray(c.forward);
@@ -402,14 +512,25 @@ bool Shell::view3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
             v.picked = cadPickRay(v.picked.point - fwd * 1e6, fwd);
             v.moveMode = mode;
         }
-        if (hovered && v.hot < 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16 &&
-            !io.KeyShift && size.x >= 8) {
+        const bool click = hovered && v.hot < 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                           io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16 && !io.KeyShift && size.x >= 8;
+        if (click && v.hoverEdge.hit) {
+            // a click picks the edge (and those carrying on from it); Ctrl+click adds or takes away, on one body
+            auto same = [&](const View3d::Edge& e) { return e.body == v.hoverEdge.body && e.near == v.hoverEdge.near; };
+            if (!io.KeyCtrl || (!v.edges.empty() && v.edges.front().body != v.hoverEdge.body)) v.edges.clear();
+            auto it = std::find_if(v.edges.begin(), v.edges.end(), same);
+            if (it != v.edges.end()) v.edges.erase(it);
+            else v.edges.push_back(v.hoverEdge);
+            v.picked = {};
+            v.pickedSeen = changes_;
+        } else if (click) {
             const bool mode = v.moveMode;
             v.picked = cadPickAt(local);
             v.pickedSeen = changes_;
             v.moveMode = mode && v.picked.hit;
+            v.edges.clear();
         }
-        if (v.picked.hit && ImGui::IsKeyPressed(ImGuiKey_Escape) && !io.WantTextInput) v.picked = {};
+        if ((v.picked.hit || !v.edges.empty()) && ImGui::IsKeyPressed(ImGuiKey_Escape) && !io.WantTextInput) v.picked = {}, v.edges.clear();
     }
     return v.hot >= 0;
 }
@@ -460,6 +581,17 @@ void Shell::view3dDraw(ImDrawList* dl, ImVec2 v0, ImVec2 size) {
             face(v.picked, {}, 0.14f, 2.5f, accent);
         }
     }
+    // edges: the one under the mouse, and the picked ones (thicker)
+    auto edgeLines = [&](const View3d::Edge& e, float thick, ImU32 col) {
+        for (std::size_t i = 0; i + 1 < e.segments.size(); i += 2) {
+            dl->AddLine(screenOf(e.segments[i]), screenOf(e.segments[i + 1]), IM_COL32(255, 255, 255, 220), thick + 3);
+            dl->AddLine(screenOf(e.segments[i]), screenOf(e.segments[i + 1]), col, thick);
+        }
+    };
+    if (!(dragging && trial_.applied)) {
+        if (v.hoverEdge.hit && v.hot < 0 && !dragging) edgeLines(v.hoverEdge, 2.5f, ImGui::ColorConvertFloat4ToU32({ac.x, ac.y, ac.z, 0.75f}));
+        for (const auto& e : v.edges) edgeLines(e, 4.0f, accent);
+    }
     // a ghost of where it goes while dragging (until the real thing is tried on the part)
     std::string label;
     if (dragging) {
@@ -494,12 +626,28 @@ void Shell::view3dDraw(ImDrawList* dl, ImVec2 v0, ImVec2 size) {
             }
         }
         const double shown = h.kind == Handle::Kind::Field ? h.start + v.amount : v.amount;
-        label = (h.kind != Handle::Kind::Field && v.amount > 0 ? "+" : "") + num(shown);
+        if (h.kind == Handle::Kind::Blend) label = (v.chamfer ? "chamfer " : "R ") + num(std::max(0.0, shown));
+        else label = (h.kind != Handle::Kind::Field && v.amount > 0 ? "+" : "") + num(shown);
     }
     // the arrows
     for (std::size_t i = 0; i < v.handles.size(); ++i) {
         const Handle& h = v.handles[i];
         const bool hot = static_cast<int>(i) == v.hot || static_cast<int>(i) == v.dragging;
+        if (h.kind == Handle::Kind::Ring) {
+            const auto pts = ringPoints(h, screenOf);
+            dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), IM_COL32(255, 255, 255, 170), ImDrawFlags_None, hot ? 6.0f : 4.5f);
+            dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), h.colour, ImDrawFlags_None, hot ? 3.5f : 2.0f);
+            continue;
+        }
+        if (h.kind == Handle::Kind::Scale) {
+            const ImVec2 q = scaleBoxAt(h, screenOf), a0 = screenOf(h.base);
+            const float r = hot ? 6.5f : 5.0f;
+            dl->AddLine(a0, q, IM_COL32(255, 255, 255, 170), 3.5f);
+            dl->AddLine(a0, q, h.colour, 1.5f);
+            dl->AddRectFilled({q.x - r - 1.5f, q.y - r - 1.5f}, {q.x + r + 1.5f, q.y + r + 1.5f}, IM_COL32(255, 255, 255, 220));
+            dl->AddRectFilled({q.x - r, q.y - r}, {q.x + r, q.y + r}, h.colour);
+            continue;
+        }
         const double along = h.kind == Handle::Kind::Field ? h.start + (static_cast<int>(i) == v.dragging ? v.amount : 0)
                                                            : (static_cast<int>(i) == v.dragging ? v.amount : 0);
         const ImVec2 a = screenOf(h.base + h.dir * along);
@@ -570,10 +718,14 @@ void Shell::view3dToolbar() {
     }
     // a second row, the same height either way so the view doesn't jump: what to do, or the picked face's actions
     ImGui::AlignTextToFramePadding();
+    if (!v.edges.empty()) {
+        edgeToolbar();
+        return;
+    }
     if (!v.picked.hit) {
         ImGui::TextDisabled("%s", form_ && form_->command == "cad.sketch_extrude"
                                       ? "Drag the arrow to set the depth (or type it on the right), then Apply."
-                                      : "Click a face to push/pull it, move it or sketch on it. Drag to turn, right-drag to move, scroll to zoom.");
+                                      : "Click a face to push/pull it, move it or sketch on it, or an edge to round it. Drag to turn, right-drag to move, scroll to zoom.");
         return;
     }
     ImGui::TextUnformatted((v.picked.body + (v.moveMode ? std::string(":") : v.picked.side == "slanted" ? ", a face:" : ", " + v.picked.side + " face:")).c_str());
@@ -608,6 +760,45 @@ void Shell::view3dToolbar() {
     ImGui::SameLine();
     if (ImGui::SmallButton("x")) v.picked = {};
     ImGui::SetItemTooltip("Let go of the face (Esc)");
+}
+
+void Shell::edgeToolbar() {
+    View3d& v = view3d_;
+    std::size_t pieces = 0;
+    for (const auto& e : v.edges) pieces += e.segments.size() / 2;
+    const std::string what = v.edges.front().body + ", " + std::to_string(v.edges.size()) + (v.edges.size() == 1 ? " edge" : " edges") +
+                             (pieces > v.edges.size() ? " (" + std::to_string(pieces) + " pieces)" : std::string()) + ":";
+    ImGui::TextUnformatted(what.c_str());
+    ImGui::SameLine();
+    auto toggle = [&](const char* label, bool on, const char* tip) {
+        if (on) {
+            ImGui::PushStyleColor(ImGuiCol_Button, accent_);
+            ImGui::PushStyleColor(ImGuiCol_Text, accentText_);
+        }
+        const bool pressed = ImGui::Button(label);
+        if (on) ImGui::PopStyleColor(2);
+        ImGui::SetItemTooltip("%s", tip);
+        ImGui::SameLine();
+        return pressed;
+    };
+    if (toggle("Fillet", !v.chamfer, "The arrow rounds the edges: drag it out for a bigger radius")) v.chamfer = false;
+    if (toggle("Chamfer", v.chamfer, "The arrow bevels the edges: drag it out for a bigger bevel")) v.chamfer = true;
+    const char* command = v.chamfer ? "cad.chamfer" : "cad.fillet";
+    if (ImGui::Button("Type a size...") && find(command)) {
+        std::string near;
+        for (const auto& e : v.edges) near += (near.empty() ? "" : ",") + e.near;
+        const std::string body = v.edges.front().body;
+        select(command);
+        if (form_)
+            for (auto& f : form_->fields) {
+                if (f.spec.name == "target") setFieldText(f, body);
+                if (f.spec.name == "near") setFieldText(f, near);
+            }
+    }
+    ImGui::SetItemTooltip("Open the form for these edges, with a live preview");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("x")) v.edges.clear();
+    ImGui::SetItemTooltip("Let go of the edges (Esc). Ctrl+click adds or takes away edges");
 }
 
 }  // namespace wetwaresuite::gui

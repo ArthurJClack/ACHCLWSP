@@ -284,6 +284,20 @@ steps:
     CHECK(listed.message.find("needs: input, out, width") != std::string::npos);
     CHECK(s.run("automate.list_scripts", {{"folder", dir.string()}}).message.find("Every SVG logo") != std::string::npos);
 
+    // ---- pipeline_save, and what the pipeline builder writes ----
+    {
+        const std::string built = R"({"name": "b", "steps": [{"command": "photo.new", "args": {"width": "4", "height": "4"}}],
+                                      "builder_off": [{"command": "photo.new", "args": {"width": "$nowhere"}, "at": 0}]})";
+        Result saved = s.run("automate.pipeline_save", {{"path", (dir / "built" / "b.json").string()}, {"text", built}});
+        CHECK(saved.ok && fs::exists(dir / "built" / "b.json"));
+        CHECK(!s.run("automate.pipeline_save", {{"path", (dir / "built" / "b.json").string()}, {"text", built}}).ok);  // there already
+        CHECK(s.run("automate.pipeline_save", {{"path", (dir / "built" / "b.json").string()}, {"text", built}, {"overwrite", true}}).ok);
+        CHECK(!s.run("automate.pipeline_save", {{"path", (dir / "built" / "bad.json").string()}, {"text", std::string("{\"steps\": 5}")}}).ok);
+        // a switched-off block's variables aren't asked for, and it doesn't run
+        Result ran = s.run("automate.pipeline", {{"path", (dir / "built" / "b.json").string()}});
+        CHECK(ran.ok && ran.message.find("1 command, 0 failed") != std::string::npos);
+    }
+
     // ---- MCP ----
     {
         Session ms;
@@ -299,7 +313,7 @@ steps:
             if (name == "automate_list_scripts") CHECK(t["annotations"]["readOnlyHint"] == true);
             if (name == "automate_pipeline") CHECK(t["annotations"]["readOnlyHint"] == false);
         }
-        CHECK(seen == 7 && !shell);
+        CHECK(seen == 8 && !shell);
         json r = call(server, 2, "automate_run_script", {{"text", "photo.new width=30 height=20 -> a\nphoto.preview doc=$a"}});
         CHECK(r["isError"] == false && r["structuredContent"]["ran"] == 2);
         CHECK(r["content"].size() == 2 && r["content"][1]["type"] == "image");

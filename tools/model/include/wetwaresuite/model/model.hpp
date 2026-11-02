@@ -13,6 +13,7 @@
 // mesh=, slicer.load mesh=, forge and the other mesh tools read it directly.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -39,9 +40,12 @@ struct Material {
     double alpha = 1;
     std::string texture;        // image multiplied into the colour, through the faces' UVs
     double textureScale = 1;
+    std::string normalMap;      // tangent-space normal map (green up)
+    double normalStrength = 1;
+    std::string roughnessMap;   // grey image multiplied into roughness
 };
 
-const std::vector<std::string>& modifierTypes();  // mirror array subsurf solidify bevel boolean decimate smooth displace weld triangulate
+const std::vector<std::string>& modifierTypes();  // mirror array subsurf solidify bevel boolean decimate smooth displace weld triangulate armature
 struct Modifier {
     std::string type;
     std::string name;
@@ -59,12 +63,23 @@ struct Keyframe {
     double value = 0;
     std::string interp = "bezier";  // bezier (ease in and out), linear, constant
 };
-// Keyable channels: location.x .. scale.z.
+// Keyable channels: location.x .. scale.z, and on armatures pose.<bone>.rotation.x .. pose.<bone>.location.z.
 const std::vector<std::string>& channelNames();
+
+// A bone of an armature, in the armature's own space. Like Blender, its Y axis runs from head to tail.
+struct Bone {
+    std::string name;
+    std::string parent;
+    Vec3 head{0, 0, 0}, tail{0, 0, 1};
+    double roll = 0;            // degrees about its own axis
+    // the pose (posed in the window, keyed per frame): rotation in degrees about its own X, Y, Z, and a move
+    Vec3 rotation{0, 0, 0};
+    Vec3 location{0, 0, 0};
+};
 
 struct Object {
     std::string name;
-    std::string type = "mesh";  // mesh, empty, light, camera
+    std::string type = "mesh";  // mesh, empty, light, camera, armature
     std::string data;           // mesh objects: the mesh they show (shared by linked duplicates)
     std::string parent;
     std::string collection = "Collection";
@@ -83,6 +98,10 @@ struct Object {
     double power = 1000;  // point/area watts-ish; sun strength
     double size = 0.1;    // point radius, area width, sun angle
     double fov = 40;      // camera vertical field of view
+    // armatures: their bones, parents first
+    std::vector<Bone> bones;
+    // meshes: vertex groups, a weight per vertex of its mesh for each bone (skinning)
+    std::map<std::string, std::vector<float>> weights;
 
     Mat4 local() const;  // translate * rotate * scale
 };
@@ -98,11 +117,20 @@ struct Scene {
     std::vector<Material> materials;
     std::vector<Collection> collections{{"Collection", true}};
     std::string active;
+    // weight paint: the viewport colours this bone's weights (blue 0 .. red 1) on meshes that have them
+    std::string paintBone;
     SelectMode selectMode = SelectMode::Vertex;
     bool editMode = false;
     Vec3 cursor{0, 0, 0};
     int frame = 1, frameStart = 1, frameEnd = 48;
     double fps = 24;
+    // world (Blender's World): what lights renders from all around
+    std::string worldType = "gradient";  // gradient, color, hdri, none
+    Vec3 worldColor{0.30, 0.48, 0.80};   // sRGB: zenith (gradient) or the one colour
+    std::string hdri;                     // equirectangular panorama for worldType hdri
+    double hdriRotation = 0;              // degrees about z
+    double worldStrength = 0.5;
+    bool worldVisible = false;            // renders show the world behind objects (else a light grey)
 };
 
 // One object evaluated: modifiers applied, triangulated, in world space.
@@ -190,6 +218,24 @@ struct ViewBuffer {
     int at(int x, int y) const { return (x < 0 || y < 0 || x >= proj.width || y >= proj.height) ? -1 : y * proj.width + x; }
 };
 ViewBuffer viewBuffer(const ModelDoc& doc, const OrbitView& view, int width, int height, bool cage);
+
+// ---- rigging (rig.cpp) ----
+
+const Bone* findBone(const Object& armature, const std::string& name);
+Bone* findBone(Object& armature, const std::string& name);
+// A bone's rest frame in armature space: origin at the head, Y along the bone.
+Mat4 boneRest(const Bone& b);
+// Each bone's posed frame in armature space (rest frames with the pose applied down the chain).
+std::map<std::string, Mat4> posedBones(const Object& armature);
+// Per bone: rest -> posed, in world space (what moves a skinned vertex).
+std::map<std::string, Mat4> skinMatrices(const ModelDoc& doc, const Object& armature);
+// Weights from distance to each bone (Blender's "with automatic weights", roughly): up to 4 bones per vertex.
+void autoWeights(const ModelDoc& doc, Object& meshObject, const Object& armature);
+// The armature modifier: skins `m` (in o's object space) by the armature named in mod.text["object"].
+PolyMesh applyArmature(const ModelDoc& doc, const Object& o, const PolyMesh& m, const Modifier& mod);
+// glTF with the skin, bone hierarchy and pose keys as an animation (for game engines: Godot, Unity, ...).
+std::string exportSkinnedGltf(const ModelDoc& doc, const std::filesystem::path& path, bool modifiers);
+bool hasSkin(const ModelDoc& doc);
 
 // ---- files ----
 

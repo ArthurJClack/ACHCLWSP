@@ -1,6 +1,7 @@
 // The effects rack: the effect table, settings parsing and describing, and
 // the stateful processors that run a rack (with automation) over audio.
 #include "wetwaresuite/audio/rack.hpp"
+#include "wetwaresuite/audio/clap_host.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -989,6 +990,7 @@ std::string formatEffectValue(const EffectParam& p, double v) {
 }
 
 std::string describeEffect(const Effect& e) {
+    if (e.type == "clap") return describeClapEffect(e);
     const EffectType* t = findEffectType(e.type);
     if (!t) return e.type + " (unknown)";
     std::string s = t->name + ":";
@@ -1032,6 +1034,7 @@ double Processor::get(const std::string& name) const {
 }
 
 std::unique_ptr<Processor> makeProcessor(const Effect& e, int rate, int channels) {
+    if (e.type == "clap") return makeClapProcessor(e, rate, channels);
     const EffectType* t = findEffectType(e.type);
     if (!t) return nullptr;
     std::unique_ptr<Processor> p;
@@ -1063,6 +1066,7 @@ std::unique_ptr<Processor> makeProcessor(const Effect& e, int rate, int channels
 
 double effectTail(const Effect& e) {
     if (e.bypass) return 0;
+    if (e.type == "clap") return 3.0;  // a plugin may ring on (reverbs); silent ends are trimmed after
     if (e.type == "reverb") return 1.0 + 4.0 * std::clamp(e.get("room"), 0.0, 1.0) + e.get("predelay") * 0.001;
     if (e.type == "delay") {
         const double fb = std::clamp(e.get("feedback"), 0.0, 0.95), t = e.get("time") * 0.001;
@@ -1120,6 +1124,15 @@ bool validTarget(const std::string& target, const Rack& rack, std::string& error
         error = "there's no effect " + std::to_string(i) + " in the rack (it has " + std::to_string(rack.size()) + ", numbered from 0)";
         return false;
     }
+    if (rack[static_cast<std::size_t>(i)].type == "clap") {
+        double lo = 0, hi = 0;
+        const bool idForm = p.size() > 1 && p[0] == 'p' && std::all_of(p.begin() + 1, p.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; });
+        if (!idForm) {
+            error = "automate a plugin setting by its id, e.g. fx" + std::to_string(i) + ".p7 (audio.fx_list shows them)";
+            return false;
+        }
+        return clapParamRange(rack[static_cast<std::size_t>(i)], p, lo, hi, error);
+    }
     const EffectType* t = findEffectType(rack[static_cast<std::size_t>(i)].type);
     if (!t || !t->param(p)) {
         error = "effect " + std::to_string(i) + " (" + rack[static_cast<std::size_t>(i)].type + ") has no setting \"" + p + "\"";
@@ -1134,6 +1147,10 @@ bool targetRange(const std::string& target, const Rack& rack, double& lo, double
     int i = 0;
     std::string p;
     if (!parseFxTarget(target, i, p) || i < 0 || i >= static_cast<int>(rack.size())) return false;
+    if (rack[static_cast<std::size_t>(i)].type == "clap") {
+        std::string error;
+        return clapParamRange(rack[static_cast<std::size_t>(i)], p, lo, hi, error);
+    }
     const EffectType* t = findEffectType(rack[static_cast<std::size_t>(i)].type);
     const EffectParam* prm = t ? t->param(p) : nullptr;
     if (!prm) return false;

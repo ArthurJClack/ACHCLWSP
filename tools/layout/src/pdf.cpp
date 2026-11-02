@@ -147,7 +147,7 @@ public:
             r += " >>";
         };
         uni_.finish();
-        if (uni_.used()) fontObjects_["FU"] = uni_.id();
+        for (const auto& [name, id] : uni_.resources()) fontObjects_[name] = id;
         dict("Font", fontObjects_);
         dict("XObject", imageObjects_);
         dict("ExtGState", gsObjects_);

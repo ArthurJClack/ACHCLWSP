@@ -2,6 +2,7 @@
 // the CLI, batch scripts and MCP can work on the same document step by step.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -40,6 +41,7 @@ struct OrbitView {
     double panX = 0;
     double panY = 0;
     bool antialias = true;  // off while dragging, for speed
+    std::string shading;    // material (default), solid, matcap, wireframe or xray
     // set: draw with exactly this camera instead (looking straight at a sketch, or holding the
     // view still while a handle is dragged and the part changes size)
     std::optional<ViewCamera> camera;
@@ -57,13 +59,21 @@ struct TimelineClip {
     double headroom = -1;   // seconds that can still be revealed before the start (-1 = no limit)
     double tailroom = -1;   // ... and after the end
     // editors with more to show (video timelines) fill these in
-    std::vector<double> keyframes;  // timeline seconds of the clip's keyframes, drawn as diamonds
+    std::vector<double> keyframes;  // timeline seconds of the clip's keyframes, drawn as diamonds (dragging one runs MoveKey)
+    std::string curveName;          // an animated property, drawn as a line across the selected clip
+    std::vector<float> curve;       // its value at evenly spaced times across the clip, 0..1 of its range
     double transitionIn = 0;        // seconds at its start that blend with the clip before
     std::string link;               // clips with the same non-empty link are selected together
     // where its media comes from, so the window can draw thumbnails and waveforms (Document::clipMedia)
     double sourceIn = 0;  // source seconds at the clip's start
     double speed = 1;     // source seconds per timeline second (negative: plays backwards)
     bool picture = false, sound = false;  // what clipMedia can show for it
+    std::string source;                   // the file it plays (for the media bin), if any
+    // fade and gain handles drawn on the clip (audio): dragging one runs SetProperty
+    // "fade_in" / "fade_out" (seconds) or "gain" (dB). < 0 fades = no handles.
+    double fadeIn = -1, fadeOut = -1;
+    double gainDb = 0;
+    bool gainHandle = false;
 };
 
 // A switch at the head of a track (lock, mute, solo, hide). Clicking it runs the document's
@@ -99,9 +109,10 @@ struct TimelineLayout {
     double cursor = -1;  // the document's playhead (-1: the window keeps its own)
     double inPoint = -1, outPoint = -1;
     std::vector<TimelineMarker> markers;
+    std::vector<std::string> media;  // the media bin (files that can be dragged onto tracks, AddFile)
 };
 
-enum class TimelineEditKind { Move, TrimStart, TrimEnd, Split, Delete, Cursor, Razor, RippleDelete, Toggle, Marker, InPoint, OutPoint, Transition, AddFile, SetProperty };
+enum class TimelineEditKind { Move, TrimStart, TrimEnd, Split, Delete, Cursor, Razor, RippleDelete, Toggle, Marker, InPoint, OutPoint, Transition, AddFile, SetProperty, MoveKey };
 
 struct TimelineEdit {
     TimelineEditKind kind = TimelineEditKind::Move;
@@ -110,8 +121,10 @@ struct TimelineEdit {
     std::string toTrack;  // Move: the track it lands on (may be the same)
     double start = 0;   // Move/TrimStart: new start; TrimStart keeps the end
     double length = 0;  // TrimEnd: new length
-    double at = 0;      // Split, Cursor, Razor, Marker, InPoint, OutPoint: timeline time; SetProperty: the new value
+    double at = 0;      // Split, Cursor, Razor, Marker, InPoint, OutPoint: timeline time; SetProperty: the new value; MoveKey: the keyframe's time
+                        // (MoveKey puts it at `start`, timeline seconds)
     std::string name;   // Toggle: which switch; Transition: its type; AddFile: the file's path; SetProperty: which one
+    double place = -1;  // AddFile: timeline time to put it at (-1: the end of the track)
 };
 
 // One of a selected clip's everyday settings, shown as a slider (or a switch) next to the
@@ -174,6 +187,7 @@ struct CellGrid {
     std::vector<std::string> sheets;
     int active = 0;
     int usedRows = 0, usedCols = 0;  // the used range, from A1
+    std::vector<std::pair<int, int>> frozen;  // per sheet: rows at the top and columns at the left that don't scroll
 };
 
 class Document {
@@ -182,6 +196,9 @@ public:
     virtual std::string kind() const = 0;     // "image", "vector", ...
     virtual std::string summary() const = 0;  // one line: size, layers, path
     virtual std::unique_ptr<Attachment> preview() const { return nullptr; }
+    // The window's size where the preview is shown. Documents whose preview follows that
+    // shape (maps) keep it and return true when it changed enough to draw again.
+    virtual bool setViewShape(int /*width*/, int /*height*/) { return false; }
     // 3D documents draw themselves from any angle into rgba (width * height * 4 bytes)
     // and return true; everything else returns false. A 0 x 0 call only asks
     // whether the document can (true for 3D documents), without drawing.

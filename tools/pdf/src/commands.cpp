@@ -97,6 +97,8 @@ private:
 
 }  // namespace
 
+std::shared_ptr<PdfDoc> findPdfDoc(Session& s, const Params& p, std::string& id, std::string& error) { return findDoc(s, p, id, error); }
+
 ActionFactory docCommand(Session& session, DocFn fn, bool undoable) {
     return [&session, fn, undoable](const Params& p) -> std::unique_ptr<Action> {
         std::string id, error;
@@ -304,14 +306,40 @@ void registerFileCommands(Session& session) {
 
     reg.add({"pdf.open", "Open PDF",
              "Open any PDF to view, mark up, fill in, sign or edit. Returns a doc id like pdf1. Nothing changes on disk until pdf.save.",
-             {str("path", "the PDF file", true)}, false, true},
+             {str("path", "the PDF file", true), str("password", "for a password-protected PDF: its open (user) or owner password", false)},
+             false, true},
             plainCommand([&session](const Params& p) -> Result {
                 const std::string path = stringParam(p, "path");
-                auto file = std::make_shared<const PdfFile>(PdfFile::load(pathFromUtf8(path)));
-                if (file->encrypted()) return Result::failure(path + " is password-protected; this editor can't open encrypted PDFs yet");
+                const std::string password = stringParam(p, "password", "");
+                std::shared_ptr<const PdfFile> file;
+                try {
+                    file = std::make_shared<const PdfFile>(PdfFile::load(pathFromUtf8(path), password));
+                } catch (const PasswordError& e) {
+                    return Result::failure(path + (e.given ? ": that password doesn't open it" : " is password-protected; open it with password=..."));
+                }
+                if (file->encrypted()) return Result::failure(path + " is password-protected and couldn't be unlocked");
                 if (file->pageCount() == 0) return Result::failure(path + " has no pages");
                 auto doc = std::make_shared<PdfDoc>();
                 doc->path = path;
+                if (file->wasEncrypted()) {  // saving keeps it locked with the same password (pdf.protect remove=true takes it off)
+                    doc->data.protect = true;
+                    // opened with the owner password: keep it as the open password too, unless the file
+                    // opens with no password at all (then it only had restrictions)
+                    bool opensWithout = !password.empty() && file->openedAsOwner();
+                    if (opensWithout) {
+                        try {
+                            (void)PdfFile::load(pathFromUtf8(path), "");
+                        } catch (const PasswordError&) {
+                            opensWithout = false;
+                        }
+                    }
+                    doc->data.userPassword = opensWithout ? std::string() : password;
+                    doc->data.ownerPassword = password;
+                    const int perms = file->permissions();
+                    doc->data.allowPrint = (perms & 4) != 0;
+                    doc->data.allowCopy = (perms & 16) != 0;
+                    doc->data.allowEdit = (perms & 8) != 0;
+                }
                 doc->data.files.push_back(file);
                 for (int i = 0; i < file->pageCount(); ++i) {
                     PageEntry e;
@@ -319,8 +347,9 @@ void registerFileCommands(Session& session) {
                     e.index = i;
                     doc->data.pages.push_back(std::move(e));
                 }
-                Result r = created(session, doc, "opened");
+                Result r = created(session, doc, file->wasEncrypted() ? "opened (" + file->security() + ", unlocked" + (file->openedAsOwner() ? " as owner" : "") + ")" : "opened");
                 r.with("fields", static_cast<std::int64_t>(doc->fields().size()));
+                if (file->wasEncrypted()) r.with("security", file->security()).with("owner", file->openedAsOwner());
                 return r;
             }));
 
@@ -362,17 +391,50 @@ void registerFileCommands(Session& session) {
                            if (path.empty()) return Result::failure("say where to save with path=...");
                            std::vector<int> only;
                            if (has(p, "pages")) only = pagesParam(d.data, p);
-                           const std::string bytes = saveBytes(d.data, boolParam(p, "flatten", false), has(p, "pages") ? &only : nullptr);
+                           const std::string bytes = finishBytes(d.data, saveBytes(d.data, boolParam(p, "flatten", false), has(p, "pages") ? &only : nullptr));
                            writeBytes(path, bytes);
                            if (!has(p, "pages")) d.path = path;
                            const std::size_t n = has(p, "pages") ? only.size() : d.data.pages.size();
                            return Result::success("saved " + id + " to " + path + " (" + std::to_string(n) + " page" + (n == 1 ? "" : "s") + ", " +
-                                                      std::to_string(bytes.size() / 1024) + " KB)",
+                                                      std::to_string(bytes.size() / 1024) + " KB" + (d.data.protect ? ", password-protected" : "") +
+                                                      (d.data.digital ? ", digitally signed" : "") + ")",
                                                   path)
                                .with("path", path)
                                .with("bytes", static_cast<std::int64_t>(bytes.size()));
                        },
                        false));
+
+    reg.add({"pdf.protect", "Password Protect",
+             "Lock the saved PDF with a password (AES-256, opens in every PDF reader): password= is needed to open it; owner= is "
+             "needed to print, copy or change it when print/copy/edit=false (owner alone: anyone can open it, only you can change "
+             "it). remove=true saves it unlocked again. Takes effect on the next pdf.save.",
+             {docSpec(), str("password", "the password to open it (empty: opens without one)", false), str("owner", "the owner password (default: the same)", false),
+              flag("print", "allow printing", true), flag("copy", "allow copying text", true), flag("edit", "allow changes and comments", true),
+              flag("remove", "take the password off", false)},
+             true, false},
+            docCommand(session,
+                       [](PdfDoc& d, const Params& p, const std::string& id) -> Result {
+                           if (boolParam(p, "remove", false)) {
+                               d.data.protect = false;
+                               d.data.userPassword.clear();
+                               d.data.ownerPassword.clear();
+                               return Result::success(id + " will save without a password");
+                           }
+                           const std::string user = stringParam(p, "password", ""), owner = stringParam(p, "owner", "");
+                           if (user.empty() && owner.empty()) return Result::failure("give password= (to open it) and/or owner= (to change it)");
+                           d.data.protect = true;
+                           d.data.userPassword = user;
+                           d.data.ownerPassword = owner.empty() ? user : owner;
+                           d.data.allowPrint = boolParam(p, "print", true);
+                           d.data.allowCopy = boolParam(p, "copy", true);
+                           d.data.allowEdit = boolParam(p, "edit", true);
+                           std::string t = id + " will save " + (user.empty() ? "openable by anyone" : "locked with a password");
+                           if (!d.data.allowPrint || !d.data.allowCopy || !d.data.allowEdit)
+                               t += std::string(", owner password needed to") + (!d.data.allowPrint ? " print" : "") + (!d.data.allowCopy ? " copy" : "") +
+                                    (!d.data.allowEdit ? " edit" : "");
+                           return Result::success(t + " (AES-256)");
+                       },
+                       true));
 
     reg.add({"pdf.close", "Close PDF", "Close an open PDF without saving (undo opens it again).", {docSpec()}, true, false},
             [&session](const Params& p) -> std::unique_ptr<Action> {
@@ -428,7 +490,7 @@ void registerFileCommands(Session& session) {
                        },
                        false));
 
-    reg.add({"pdf.text", "Read Text", "The text of the pages (all, or pages=\"2-4\"), line by line. Scanned pages without a text layer come back empty.",
+    reg.add({"pdf.text", "Read Text", "The text of the pages (all, or pages=\"2-4\"), line by line. Scanned pages without a text layer come back empty (pdf.ocr reads them).",
              {docSpec(), str("pages", "pages to read, e.g. 1-3,5 or last", false, std::string("all")), flag("boxes", "add each line's x, y, w, h", false)},
              false, true},
             docCommand(session,
@@ -616,6 +678,8 @@ void registerCommands(Session& session) {
     tool::registerCoverCommands(session);
     tool::registerMarkCommands(session);
     tool::registerPageCommands(session);
+    tool::registerSignCommands(session);
+    tool::registerOcrCommands(session);
 }
 
 }  // namespace wetwaresuite::pdf

@@ -41,6 +41,12 @@ mesh::Mesh blendEdges(const mesh::Mesh& body, const std::vector<SharpEdge>& edge
 // directions) on the body's outside in that direction are removed.
 mesh::Mesh shell(const mesh::Mesh& body, double thickness, const std::vector<mesh::Vec3>& open, const Csg& csg);
 
+// A face of the body moved along its own normals by distance (out when positive, in when negative),
+// flat or curved: the smooth patch around the triangle nearest `at` (neighbours bending less than
+// 20 degrees), thickened into a closed slab and added to or cut from the body. Throws
+// std::runtime_error when there is no face there or the result falls apart.
+mesh::Mesh offsetFace(const mesh::Mesh& body, const mesh::Vec3& at, double distance, const Csg& csg);
+
 // Direction for an open-face name: top bottom front back left right, +x -x +y -y +z -z.
 bool directionByName(const std::string& name, mesh::Vec3& out);
 

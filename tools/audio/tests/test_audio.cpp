@@ -1,3 +1,5 @@
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <filesystem>
 
@@ -327,6 +329,67 @@ int main() {
         CHECK(call(server, 7, "undo", json::object())["isError"] == false);
         json bad = call(server, 8, "audio_eq", {{"doc", "aud1"}, {"type", "wobble"}, {"frequency", 100}});
         CHECK(bad["isError"] == true);
+    }
+
+    // ---- recording (test tone; silence with no input) and live playback refresh ----
+    {
+        Session rs;
+        audio::registerCommands(rs);
+        Result rec = rs.run("audio.record", {{"seconds", 0.3}, {"device", std::string("tone")}, {"rate", std::int64_t{16000}}});
+        CHECK(rec.ok);
+        const std::string take = rec.ok ? std::get<std::string>(*rec.field("doc")) : "";
+        auto takeDoc = rs.workspace().getAs<audio::AudioDoc>(take);
+        CHECK(takeDoc && takeDoc->audio.rate == 16000 && takeDoc->audio.channelCount() == 1 && std::fabs(takeDoc->audio.seconds() - 0.3) < 0.02);
+        CHECK(rs.run("audio.record_start", {{"device", std::string("tone")}}).ok);
+        CHECK(!rs.run("audio.record_start", {}).ok);  // already going
+        for (int k = 0; k < 100 && numField(rs.run("audio.record_status", {}), "seconds") < 0.05; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        Result stop = rs.run("audio.record_stop", {});
+        CHECK(stop.ok && rs.workspace().getAs<audio::AudioDoc>(std::get<std::string>(*stop.field("doc"))));
+        CHECK(!rs.run("audio.record_stop", {}).ok);  // nothing recording
+        CHECK(rs.run("audio.record_devices", {}).ok);
+        // hear an edit while it plays: the gain change is swapped in, the playhead keeps going
+        Result tone = rs.run("audio.new", {{"kind", std::string("tone")}, {"seconds", 3.0}});
+        const std::string id = std::get<std::string>(*tone.field("doc"));
+        CHECK(rs.run("audio.play", {{"doc", id}}).ok);
+        CHECK(rs.run("audio.trim", {{"doc", id}, {"start", 0.0}, {"end", 2.0}}).ok);
+        Result fresh = rs.run("audio.refresh", {});
+        CHECK(fresh.ok && std::get<double>(*fresh.field("length")) < 2.01 && std::get<bool>(*fresh.field("playing")));
+        rs.run("audio.stop", {});
+        CHECK(rs.run("audio.refresh", {}).message.find("nothing is playing") != std::string::npos);
+    }
+
+    // ---- effects buses and sends ----
+    {
+        Session bs;
+        audio::registerCommands(bs);
+        const std::string P = std::get<std::string>(*bs.run("audio.project_new", {{"rate", std::int64_t{22050}}}).field("project"));
+        const std::string click = std::get<std::string>(*bs.run("audio.new", {{"kind", std::string("tone")}, {"seconds", 0.2}, {"rate", std::int64_t{22050}}}).field("doc"));
+        CHECK(bs.run("audio.track_add", {{"project", P}}).ok);
+        CHECK(bs.run("audio.clip_add", {{"project", P}, {"track", std::int64_t{0}}, {"doc", click}, {"at", 0.0}}).ok);
+        auto mixSeconds = [&] { return numField(bs.run("audio.mixdown", {{"project", P}}), "seconds"); };
+        const double dry = mixSeconds();
+        Result bus = bs.run("audio.bus_add", {{"project", P}, {"fx", std::string("reverb")}, {"values", std::string("room=0.9 wet=1 dry=0")}});
+        CHECK(bus.ok && numField(bus, "bus") == 0);
+        CHECK(!bs.run("audio.send", {{"project", P}, {"track", std::int64_t{0}}, {"bus", std::int64_t{3}}}).ok);
+        CHECK(bs.run("audio.send", {{"project", P}, {"track", std::int64_t{0}}, {"bus", std::int64_t{0}}, {"level", 0.0}}).ok);
+        const double wet = mixSeconds();
+        CHECK(wet > dry + 0.3);  // the reverb tail rings past the click
+        CHECK(bs.run("audio.fx_add", {{"project", P}, {"bus", std::int64_t{0}}, {"type", std::string("eq")}}).ok);
+        Result list = bs.run("audio.fx_list", {{"project", P}});
+        CHECK(std::get<std::string>(*list.field("rows")).find("bus0\t1\teq") != std::string::npos);
+        CHECK(std::get<std::string>(*bs.run("audio.sends", {{"project", P}}).field("rows")).find("0\treverb\t0\t0\t0\t0") == 0);
+        // saved and opened again, the bus and the send come back
+        CHECK(bs.run("audio.project_save", {{"project", P}, {"path", (dir / "bus.json").string()}}).ok);
+        Result again = bs.run("audio.project_open", {{"path", (dir / "bus.json").string()}});
+        CHECK(again.ok);
+        auto reopened = bs.workspace().getAs<audio::ProjectDoc>(std::get<std::string>(*again.field("project")));
+        CHECK(reopened && reopened->project.buses.size() == 1 && reopened->project.buses[0].fx.size() == 2 &&
+              reopened->project.tracks[0].sends.size() == 1);
+        CHECK(bs.run("audio.bus_set", {{"project", P}, {"bus", std::int64_t{0}}, {"mute", true}}).ok);
+        CHECK(near(mixSeconds(), dry, 0.05));
+        CHECK(bs.run("audio.bus_remove", {{"project", P}, {"bus", std::int64_t{0}}}).ok);
+        auto pd = bs.workspace().getAs<audio::ProjectDoc>(P);
+        CHECK(pd->project.buses.empty() && pd->project.tracks[0].sends.empty());
     }
 
     fs::remove_all(dir);

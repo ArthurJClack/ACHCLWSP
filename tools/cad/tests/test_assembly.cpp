@@ -267,6 +267,81 @@ void testDrawings() {
     CHECK(!run(s, "cad.drawing doc=nothing").ok);
 }
 
+
+// limits stop a slider, gears turn together, and dragging moves the rest
+void testLimitsGearsDrag() {
+    Session s;
+    registerCommands(s);
+    makeParts(s);
+    run(s, "cad.assembly_new");
+    run(s, "cad.assembly_insert doc=asm1 part=cad1 name=base");
+    run(s, "cad.assembly_insert doc=asm1 part=cad2 name=peg x=100");
+    run(s, "cad.mate doc=asm1 type=concentric a=base/h1 b=peg/pin");
+    // a slot: the peg's bottom can sit 0 to 5 above the plate
+    Result r = run(s, "cad.mate doc=asm1 type=distance a=base/top b=peg/bottom min=0 max=5 name=travel");
+    CHECK(r.ok && text(r, "limits_hit") == "travel");
+    CHECK(near(componentBounds(s, "asm1", "peg").min.z, 10, 1e-6));
+    r = run(s, "cad.assembly_move doc=asm1 component=peg z=3 relative=true");
+    CHECK(r.ok && text(r, "limits_hit").empty() && near(componentBounds(s, "asm1", "peg").min.z, 13, 1e-6));
+    r = run(s, "cad.assembly_move doc=asm1 component=peg z=50 relative=true");
+    CHECK(r.ok && text(r, "limits_hit") == "travel" && near(componentBounds(s, "asm1", "peg").min.z, 15, 1e-6));
+    CHECK(run(s, "cad.mate_set doc=asm1 mate=travel max=20").ok);
+    CHECK(!run(s, "cad.mate doc=asm1 type=distance a=base/top b=peg/bottom min=5 max=1").ok);
+    CHECK(!run(s, "cad.mate doc=asm1 type=distance a=base/top b=peg/bottom").ok);
+
+    // two gears on a plate, the second turning twice as fast the other way
+    Session g;
+    registerCommands(g);
+    run(g, "cad.new");
+    run(g, "cad.box doc=cad1 name=plate width=80 depth=40 height=10");
+    run(g, "cad.hole doc=cad1 name=h1 target=plate diameter=6 x=20 y=20");
+    run(g, "cad.hole doc=cad1 name=h2 target=plate diameter=6 x=50 y=20");
+    run(g, "cad.new");
+    run(g, "cad.cylinder doc=cad2 name=wheel diameter=20 height=5 segments=24");
+    run(g, "cad.box doc=cad2 name=tooth width=2 depth=2 height=5 x=9 y=-1");
+    run(g, "cad.boolean doc=cad2 name=gear op=union a=wheel b=tooth");
+    run(g, "cad.assembly_new");
+    run(g, "cad.assembly_insert doc=asm1 part=cad1 name=plate");
+    run(g, "cad.assembly_insert doc=asm1 part=cad2 name=g1 x=-40");
+    run(g, "cad.assembly_insert doc=asm1 part=cad2 name=g2 x=90");
+    for (const char* n : {"1", "2"}) {
+        CHECK(run(g, std::string("cad.mate doc=asm1 type=concentric a=plate/h") + n + " b=g" + n + "/wheel").ok);
+        CHECK(run(g, std::string("cad.mate doc=asm1 type=coincident a=plate/top b=g") + n + "/bottom").ok);
+    }
+    r = run(g, "cad.mate doc=asm1 type=gear a=g1/wheel b=g2/wheel value=2");
+    CHECK(r.ok && num(r, "dof") == 1);
+    auto turn = [&](const std::string& comp) {
+        auto doc = g.workspace().getAs<AssemblyDoc>("asm1");
+        const mesh::Vec3 x = doc->findComponent(comp)->pose.direction({1, 0, 0});
+        return std::atan2(x.y, x.x) * 180 / kPi;
+    };
+    const double a1 = turn("g1"), a2 = turn("g2");
+    r = run(g, "cad.assembly_move doc=asm1 component=g1 rz=10 relative=true drag=true");
+    CHECK(r.ok);
+    CHECK(near(turn("g1") - a1, 10, 1e-4) && near(turn("g2") - a2, -20, 1e-4));
+    // the turning adds up drag by drag
+    run(g, "cad.assembly_move doc=asm1 component=g1 rz=10 relative=true drag=true");
+    CHECK(near(turn("g1") - a1, 20, 1e-4) && near(turn("g2") - a2, -40, 1e-4));
+    // and still holds after a save and open
+    const auto path = tmp() / "gears.wwasm";
+    CHECK(run(g, "cad.assembly_save doc=asm1 path=\"" + path.string() + "\"").ok);
+    CHECK(slurp(path).find("\"gear\"") != std::string::npos);
+    CHECK(!run(g, "cad.mate doc=asm1 type=gear a=g1/top b=g2/wheel").ok);
+}
+
+void testSectionDetail() {
+    Session s;
+    registerCommands(s);
+    makeParts(s);
+    const auto dxf = tmp() / "section.dxf";
+    Result r = run(s, "cad.drawing doc=cad1 section=x=20 detail=front:20,5,8 path=\"" + dxf.string() + "\"");
+    CHECK(r.ok);
+    const std::string d = slurp(dxf);
+    CHECK(d.find("SECTION A-A") != std::string::npos && d.find("DETAIL B") != std::string::npos);
+    CHECK(d.find("SECTION") != std::string::npos);
+    CHECK(!run(s, "cad.drawing doc=cad1 section=w=3").ok);
+}
+
 }  // namespace
 
 int main() {
@@ -274,5 +349,7 @@ int main() {
     testInterferenceBomExplode();
     testFiles();
     testDrawings();
+    testLimitsGearsDrag();
+    testSectionDetail();
     return check::summary("cad_assembly");
 }

@@ -305,6 +305,7 @@ void registerCommands(Session& session) {
     detail::registerProjectCommands(session, st);
     detail::registerRunCommands(session, st);
     detail::registerGitCommands(session, st);
+    detail::registerLspCommands(session, st);
 }
 
 }  // namespace wetwaresuite::code

@@ -97,6 +97,8 @@ struct Mat {
     V3 emission{0, 0, 0};  // colour x strength
     float transmission = 0, ior = 1.5f, opacity = 1;
     int texture = -1;
+    int normalMap = -1, roughnessMap = -1;  // linear textures
+    float normalStrength = 1;
     float textureScale = 1;
     bool opaque() const { return transmission <= 0 && opacity >= 1; }
 };
@@ -105,6 +107,7 @@ struct Tri {
     V3 p[3];
     V3 n[3];
     float u[3], v[3];
+    V3 tangent, bitangent;  // world-space dP/du and dP/dv, for normal maps
     int material = 0;
 };
 
@@ -125,6 +128,7 @@ struct Surface {
     float u = 0, v = 0;
     const Mat* mat = nullptr;
     V3 base;  // colour x texture
+    float rough = 0.5f;  // roughness x roughness map
 };
 
 struct LightF {
@@ -153,7 +157,10 @@ public:
     std::vector<LightF> lights;
     std::vector<Node> nodes;
     Sky sky;
-    int skyType = 0;  // 0 gradient, 1 colour, 2 none
+    int skyType = 0;  // 0 gradient, 1 colour, 2 none, 3 hdri
+    Texture hdri;     // equirectangular environment, linear
+    V3 hdriAmbient[6];  // average light from +x -x +y -y +z -z, for preview shading
+    float hdriTurn = 0;  // radians about z
     float eps = 1e-4f;  // ray offset, scaled to the scene
     std::vector<std::string> warnings;
 

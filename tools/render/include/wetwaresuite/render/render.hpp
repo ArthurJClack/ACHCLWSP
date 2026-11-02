@@ -11,6 +11,7 @@
 // written next to it as .glb files.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -39,6 +40,10 @@ struct Material {
     double opacity = 1.0;        // < 1 lets light pass straight through (cut-outs, ghosts)
     std::string texture;         // image file multiplied into color; empty = none
     double textureScale = 1.0;   // UV repeat count
+    std::string normalMap;       // tangent-space normal map (OpenGL style, green up); empty = none
+    double normalStrength = 1.0; // 0 = flat .. 1 = as painted .. 2 = exaggerated
+    std::string roughnessMap;    // grey (or glTF green channel) image multiplied into roughness
+    std::string name;            // parts only: the material's name in the file
 };
 
 const std::vector<std::string>& objectTypes();     // box sphere cylinder cone torus plane mesh
@@ -64,6 +69,10 @@ struct Object {
     bool visible = true;
     bool smooth = true;        // smooth normals (false = flat facets)
     Material material;
+    // type mesh from a file with several materials (OBJ + .mtl): one material per
+    // part, and which part each triangle belongs to. Empty = `material` everywhere.
+    std::vector<Material> parts;
+    std::shared_ptr<const std::vector<int>> partOf;
 
     mesh::Mat4 matrix() const;  // translate * rotate * scale
 };
@@ -83,7 +92,9 @@ struct Light {
 };
 
 struct Sky {
-    std::string type = "gradient";  // gradient, color, none (black)
+    std::string type = "gradient";  // gradient, color, none (black), hdri (an equirectangular image)
+    std::string hdri;               // type hdri: panorama image (2:1, any readable format)
+    double rotation = 0;            // type hdri: degrees to turn it about z
     Vec3 zenith{0.30, 0.48, 0.80};
     Vec3 horizon{0.80, 0.86, 0.95};
     Vec3 ground{0.22, 0.20, 0.18};
@@ -134,6 +145,11 @@ void addGround(Scene& scene, double size = 0);
 
 // Moves a mesh so the middle of its bounding box's base is at the origin.
 void centerMesh(mesh::Mesh& m);
+
+// Reads a model file. For OBJ files with several `usemtl` groups it also
+// fills `parts` (from the .mtl: Kd, Ns/Pr, Pm, Ke, d, Ni, map_Kd, map_Bump/norm,
+// map_Pr) and `partOf` (one part index per triangle); otherwise they stay empty.
+mesh::Mesh loadMeshFile(const std::filesystem::path& path, std::vector<Material>& parts, std::vector<int>& partOf);
 
 // Geometry of one object in world space, with normals (and UVs when it had them).
 mesh::Mesh worldMesh(const Object& object);

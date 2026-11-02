@@ -47,6 +47,7 @@ private:
     std::string path_;
     int w_, h_;
     double rate_;
+    bool big_ = false;  // HD or bigger frames: decoded on the graphics card when there is one
     std::unique_ptr<Proc> proc_;
     double t0_ = 0;
     long next_ = 0;  // index of the frame the process gives next
@@ -61,6 +62,7 @@ struct FrameContext::Impl {
     std::map<std::string, std::unique_ptr<VideoReader>> readers;
     std::map<std::string, long> readerUse;
     long useCounter = 0;
+    bool preview = false;      // the previews' context: reads proxies of big sources when they're there
     bool approximate = false;  // scrubbing: a nearby frame from the scrub cache beats waiting for the exact one
     std::map<std::string, std::shared_ptr<const TitleImage>> titles;
     std::map<std::string, std::shared_ptr<const Lut3d>> luts;

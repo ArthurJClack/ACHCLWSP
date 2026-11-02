@@ -49,7 +49,8 @@ constexpr int kEqBands = 8;
 const std::vector<double>& graphicEqFrequencies();
 
 struct Effect {
-    std::string type;
+    std::string type;       // a built-in type, or "clap" for a plugin (clap_host.hpp)
+    std::string plugin;     // clap: "path#id"
     std::map<std::string, double> params;  // missing settings use the type's default
     bool bypass = false;
     double get(const std::string& name) const;

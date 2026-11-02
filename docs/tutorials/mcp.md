@@ -26,6 +26,25 @@ The groups are `photo`, `paint`, `vector`, `convert` and `toolkit`. The session 
 
 Groups bring what they need along: `paint` includes `photo` (opening, previewing and saving live there) and `convert` includes `vector` (it renders SVG). An unknown group name is an error, so typos don't silently serve nothing.
 
+### Big servers list a catalog
+
+The whole suite has over 1,300 tools, and listing them all costs Claude megabytes of schemas before it does anything. So a server with more than 150 tools (`wetwaresuite mcp`, and the office app) lists just three tools plus the session tools:
+
+| tool | what it does |
+| --- | --- |
+| `find_tools` | search by job (`query="round edges"`) or list a family (`query="photo"`); gives names and one line each |
+| `describe_tools` | the full parameters of some tools: `names="cad_fillet,cad_chamfer"` |
+| `run_tool` | run one: `name="cad_fillet"`, `arguments={...}` |
+
+Every tool still answers to its own name, so once Claude has found `photo_resize` it can call it directly. The server's instructions tell Claude the families and how many tools each has.
+
+`--all-tools` lists every tool as before; `--catalog` uses the catalog even on a small server:
+
+```sh
+wetwaresuite mcp --all-tools
+wetwaresuite-image mcp --catalog
+```
+
 ## 2. Connect Claude Code
 
 Use an absolute path to the binary:

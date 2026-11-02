@@ -147,6 +147,14 @@ public:
         return in;
     }
 
+    std::shared_ptr<const Footprint> readModule(const std::string& text) {
+        const Sx root = parseSx(text);
+        if (!root.is("footprint") && !root.is("module")) throw std::runtime_error("not a KiCad footprint (expected (footprint ...))");
+        PcbIn in;
+        readFootprint(root, in);
+        return in.fps.front().fp;
+    }
+
 private:
     std::map<std::string, std::string> nets;
     std::vector<std::array<double, 4>> zoneBoxes;  // pour outlines' bounding boxes
@@ -229,7 +237,7 @@ private:
         f.place.pos = xy(at);
         f.place.bottom = bottom;
         if (std::abs(std::remainder(angle, 90.0)) > 0.5) warn(name + ": footprints at odd angles were turned to the nearest right angle");
-        const int rot = snapAngle(angle);
+        const int rot = static_cast<int>(((std::lround(angle) % 360) + 360) % 360);  // any whole degree
         // KiCad stores a bottom footprint flipped top-to-bottom; here bottom parts mirror left-to-right,
         // which is the same flip turned half a turn
         f.place.rot = bottom ? (rot + 180) % 360 : rot;
@@ -450,6 +458,37 @@ Circuit fromKicadPcb(const std::string& text, std::vector<std::string>* warnings
         }
     }
     return c;
+}
+
+std::shared_ptr<const Footprint> fromKicadMod(const std::string& text, std::vector<std::string>* warnings) {
+    PcbReader reader(warnings);
+    return reader.readModule(text);
+}
+
+std::string toKicadMod(const Footprint& fp) {
+    auto xyS = [](Pt p) { return num(p.x) + " " + num(p.y); };
+    bool smd = true;
+    for (const auto& pad : fp.pads) smd = smd && pad.drill <= 0;
+    std::ostringstream o;
+    o << "(footprint " << quote(fp.name) << " (version 20221018) (generator wetwaresuite)\n  (layer \"F.Cu\")\n";
+    if (!fp.description.empty()) o << "  (descr " << quote(fp.description) << ")\n";
+    o << "  (attr " << (smd ? "smd" : "through_hole") << ")\n";
+    o << "  (fp_text reference \"REF**\" (at 0 " << num(fp.y0 - 0.8) << ") (layer \"F.SilkS\")\n    (effects (font (size 1 1) (thickness 0.15)))\n  )\n";
+    o << "  (fp_text value " << quote(fp.name) << " (at 0 " << num(fp.y1 + 0.8) << ") (layer \"F.Fab\")\n    (effects (font (size 1 1) (thickness 0.15)))\n  )\n";
+    for (const auto& [a, b] : fp.silk)
+        o << "  (fp_line (start " << xyS(a) << ") (end " << xyS(b) << ") (stroke (width 0.12) (type solid)) (layer \"F.SilkS\"))\n";
+    o << "  (fp_rect (start " << xyS({fp.x0, fp.y0}) << ") (end " << xyS({fp.x1, fp.y1}) << ") (stroke (width 0.05) (type solid)) (fill none) (layer \"F.CrtYd\"))\n";
+    for (const auto& pad : fp.pads) {
+        const char* shape = pad.shape == PadShape::Circle ? "circle" : pad.shape == PadShape::Oval ? "oval" : "rect";
+        const bool tht = pad.drill > 0;
+        o << "  (pad " << quote(pad.plated ? pad.number : "") << " " << (tht ? (pad.plated ? "thru_hole" : "np_thru_hole") : "smd") << " " << shape
+          << " (at " << xyS(pad.pos) << ") (size " << num(pad.w) << " " << num(pad.h) << ")";
+        if (tht) o << " (drill " << num(pad.drill) << ") (layers \"*.Cu\" \"*.Mask\")";
+        else o << " (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")";
+        o << ")\n";
+    }
+    o << ")\n";
+    return o.str();
 }
 
 void mergeKicadPcb(Circuit& c, const std::string& text, std::vector<std::string>* warnings) {

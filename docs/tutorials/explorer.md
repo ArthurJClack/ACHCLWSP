@@ -11,7 +11,7 @@
 
 Every change can be undone:
 
-- **Deleting** moves things to the suite's own trash. Undo, or `explorer.restore`, brings them back.
+- **Deleting** moves things to your computer's trash (Recycle Bin, Trash, or the desktop trash on Linux). Undo, or `explorer.restore`, brings them back.
 - **Copies, moves, renames and new folders** can be taken back with undo.
 - **Extracting** an archive can be undone too: undo moves what came out to the trash.
 
@@ -195,7 +195,9 @@ $ wetwaresuite explorer.empty_trash older_days=30
 deleted 0 items for good
 ```
 
-The trash lives in the suite's data folder (`~/.local/share/wetwaresuite/trash` on Linux), so it works the same on every system and from scripts.
+Deleting uses your computer's own trash: the Recycle Bin on Windows, the Trash on macOS, and the desktop trash on Linux (the freedesktop one that GNOME, KDE and others share). So a file deleted in the suite can also be restored from your file manager. The suite keeps a note of each item (in `~/.local/share/wetwaresuite/trash` on Linux), so `explorer.trash` lists it as "in the computer's trash" and `explorer.restore` puts it back.
+
+`explorer.delete system=false`, or `WETWARESUITE_TRASH=suite` in the environment, uses the suite's own trash folder instead. That is handy on servers that have no desktop trash. A file the computer's trash refuses (another drive, for example) goes to the suite's trash, and the result's `rows` say which one each file went to.
 
 - **Restoring.** `explorer.restore` puts a file back where it was, or into `to=`.
 - **Emptying.** `explorer.empty_trash` without `older_days` deletes everything in the trash for good, and that one can't be undone.
@@ -234,7 +236,8 @@ Deletes go to the trash, so a mistaken delete by Claude can be undone in the sam
 
 ## Limitations
 
-- The trash is the suite's own, not the Windows Recycle Bin, macOS Trash or the desktop trash on Linux. Files deleted elsewhere don't show up in it.
+- Files deleted outside the suite don't show up in `explorer.trash`, even though they sit in the same computer trash.
+- Emptying the computer's trash from your file manager removes suite items too; the suite drops its note on the next look.
 - Zip archives over 4 GB, or with more than 65,535 files, need ZIP64, which isn't supported. Use `tar.gz` for those. Encrypted zips can't be opened.
 - Tar archives keep files and folders. Links and device files are skipped.
 - There is no network browsing (SMB, FTP, cloud drives), apart from what your system already mounts as a folder.

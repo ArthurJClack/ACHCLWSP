@@ -43,6 +43,22 @@ struct EnvelopePoint {
     double gainDb = 0;  // linear-in-dB between points, held before the first and after the last
 };
 
+// A send: part of a track's sound (after its volume and pan) also goes to a bus.
+struct Send {
+    int bus = 0;
+    double levelDb = 0;
+};
+
+// A shared effects bus (a reverb or delay several tracks feed): the sends come in,
+// run through its rack, and the result joins the mix before the master.
+struct Bus {
+    std::string name;
+    double gainDb = 0;
+    bool mute = false;
+    Rack fx;
+    std::vector<Automation> automation;  // volume and fx<i>.<setting> lanes
+};
+
 struct Track {
     std::string name;
     double gainDb = 0;
@@ -59,6 +75,7 @@ struct Track {
     double duckRelease = 0.6;   // seconds to come back
     Rack fx;                          // effects, in order, before the volume and pan
     std::vector<Automation> automation;  // pan and fx<i>.<setting> lanes (volume is `envelope`)
+    std::vector<Send> sends;
     double end() const;
 };
 
@@ -78,6 +95,7 @@ struct Project {
     Rack masterFx;                             // after the tracks are summed
     std::vector<Automation> masterAutomation;  // volume and fx<i>.<setting> lanes of the master
     std::vector<Marker> markers;
+    std::vector<Bus> buses;
 
     double seconds() const;
     // Reverb and delay tails of the racks: the mix runs this much past the last clip.
@@ -102,7 +120,7 @@ std::vector<Automation> lanesFromJson(const std::string& text);
 
 // One track rendered (clips, fades, gain, envelope, ducking, pan) at the project's channels.
 Buffer renderTrack(const Project& p, int track);
-// Every audible track summed (solo wins over mute), times the master gain.
+// Every audible track summed (solo wins over mute) with what they send to the buses, times the master gain.
 Buffer mixdown(const Project& p);
 
 // Lanes per track with each clip's waveform, muted tracks greyed out.

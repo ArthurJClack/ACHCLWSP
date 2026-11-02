@@ -294,6 +294,95 @@ int main() {
         CHECK(s.run("code.git_stage", {{"folder", folder}}).ok);
         CHECK(s.run("code.git_unstage", {{"folder", folder}, {"paths", std::string("b.txt")}}).ok);
         CHECK(field(s.run("code.git_status", {{"folder", folder}}), "staged") == "0");
+
+        // remotes, push, fetch, pull and merge against a bare repository on disk (no network)
+        CHECK(s.run("code.git_commit", {{"folder", folder}, {"message", std::string("b")}, {"all", true}}).ok);
+        const fs::path bare = dir / "server.git";
+        CHECK(runProgram({"git", "init", "-q", "--bare", sysutil::fromPath(bare)}).exitCode == 0);
+        CHECK(field(s.run("code.git_remotes", {{"folder", folder}}), "count") == "0");
+        Result rm = s.run("code.git_remotes", {{"folder", folder}, {"add", std::string("origin")}, {"url", sysutil::fromPath(bare)}});
+        CHECK(rm.ok && field(rm, "count") == "1" && field(rm, "rows").rfind("origin\t", 0) == 0);
+        Result push = s.run("code.git_push", {{"folder", folder}});
+        CHECK(push.ok && push.message.find("now its upstream") != std::string::npos);
+        CHECK(s.run("code.git_push", {{"folder", folder}}).message.find("already up to date") != std::string::npos);
+        // a second copy pushes a change; the first pulls it
+        const fs::path other = dir / "other";
+        CHECK(runProgram({"git", "clone", "-q", "-b", "feature", sysutil::fromPath(bare), sysutil::fromPath(other)}).exitCode == 0);
+        const std::string otherFolder = sysutil::fromPath(other);
+        sysutil::writeFile(other / "c.txt", "from the other copy\n");
+        CHECK(s.run("code.git_commit", {{"folder", otherFolder}, {"message", std::string("c")}, {"all", true}}).ok);
+        CHECK(s.run("code.git_push", {{"folder", otherFolder}}).ok);
+        Result fetched = s.run("code.git_fetch", {{"folder", folder}});
+        CHECK(fetched.ok && field(fetched, "behind") == "1" && field(fetched, "ahead") == "0");
+        Result pulled = s.run("code.git_pull", {{"folder", folder}});
+        CHECK(pulled.ok && field(pulled, "commits") == "1" && fs::exists(repo / "c.txt"));
+        CHECK(s.run("code.git_pull", {{"folder", folder}}).message == "already up to date");
+        // both change the same line: the push is refused, the pull stops on the conflict
+        sysutil::writeFile(other / "a.txt", "theirs\n");
+        CHECK(s.run("code.git_commit", {{"folder", otherFolder}, {"message", std::string("theirs")}, {"all", true}}).ok);
+        CHECK(s.run("code.git_push", {{"folder", otherFolder}}).ok);
+        sysutil::writeFile(repo / "a.txt", "ours\n");
+        CHECK(s.run("code.git_commit", {{"folder", folder}, {"message", std::string("ours")}, {"all", true}}).ok);
+        Result refused = s.run("code.git_push", {{"folder", folder}});
+        CHECK(!refused.ok && refused.message.find("git_pull first") != std::string::npos);
+        Result conflict = s.run("code.git_pull", {{"folder", folder}});
+        CHECK(conflict.ok && field(conflict, "conflicts") == "1" && field(conflict, "rows") == "a.txt\n");
+        CHECK(s.run("code.git_merge", {{"folder", folder}, {"abort", true}}).ok && sysutil::readFile(repo / "a.txt") == "ours\n");
+        // merge a local branch in (fast-forward), then resolve a real conflict by hand
+        CHECK(s.run("code.git_switch", {{"folder", folder}, {"branch", std::string("side")}, {"create", true}}).ok);
+        sysutil::writeFile(repo / "d.txt", "d\n");
+        CHECK(s.run("code.git_commit", {{"folder", folder}, {"message", std::string("d")}, {"all", true}}).ok);
+        CHECK(s.run("code.git_switch", {{"folder", folder}, {"branch", std::string("feature")}}).ok);
+        Result ff = s.run("code.git_merge", {{"folder", folder}, {"branch", std::string("side")}});
+        CHECK(ff.ok && ff.message.find("fast-forwarded") != std::string::npos && fs::exists(repo / "d.txt"));
+        Result m2 = s.run("code.git_merge", {{"folder", folder}, {"branch", std::string("origin/feature")}});
+        CHECK(m2.ok && field(m2, "conflicts") == "1");
+        sysutil::writeFile(repo / "a.txt", "both\n");
+        CHECK(s.run("code.git_commit", {{"folder", folder}, {"message", std::string("merged")}, {"all", true}}).ok);
+        CHECK(s.run("code.git_push", {{"folder", folder}}).ok);
+        CHECK(!s.run("code.git_push", {{"folder", folder}, {"remote", std::string("nowhere")}}).ok);
+    }
+
+    // ---- language servers (a fake one built with the tests) ----
+    {
+        const std::string server = std::string("\"") + FAKE_LSP + "\"";
+#ifdef _WIN32
+        _putenv_s("WETWARESUITE_LSP_PYTHON", server.c_str());
+#else
+        setenv("WETWARESUITE_LSP_PYTHON", server.c_str(), 1);
+#endif
+        const fs::path lspDir = dir / "lsp";
+        fs::create_directories(lspDir);
+        sysutil::writeFile(lspDir / "main.py", "def foo():\n    pass\nfoo()  # TODO\npri");
+        Result o = s.run("code.open", {{"path", sysutil::fromPath(lspDir / "main.py")}});
+        CHECK(o.ok);
+        const std::string doc = field(o, "doc");
+        Result dg = s.run("code.diagnostics", {{"doc", doc}});
+        CHECK(dg.ok && field(dg, "count") == "1" && field(dg, "warnings") == "1" && field(dg, "fresh") == "true");
+        CHECK(field(dg, "rows") == "3\t10\twarning\tsomething left to do\n");
+        Result cm = s.run("code.complete", {{"doc", doc}, {"line", std::int64_t{4}}, {"col", std::int64_t{4}}});
+        CHECK(cm.ok && field(cm, "count") == "2" && field(cm, "from_col") == "1");
+        CHECK(field(cm, "rows").rfind("printf\tfunction\tC style\tprintf\n", 0) == 0);  // sorted by the server's sortText; zebra doesn't start with "pri"
+        Result hv = s.run("code.hover", {{"doc", doc}, {"line", std::int64_t{3}}, {"col", std::int64_t{2}}});
+        CHECK(hv.ok && hv.message == "hover at 2:1");
+        Result df = s.run("code.definition", {{"doc", doc}, {"line", std::int64_t{3}}, {"col", std::int64_t{1}}});
+        CHECK(df.ok && field(df, "line") == "1" && field(df, "col") == "5" && field(df, "path").find("main.py") != std::string::npos);
+        Result rf = s.run("code.references", {{"doc", doc}, {"line", std::int64_t{1}}, {"col", std::int64_t{5}}});
+        CHECK(rf.ok && field(rf, "count") == "2" && field(rf, "rows").find("\t3\t1\tfoo()  # TODO\n") != std::string::npos);
+        // a change goes to the server, and the problems follow it
+        CHECK(s.run("code.set_text", {{"doc", doc}, {"text", std::string("# TODO one\n# TODO two\n")}}).ok);
+        Result dg2 = s.run("code.diagnostics", {{"doc", doc}});
+        CHECK(dg2.ok && field(dg2, "count") == "2" && field(dg2, "fresh") == "true");
+        Result st = s.run("code.lsp", {});
+        CHECK(st.ok && field(st, "rows").find("python\t") != std::string::npos && field(st, "rows").find("\trunning\n") != std::string::npos);
+        CHECK(s.run("code.lsp", {{"action", std::string("stop")}}).message == "stopped 1 language server(s)");
+        // it starts again when needed
+        CHECK(s.run("code.hover", {{"doc", doc}, {"line", std::int64_t{1}}, {"col", std::int64_t{1}}}).ok);
+        // unsaved files can't be read by a server
+        Result n = s.run("code.new", {{"language", std::string("python")}, {"text", std::string("x = 1\n")}});
+        Result un = s.run("code.diagnostics", {{"doc", field(n, "doc")}});
+        CHECK(!un.ok && un.message.find("save the file first") != std::string::npos);
+        s.run("code.lsp", {{"action", std::string("stop")}});
     }
 
     // ---- MCP ----
@@ -304,7 +393,7 @@ int main() {
         for (const auto& t : list) {
             if (std::string(t["name"]).rfind("code_", 0) == 0) ++seen;
         }
-        CHECK(seen == 40);
+        CHECK(seen == 51);  // incl. merge, remotes, fetch, pull, push and the language server ones
         json call = {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/call"},
                      {"params", {{"name", "code_new"}, {"arguments", {{"language", "go"}, {"text", "package main\nfunc main() {}\n"}}}}}};
         json res = json::parse(*server.handle(call.dump()))["result"];

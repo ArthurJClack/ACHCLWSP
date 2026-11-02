@@ -88,7 +88,7 @@ bool Shell::keepTrial(const std::string& command, const Params& params) {
 }
 
 void Shell::previewTick() {
-    if (trial_.applied && view3d_.dragging >= 0 && (!form_ || form_->command != trial_.command)) return;  // an arrow's own trial
+    if (trial_.applied && (view3d_.dragging >= 0 || brush3d_.stroking || xform_.active || imgText_.open) && (!form_ || form_->command != trial_.command)) return;  // an arrow's or a brush's own trial
     const bool formFits = form_ && previewable(form_->command) && trial_.applied ? form_->command == trial_.command && currentDoc_ == trial_.doc : true;
     if (trial_.applied && (!form_ || !formFits || !live_.on)) dropTrial();
     if (!form_ || !previewable(form_->command) || (!live_.on && !live_.runNow)) {

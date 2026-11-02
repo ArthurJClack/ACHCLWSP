@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -55,7 +56,7 @@ int jpegComponents(const std::string& b) {
 struct Writer {
     Rebuilder& rb;
     std::map<int, int> fonts;  // standard font index -> object
-    int unicodeFont = 0;
+    std::map<int, int> unicodeFonts;  // fallback font index (pdfdoc::unicodeFontIndex) -> object
     std::map<std::string, int> gstates;  // key -> object
 
     int font(const Font& f) {
@@ -129,19 +130,20 @@ void textOps(Writer& w, Ops& o, const std::string& line, const Font& font, doubl
     o.s += "BT 1 0 0 -1 " + num(x) + " " + num(baseline) + " Tm ";
     // runs: WinAnsi text in the standard font, the rest in the built-in Unicode font
     std::string run;
-    bool uni = false;
+    int uni = -1;  // the run's Unicode font, -1 = the standard font
     auto flush = [&] {
         if (run.empty()) return;
-        if (uni) {
-            o.font("WWFU", w.unicodeFont);
-            o.s += "/WWFU " + num(size) + " Tf " + pdfdoc::glyphText(*pdfdoc::builtinSans(), run) + " Tj ";
+        if (uni >= 0) {
+            const std::string name = "WWFU" + (uni ? std::to_string(uni) : std::string());
+            o.font(name, w.unicodeFonts[uni]);
+            o.s += "/" + name + " " + num(size) + " Tf " + pdfdoc::glyphText(*pdfdoc::unicodeFontAt(uni), run) + " Tj ";
         } else {
             o.s += "/" + fname + " " + num(size) + " Tf " + pdfdoc::text(run) + " Tj ";
         }
         run.clear();
     };
     for (unsigned cp : utf8Decode(line)) {
-        const bool u = w.unicodeFont && pdfdoc::needsUnicode(cp);
+        const int u = pdfdoc::needsUnicode(cp) && w.unicodeFonts.count(pdfdoc::unicodeFontIndex(cp)) ? pdfdoc::unicodeFontIndex(cp) : -1;
         if (u != uni) flush();
         uni = u;
         run += utf8Encode(cp);
@@ -220,6 +222,25 @@ void markOps(Writer& w, Ops& o, const Mark& m) {
             o.s += rgb(m.color) + " rg\n";
             textOps(w, o, m.text, Font{Family::Serif, false, true}, m.size, m.x, m.y + m.h * 0.75);
         }
+    } else if (m.kind == "ocr") {
+        // the words read off a scan, as invisible text over the picture: it can be searched, selected and copied
+        const Font font{Family::Sans, false, false};
+        const int fid = w.font(font);
+        const std::string fname = "WWF" + std::to_string(static_cast<int>(standardOf(font)));
+        o.font(fname, fid);
+        o.s += "BT 3 Tr\n";
+        std::size_t start = 0;
+        for (std::size_t i = 0; i < m.boxes.size(); ++i) {
+            const std::size_t nl = m.text.find('\n', start);
+            const std::string word = m.text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            start = nl == std::string::npos ? m.text.size() : nl + 1;
+            if (word.empty() || 2 * i + 1 >= m.points.size()) continue;
+            const auto& b = m.boxes[i];
+            const double size = std::max(1.0, m.points[2 * i + 1]), natural = textWidth(font, word, size);
+            const double scale = natural > 0 ? std::clamp(100.0 * b[2] / natural, 10.0, 1000.0) : 100.0;
+            o.s += "1 0 0 -1 " + num(b[0]) + " " + num(m.points[2 * i]) + " Tm /" + fname + " " + num(size) + " Tf " + num(scale) + " Tz " + pdfdoc::text(word) + " Tj\n";
+        }
+        o.s += "ET\n";
     } else if (m.kind == "note") {
         const double x = m.x, y = m.y, z = 18;
         o.s += rgb(m.color) + " rg 0.35 0.27 0 RG 0.75 w " + num(x) + " " + num(y) + " m " + num(x + z) + " " + num(y) + " l " + num(x + z) + " " +
@@ -475,17 +496,20 @@ std::string saveBytes(const DocData& d, bool flatten, const std::vector<int>* on
     const PdfFile* main = d.files.empty() ? nullptr : d.files[0].get();
     Rebuilder rb(main);
     Writer w{rb};
-    // the built-in Unicode font, once, with every character the edits need
-    std::set<unsigned> uni;
+    // the Unicode fonts (built in, then system fallbacks for CJK, emoji...), once, with every character the edits need
+    std::map<int, std::set<unsigned>> uni;
     for (const auto& p : d.pages) {
         for (const auto& m : p.marks) {
             if (m.kind != "text" && m.kind != "signature") continue;
             for (unsigned cp : utf8Decode(m.text)) {
-                if (pdfdoc::needsUnicode(cp)) uni.insert(cp);
+                if (pdfdoc::needsUnicode(cp)) uni[pdfdoc::unicodeFontIndex(cp)].insert(cp);
             }
         }
     }
-    if (!uni.empty()) w.unicodeFont = pdfdoc::addUnicodeFont([&rb](std::string body) { return rb.add(std::move(body)); }, *pdfdoc::builtinSans(), uni, "WW");
+    for (const auto& [font, chars] : uni) {
+        w.unicodeFonts[font] = pdfdoc::addUnicodeFont([&rb](std::string body) { return rb.add(std::move(body)); }, *pdfdoc::unicodeFontAt(font), chars,
+                                                      "WW" + (font ? std::to_string(font) : std::string()));
+    }
 
     std::vector<int> order;
     if (only) order = *only;

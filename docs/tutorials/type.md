@@ -473,6 +473,15 @@ exported Blocky Oblique to Blocky-Oblique.ttf (3568 bytes, 16 glyphs)
 
 **Claude.** *"Make a bold of Blocky about 50 % heavier and save it as Blocky-Bold.ttf."* Claude reads the stem width from `type_glyph_info glyph=I` (110), calls `type_embolden amount=28 preview=true`, looks at the overview, `type_remove_overlap`, `type_set_info style=Bold weight=700` and `type_export`.
 
+## In the window
+
+Open a font in `wetwaresuite-draw` (Fonts tab). The canvas shows the glyph overview; pick a tool on the rail to work on one letter:
+
+- **Edit glyph**: the letter big, with the baseline, x-height, cap height, ascender, descender and the advance width drawn as lines. Type the letter (or a glyph name like `zero`, or `U+00E9`) in the **Glyph** box on the bar. Squares are on-curve points, dots are curve handles. Drag a point to reshape the letter; its handles come along. Drag a handle to bend the curve next to it.
+- **Draw glyph**: click corners to draw a new contour into the letter, and click the first corner again to close it. Shift keeps the next edge straight across or up. Tick **Cut a hole** to punch a counter (the hole in an O) instead of adding ink. Esc drops the contour you're drawing.
+
+A letter that doesn't exist yet is made by the first contour you draw. Every change is a `type.draw` command (moves send the whole outline with `mode=replace`), so Ctrl+Z takes it back and it's the same as doing it headless.
+
 ## File formats
 
 | format | open | save / export | notes |
@@ -589,4 +598,4 @@ Example prompts:
 - **Overlap removal** rebuilds only the contours that cross other contours: they are flattened, merged and refitted with curves within `tolerance`, so their points are new (and usually more of them) rather than the ones you drew. Contours that don't cross keep their points exactly.
 - **Auto-kerning is lite.** It compares the glyphs' side profiles in horizontal bands, without knowing about optical rules for specific shapes; treat its result as a first pass and check it on a proof. Auto-spacing gives every glyph the same bearings (round shapes a little less), no more.
 - **Tracing needs clean scans:** dark ink on light paper, one letter per cell, no letter crossing into a neighbouring cell. Light guide lines and the template's labels are ignored; faint ink needs a lower `threshold=`, shadows and coloured paper a higher one, and photos taken at an angle need straightening first (the [photo](photo.md) tool can crop and rotate). `type.trace_image fit=cap`, `xheight` and `ascender` put the lowest ink on the baseline, so descenders need moving down afterwards.
-- **No GUI yet.** Drawing is by numbers (or SVG from a drawing program, or tracing). The coming GUI will call the same commands.
+- **The glyph editor is simple.** It moves points and draws straight-edged contours; curves come from moving the handles of existing points, from SVG, from tracing or from `type.draw curve=smooth`. There's no point adding or deleting in the window yet (`type.draw mode=replace path=...` does anything).

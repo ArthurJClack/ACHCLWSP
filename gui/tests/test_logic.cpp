@@ -393,8 +393,8 @@ void testRetouchCommands() {
     CHECK(session.history().undo() && red() < 60);
 
     // too big an area says so in plain words
-    CHECK(session.run("photo.new", {{"width", std::int64_t{600}}, {"height", std::int64_t{600}}}).ok);
-    CHECK(removeStrokeParams("img2", {100, 300, 500, 300}, 400, 600, 600, p, error));
+    CHECK(session.run("photo.new", {{"width", std::int64_t{2400}}, {"height", std::int64_t{2400}}}).ok);
+    CHECK(removeStrokeParams("img2", {200, 1200, 2200, 1200}, 2300, 2400, 2400, p, error));
     Result big = session.run("photo.remove_object", p);
     CHECK(!big.ok && friendlyError(big.message).find("limit") != std::string::npos);
 }

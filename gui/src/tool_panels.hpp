@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "shell.hpp"
+#include "wetwaresuite/gui/pipeline.hpp"
 
 namespace wetwaresuite::gui {
 
@@ -77,14 +78,41 @@ struct CodeEditor {
     bool readOnly = false;
     bool tabs = false;  // the file indents with tabs
     int widest = 0;     // longest line in columns, for the scroll width
+    // more carets (Alt+click, Ctrl+D, Ctrl+Alt+Up/Down); every edit and move happens at each one
+    struct Caret {
+        TextPos cursor, anchor;
+    };
+    std::vector<Caret> extra;
+    bool wrap = false;         // long lines wrap at the window edge (Alt+Z)
+    std::vector<int> folded;   // first lines of folded blocks, sorted
+    // screen rows: a line can wrap over several, a folded block takes none
+    struct Row {
+        int line = 0, from = 0, to = 0;  // the bytes of the line on this row
+    };
+    std::vector<Row> rows;
+    std::vector<int> lineRow;  // each line's first row, -1 inside a folded block
+    std::uint64_t version = 0, rowsVersion = ~0ull;
+    float rowsWidth = -1;
+    std::size_t lastLineCount = 0;
     // set by the widget for the panel to act on
     bool wantUndo = false, wantRedo = false;
+    bool wantComplete = false;    // Ctrl+Space
+    bool wantDefinition = false;  // F12 or Ctrl+click
+    ImVec2 caretScreen{0, 0};     // where the caret was drawn, for popups
+    float lineHeight = 0;
+    bool menuOpen = false;        // a completion list has Up/Down/Enter/Tab/Esc
+    bool mouseOnText = false;     // the mouse is over a character (for hover notes)
+    TextPos mousePos;
 };
 
 std::string editorText(const CodeEditor& ed);
 void setEditorText(CodeEditor& ed, const std::string& text);  // keeps the cursor where it can
 void editorSelect(CodeEditor& ed, TextPos from, TextPos to);
 std::string editorSelection(const CodeEditor& ed);
+void editorFoldAll(CodeEditor& ed, bool fold);   // fold every block that can be, or open them all
+void editorAddNextMatch(CodeEditor& ed);         // Ctrl+D: a caret at the next copy of the selection
+// Replaces the bytes [from, to) of the caret's line with `text` (a completion), at the primary caret.
+void editorReplaceAtCaret(CodeEditor& ed, int fromCol, const std::string& text);
 // Draws the editor filling `size`; returns true when the text changed.
 bool drawEditor(CodeEditor& ed, ImFont* mono, bool dark, ImVec2 size);
 
@@ -164,6 +192,21 @@ struct CodePanel {
     std::string selectTab;  // tab to bring to the front on the next frame
     tp::Rows languages;     // id, name, extensions
     tp::Rows toolchains;    // name, languages, program
+    // language server
+    bool lsp = false;           // completion, hover, go to definition and live problems
+    std::string lspHint;        // which server is installed, when lsp is off
+    std::string lspHintFor;     // language the hint is about
+    double lspPoll = 0;
+    bool lspWaiting = false;    // the server hasn't looked at the latest text yet
+    tp::Rows lspProblems;       // line, col, severity, message (for the file in the editor)
+    std::string lspProblemsFor;
+    bool compOpen = false;
+    tp::Rows comps, compsAll;   // label, kind, detail, insert
+    int compSel = 0, compFrom = 0, compLine = 0;
+    TextPos hoverAt{-1, -1};
+    double hoverSince = 0;
+    std::string hoverText;
+    bool hoverAsked = false;
 };
 
 struct ExplorerPanel {
@@ -305,8 +348,20 @@ struct PdfPanel {
     int foundAt = -1;
 };
 
+// automate's pipeline builder: blocks you add, fill in and drag into order
+struct PipelinePanel {
+    PipeModel model;
+    int selected = -1;
+    std::string search;              // the add-a-block list's filter
+    bool focusSearch = false;
+    std::string path = "pipeline.json";
+    std::string output;              // what the last run, dry run or save said
+    bool outputOk = true;
+};
+
 struct ToolPanels {
     PdfPanel pdf;
+    PipelinePanel pipeline;
     CalcPanel calc;
     CodePanel code;
     ExplorerPanel explorer;

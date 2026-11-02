@@ -292,10 +292,53 @@ Crs Crs::localTm(double lon0) {
     return c;
 }
 
+Crs Crs::equalEarth() {
+    Crs c;
+    c.kind = EqualEarth;
+    c.falseEasting = 0;
+    return c;
+}
+
+Crs Crs::laea(double lat0, double lon0) {
+    Crs c;
+    c.kind = Laea;
+    c.lat0 = std::clamp(lat0, -90.0, 90.0);
+    c.lon0 = wrap180(lon0);
+    c.falseEasting = 0;
+    return c;
+}
+
 const std::vector<std::string>& Crs::names() {
-    static const std::vector<std::string> n = {"wgs84", "webmercator", "utm33n", "epsg:4326", "epsg:3857", "epsg:32633"};
+    static const std::vector<std::string> n = {"wgs84", "webmercator", "utm33n", "equalearth", "laea", "laea:40,-100", "epsg:4326", "epsg:3857", "epsg:32633"};
     return n;
 }
+
+namespace {
+
+// ---- the authalic sphere: equal-area projections on the ellipsoid ----
+constexpr double kE2 = kF * (2 - kF);
+const double kE = std::sqrt(kE2);
+
+double authalicQ(double sinPhi) {
+    const double es = kE * sinPhi;
+    return (1 - kE2) * (sinPhi / (1 - es * es) - std::log((1 - es) / (1 + es)) / (2 * kE));
+}
+const double kQp = authalicQ(1.0);
+const double kRq = kA * std::sqrt(kQp / 2);
+
+// geodetic latitude (radians) -> authalic, and back (series, good to ~1e-9 rad)
+double toAuthalic(double phi) { return std::asin(std::clamp(authalicQ(std::sin(phi)) / kQp, -1.0, 1.0)); }
+double fromAuthalic(double beta) {
+    const double e4 = kE2 * kE2, e6 = e4 * kE2;
+    return beta + (kE2 / 3 + 31 * e4 / 180 + 517 * e6 / 5040) * std::sin(2 * beta) + (23 * e4 / 360 + 251 * e6 / 3780) * std::sin(4 * beta) +
+           (761 * e6 / 45360) * std::sin(6 * beta);
+}
+
+// Equal Earth (Šavrič, Patterson, Jenny 2018)
+constexpr double kEeA1 = 1.340264, kEeA2 = -0.081106, kEeA3 = 0.000893, kEeA4 = 0.003796;
+const double kEeM = std::sqrt(3.0) / 2;
+
+}  // namespace
 
 namespace {
 
@@ -310,6 +353,13 @@ std::optional<double> wktParam(const std::string& wktLower, const std::string& n
 }
 
 std::optional<Crs> fromEpsg(int code) {
+    if (code == 8857) return Crs::equalEarth();
+    if (code == 3035) {
+        Crs c = Crs::laea(52, 10);
+        c.falseEasting = 4321000;
+        c.falseNorthing = 3210000;
+        return c;
+    }
     if (code == 4326 || code == 4258 || code == 4269 || code == 4979) return Crs::wgs84();  // ETRS89/NAD83 treated as WGS84
     if (code == 3857 || code == 900913 || code == 3785 || code == 102100) return Crs::webMercator();
     if (code >= 32601 && code <= 32660) return Crs::utm(code - 32600, false);
@@ -340,6 +390,21 @@ std::optional<Crs> parseCrsWkt(const std::string& wkt) {
             return Crs::utm(static_cast<int>(std::lround(z)), c.falseNorthing != 0);
         return c;
     }
+    if (w.find("equal_earth") != std::string::npos || w.find("equal earth") != std::string::npos) {
+        Crs c = Crs::equalEarth();
+        c.lon0 = wktParam(w, "central_meridian").value_or(wktParam(w, "longitude of natural origin").value_or(0));
+        c.falseEasting = wktParam(w, "false_easting").value_or(0);
+        c.falseNorthing = wktParam(w, "false_northing").value_or(0);
+        return c;
+    }
+    if (w.find("lambert_azimuthal_equal_area") != std::string::npos || w.find("lambert azimuthal equal area") != std::string::npos) {
+        const double lat0 = wktParam(w, "latitude_of_origin").value_or(wktParam(w, "latitude_of_center").value_or(wktParam(w, "latitude of natural origin").value_or(0)));
+        const double lon0 = wktParam(w, "central_meridian").value_or(wktParam(w, "longitude_of_center").value_or(wktParam(w, "longitude of natural origin").value_or(0)));
+        Crs c = Crs::laea(lat0, lon0);
+        c.falseEasting = wktParam(w, "false_easting").value_or(0);
+        c.falseNorthing = wktParam(w, "false_northing").value_or(0);
+        return c;
+    }
     return std::nullopt;
 }
 
@@ -357,6 +422,19 @@ std::optional<Crs> Crs::parse(const std::string& text) {
         s == "urn:ogc:def:crs:ogc:1.3:crs84")
         return wgs84();
     if (s == "webmercator" || s == "pseudomercator" || s == "mercator" || s == "googlemercator" || s == "sphericalmercator") return webMercator();
+    if (s == "equalearth" || s == "equalarea") return equalEarth();
+    if (s == "laea" || s == "laeaeurope" || s == "etrs89laea") return fromEpsg(3035);
+    if (s.rfind("laea:", 0) == 0) {
+        // laea:lat,lon centred anywhere
+        const std::string rest = raw.substr(raw.find(':') + 1);
+        char* end = nullptr;
+        const double lat = std::strtod(rest.c_str(), &end);
+        if (end == rest.c_str() || *end != ',') return std::nullopt;
+        const char* lonText = end + 1;
+        const double lon = std::strtod(lonText, &end);
+        if (end == lonText || lat < -90 || lat > 90 || lon < -180 || lon > 180) return std::nullopt;
+        return laea(lat, lon);
+    }
     std::string digits = s;
     for (const char* prefix : {"urn:ogc:def:crs:epsg::", "urn:ogc:def:crs:epsg:", "epsg:", "epsg"}) {
         if (digits.rfind(prefix, 0) == 0) {
@@ -387,6 +465,8 @@ std::string Crs::name() const {
     switch (kind) {
         case Geographic: return "WGS84";
         case WebMercator: return "Web Mercator";
+        case EqualEarth: return "Equal Earth";
+        case Laea: return epsg() == 3035 ? "LAEA Europe" : "Lambert azimuthal equal-area (" + fmtNum(lat0) + ", " + fmtNum(lon0) + ")";
         default:
             if (zone) return "UTM " + std::to_string(zone) + (south ? "S" : "N");
             return "transverse Mercator (lon0 " + fmtNum(lon0) + ")";
@@ -397,12 +477,16 @@ int Crs::epsg() const {
     switch (kind) {
         case Geographic: return 4326;
         case WebMercator: return 3857;
+        case EqualEarth: return lon0 == 0 && falseEasting == 0 && falseNorthing == 0 ? 8857 : 0;
+        case Laea: return lat0 == 52 && lon0 == 10 && falseEasting == 4321000 && falseNorthing == 3210000 ? 3035 : 0;
         default: return zone ? (south ? 32700 : 32600) + zone : 0;
     }
 }
 
 std::string Crs::id() const {
     if (int e = epsg()) return "EPSG:" + std::to_string(e);
+    if (kind == Laea) return "laea:" + fmtNum(lat0) + "," + fmtNum(lon0);
+    if (kind == EqualEarth) return "Equal Earth lon0=" + fmtNum(lon0);
     return "TM lon0=" + fmtNum(lon0) + " k0=" + fmtNum(k0);
 }
 
@@ -416,6 +500,14 @@ std::string Crs::wkt() const {
                ",PROJECTION[\"Mercator_Auxiliary_Sphere\"],PARAMETER[\"False_Easting\",0.0],PARAMETER[\"False_Northing\",0.0],"
                "PARAMETER[\"Central_Meridian\",0.0],PARAMETER[\"Standard_Parallel_1\",0.0],PARAMETER[\"Auxiliary_Sphere_Type\",0.0],"
                "UNIT[\"Meter\",1.0]]";
+    if (kind == EqualEarth)
+        return "PROJCS[\"WGS_1984_Equal_Earth_Greenwich\"," + geog + ",PROJECTION[\"Equal_Earth\"],PARAMETER[\"False_Easting\"," + fmtNum(falseEasting) +
+               "],PARAMETER[\"False_Northing\"," + fmtNum(falseNorthing) + "],PARAMETER[\"Central_Meridian\"," + fmtNum(lon0) + "],UNIT[\"Meter\",1.0]]";
+    if (kind == Laea)
+        return "PROJCS[\"" + std::string(epsg() == 3035 ? "ETRS_1989_LAEA" : "WGS_1984_Lambert_Azimuthal_Equal_Area") + "\"," + geog +
+               ",PROJECTION[\"Lambert_Azimuthal_Equal_Area\"],PARAMETER[\"False_Easting\"," + fmtNum(falseEasting) + "],PARAMETER[\"False_Northing\"," +
+               fmtNum(falseNorthing) + "],PARAMETER[\"Central_Meridian\"," + fmtNum(lon0) + "],PARAMETER[\"Latitude_Of_Origin\"," + fmtNum(lat0) +
+               "],UNIT[\"Meter\",1.0]]";
     const std::string nm = zone ? "WGS_1984_UTM_Zone_" + std::to_string(zone) + (south ? "S" : "N") : "WGS_1984_Transverse_Mercator";
     return "PROJCS[\"" + nm + "\"," + geog + ",PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"False_Easting\"," + fmtNum(falseEasting) +
            "],PARAMETER[\"False_Northing\"," + fmtNum(falseNorthing) + "],PARAMETER[\"Central_Meridian\"," + fmtNum(lon0) +
@@ -429,6 +521,24 @@ Coord Crs::forward(const Coord& p) const {
         const double lat = std::clamp(p.y, -kMaxMercatorLat, kMaxMercatorLat);
         out.x = kA * p.x * kDeg;
         out.y = kA * std::log(std::tan(kPi / 4 + lat * kDeg / 2));
+        return out;
+    }
+    if (kind == EqualEarth) {
+        const double beta = toAuthalic(std::clamp(p.y, -90.0, 90.0) * kDeg), lam = wrap180(p.x - lon0) * kDeg;
+        const double th = std::asin(kEeM * std::sin(beta)), t2 = th * th, t6 = t2 * t2 * t2;
+        out.x = falseEasting + kRq * 2 * std::sqrt(3.0) * lam * std::cos(th) / (3 * (kEeA1 + 3 * kEeA2 * t2 + t6 * (7 * kEeA3 + 9 * kEeA4 * t2)));
+        out.y = falseNorthing + kRq * th * (kEeA1 + kEeA2 * t2 + t6 * (kEeA3 + kEeA4 * t2));
+        return out;
+    }
+    if (kind == Laea) {
+        const double beta = toAuthalic(std::clamp(p.y, -90.0, 90.0) * kDeg), beta1 = toAuthalic(lat0 * kDeg);
+        const double phi1 = lat0 * kDeg, lam = wrap180(p.x - lon0) * kDeg;
+        const double m1 = std::cos(phi1) / std::sqrt(1 - kE2 * std::sin(phi1) * std::sin(phi1));
+        const double D = std::abs(std::cos(beta1)) < 1e-12 ? 1.0 : kA * m1 / (kRq * std::cos(beta1));
+        const double denom = 1 + std::sin(beta1) * std::sin(beta) + std::cos(beta1) * std::cos(beta) * std::cos(lam);
+        const double B = kRq * std::sqrt(2 / std::max(denom, 1e-12));
+        out.x = falseEasting + B * D * std::cos(beta) * std::sin(lam);
+        out.y = falseNorthing + (B / D) * (std::cos(beta1) * std::sin(beta) - std::sin(beta1) * std::cos(beta) * std::cos(lam));
         return out;
     }
     const TmSeries& s = tm();
@@ -453,6 +563,39 @@ Coord Crs::inverse(const Coord& p) const {
     if (kind == WebMercator) {
         out.x = p.x / kA / kDeg;
         out.y = (2 * std::atan(std::exp(p.y / kA)) - kPi / 2) / kDeg;
+        return out;
+    }
+    if (kind == EqualEarth) {
+        const double x = (p.x - falseEasting) / kRq, y = (p.y - falseNorthing) / kRq;
+        double th = std::clamp(y / kEeA1, -kPi / 3, kPi / 3);
+        for (int i = 0; i < 12; ++i) {
+            const double t2 = th * th, t6 = t2 * t2 * t2;
+            const double f = th * (kEeA1 + kEeA2 * t2 + t6 * (kEeA3 + kEeA4 * t2)) - y;
+            const double fp = kEeA1 + 3 * kEeA2 * t2 + t6 * (7 * kEeA3 + 9 * kEeA4 * t2);
+            const double d = f / fp;
+            th -= d;
+            if (std::abs(d) < 1e-12) break;
+        }
+        const double t2 = th * th, t6 = t2 * t2 * t2;
+        const double lam = 3 * x * (kEeA1 + 3 * kEeA2 * t2 + t6 * (7 * kEeA3 + 9 * kEeA4 * t2)) / (2 * std::sqrt(3.0) * std::cos(th));
+        const double beta = std::asin(std::clamp(std::sin(th) / kEeM, -1.0, 1.0));
+        out.y = fromAuthalic(beta) / kDeg;
+        out.x = wrap180(lon0 + lam / kDeg);
+        return out;
+    }
+    if (kind == Laea) {
+        const double beta1 = toAuthalic(lat0 * kDeg), phi1 = lat0 * kDeg;
+        const double m1 = std::cos(phi1) / std::sqrt(1 - kE2 * std::sin(phi1) * std::sin(phi1));
+        const double D = std::abs(std::cos(beta1)) < 1e-12 ? 1.0 : kA * m1 / (kRq * std::cos(beta1));
+        const double x = p.x - falseEasting, y = p.y - falseNorthing;
+        const double rho = std::hypot(x / D, D * y);
+        if (rho < 1e-9) return {lon0, lat0};
+        const double ce = 2 * std::asin(std::clamp(rho / (2 * kRq), -1.0, 1.0));
+        const double q = kQp * (std::cos(ce) * std::sin(beta1) + D * y * std::sin(ce) * std::cos(beta1) / rho);
+        const double beta = std::asin(std::clamp(q / kQp, -1.0, 1.0));
+        const double lam = std::atan2(x * std::sin(ce), D * rho * std::cos(beta1) * std::cos(ce) - D * D * y * std::sin(beta1) * std::sin(ce));
+        out.y = fromAuthalic(beta) / kDeg;
+        out.x = wrap180(lon0 + lam / kDeg);
         return out;
     }
     const TmSeries& s = tm();

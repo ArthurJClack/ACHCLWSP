@@ -119,6 +119,34 @@ void testProjections() {
     CHECK(Crs::parse(Crs::utm(17, true).wkt())->epsg() == 32717);
     CHECK(Crs::parse(wm.wkt())->kind == Crs::WebMercator);
     CHECK(Crs::parse(Crs::wgs84().wkt())->geographic());
+    // Equal Earth (EPSG:8857): the published extents, a round trip, and equal areas
+    const Crs ee = Crs::equalEarth();
+    CHECK(Crs::parse("epsg:8857")->kind == Crs::EqualEarth && Crs::parse("equalearth")->epsg() == 8857);
+    CHECK(near(ee.forward({180, 0}).x, 17243959.06, 2) && near(ee.forward({0, 90}).y, 8392927.6, 2));
+    const Coord eeBack = ee.inverse(ee.forward({-73.5, 41.25}));
+    CHECK(near(eeBack.x, -73.5, 1e-7) && near(eeBack.y, 41.25, 1e-7));
+    auto cellArea = [](const Crs& c, double lon, double lat) {
+        const Coord a = c.forward({lon, lat}), b = c.forward({lon + 0.01, lat}), d = c.forward({lon, lat + 0.01});
+        return std::abs((b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x));
+    };
+    // on the ellipsoid a 0.01 deg cell at 60N is cos(60)-ish times one at the equator: compare with the authalic q
+    auto q = [](double latDeg) {
+        const double e2 = kF * (2 - kF), e = std::sqrt(e2), s = std::sin(latDeg * kDeg);
+        return (1 - e2) * (s / (1 - e2 * s * s) - std::log((1 - e * s) / (1 + e * s)) / (2 * e));
+    };
+    const double wantRatio = (q(60.01) - q(60)) / (q(0.01) - q(0));
+    CHECK(near(cellArea(ee, 0, 60) / cellArea(ee, 0, 0), wantRatio, 1e-4));
+    CHECK(near(cellArea(ee, 150, 60) / cellArea(ee, 0, 0), wantRatio, 1e-4));
+    // LAEA Europe (EPSG:3035): its centre is the false origin, round trips, equal areas
+    const Crs eu = *Crs::parse("epsg:3035");
+    CHECK(eu.kind == Crs::Laea && eu.epsg() == 3035);
+    CHECK(near(eu.forward({10, 52}).x, 4321000, 0.01) && near(eu.forward({10, 52}).y, 3210000, 0.01));
+    const Coord euBack = eu.inverse(eu.forward({2.35, 48.85}));
+    CHECK(near(euBack.x, 2.35, 1e-7) && near(euBack.y, 48.85, 1e-7));
+    CHECK(near(cellArea(eu, 30, 60) / cellArea(eu, 10, 0), wantRatio, 1e-4));
+    const auto custom = Crs::parse("laea:-33.9,151.2");
+    CHECK(custom && custom->kind == Crs::Laea && near(custom->lat0, -33.9, 1e-9) && near(custom->forward({151.2, -33.9}).x, 0, 1e-6));
+    CHECK(Crs::parse(ee.wkt())->kind == Crs::EqualEarth && Crs::parse(eu.wkt())->epsg() == 3035);
 }
 
 void testExpressions() {
@@ -365,6 +393,45 @@ void testAnalysis() {
     Geometry ring = Geometry::line({{0, 0}, {0.1, 0}, {0.1, 0.1}, {0, 0.1}, {0, 0}});
     Geometry rbuf = buffer(ring, 200);
     CHECK(rbuf.polygons.size() == 1 && rbuf.polygons[0].size() == 2);
+    // exact: a square shrunk by 500 m is a square 1 km smaller each way (to the projection's error)
+    const double side = geodesicDistance(10, 50.05, 10.1, 50.05), tall = geodesicDistance(10.05, 50, 10.05, 50.1);
+    CHECK(near(shrunk, (side - 1000) * (tall - 1000), 0.003 * shrunk));
+    CHECK(near(area(rb), 2 * 500 * 10000 + 500 * 500 * 48 * std::sin(2 * kPi / 48) / 2, 0.002 * 1.08e7));
+
+    // exact overlays on lon/lat: two unit squares overlapping by half
+    auto planar = [](const Geometry& g) {
+        double a = 0;
+        for (const auto& poly : g.polygons) {
+            for (std::size_t i = 0; i < poly.size(); ++i) a += signedArea(poly[i]);
+        }
+        return a;
+    };
+    Geometry A = Geometry::polygon({{{0, 0}, {1, 0}, {1, 1}, {0, 1}}});
+    Geometry B = Geometry::polygon({{{0.5, 0.25}, {1.5, 0.25}, {1.5, 1.25}, {0.5, 1.25}}});
+    CHECK(near(planar(exactOverlay({&A}, {&B}, OverlayOp::Intersection)), 0.375, 1e-12));
+    CHECK(near(planar(exactOverlay({&A}, {&B}, OverlayOp::Union)), 1.625, 1e-12));
+    CHECK(near(planar(exactOverlay({&A}, {&B}, OverlayOp::Difference)), 0.625, 1e-12));
+    const Geometry sym = exactOverlay({&A}, {&B}, OverlayOp::SymDifference);
+    CHECK(near(planar(sym), 1.25, 1e-12) && sym.polygons.size() == 2);
+    // a hole punched right through, and a shared edge merging away
+    Geometry inner = Geometry::polygon({{{0.25, 0.25}, {0.75, 0.25}, {0.75, 0.75}, {0.25, 0.75}}});
+    const Geometry holed = exactOverlay({&A}, {&inner}, OverlayOp::Difference);
+    CHECK(holed.polygons.size() == 1 && holed.polygons[0].size() == 2 && near(planar(holed), 0.75, 1e-12));
+    Geometry right = Geometry::polygon({{{1, 0}, {2, 0}, {2, 1}, {1, 1}}});
+    const Geometry joined = exactOverlay({&A, &right}, {}, OverlayOp::Union);
+    CHECK(joined.polygons.size() == 1 && joined.polygons[0].size() == 1 && near(planar(joined), 2, 1e-12));
+    CHECK(exactOverlay({&A}, {&right}, OverlayOp::Intersection).empty());
+    // corners touching stay two shapes; a polygon minus itself is nothing
+    Geometry corner = Geometry::polygon({{{1, 1}, {2, 1}, {2, 2}, {1, 2}}});
+    CHECK(exactOverlay({&A, &corner}, {}, OverlayOp::Union).polygons.size() == 2);
+    CHECK(exactOverlay({&A}, {&A}, OverlayOp::Difference).empty());
+    // a star (self-crossing edges everywhere) against a square
+    Ring star;
+    for (int i = 0; i < 5; ++i) star.push_back({0.5 + 0.6 * std::cos(kPi / 2 + i * 4 * kPi / 5), 0.5 + 0.6 * std::sin(kPi / 2 + i * 4 * kPi / 5)});
+    Geometry starG = Geometry::polygon({star});
+    const double starArea = planar(exactOverlay({&starG}, {}, OverlayOp::Union));
+    CHECK(starArea > 0.3 && starArea < 0.6);  // nonzero winding fills the middle pentagon too
+    CHECK(planar(exactOverlay({&starG}, {&A}, OverlayOp::Intersection)) < starArea);
 
     // simplify a noisy line
     Line noisy;
@@ -802,6 +869,11 @@ void testPmtiles(const fs::path& dir) {
     RenderInfo autoInfo;
     renderImage(m, defaults, &autoInfo);
     CHECK(!autoInfo.tileSource.empty());
+    // offline place search reads the pack's place names (and caches them)
+    r = run(s, "maps.search query=Testvile countries=false");
+    CHECK(r.ok && str(r, "name") == "Testville" && str(r, "layer") == "places (map pack)" && near(num(r, "lon"), -153.6, 0.2));
+    CHECK(run(s, "maps.search query=Testville").ok);  // second time from the cache
+    CHECK(!run(s, "maps.search query=Testville packs=false countries=false").ok);
     r = run(s, "maps.tiles_info");
     CHECK(r.ok && str(r, "format") == "mvt" && num(r, "max_zoom") == 1 && str(r, "layers").find("earth") != std::string::npos);
     r = run(s, "maps.tiles_info path=" + q(dir / "green.pmtiles"));

@@ -437,12 +437,31 @@ struct Layout {
             } else {
                 marker = lv % 2 == 0 ? "\xE2\x80\xA2" : "\xE2\x80\x93";  // • and –
             }
-            auto ls = wrap(pieces(it.runs, p.text), right - left - indent - p.indentRight, p.text.size);
+            // a task list item ("- [ ] milk" reads in as "\u2610 milk"): a drawn box, ticked when done
+            int task = 0;  // 1 open, 2 done
+            auto runs = it.runs;
+            if (!runs.empty()) {
+                std::string& t0 = runs[0].text;
+                if (t0.rfind("\xE2\x98\x90", 0) == 0 || t0.rfind("\xE2\x98\x91", 0) == 0) {
+                    task = t0[2] == '\x90' ? 1 : 2;
+                    t0.erase(0, t0.size() > 3 && t0[3] == ' ' ? 4 : 3);
+                }
+            }
+            auto ls = wrap(pieces(runs, p.text), right - left - indent - p.indentRight, p.text.size);
             const double h = lineHeight(p.text.size, p.lineSpacing);
             ensure(h);
             Font mf = p.text.font;
-            const double mw = pdf::textWidth(mf, marker, p.text.size);
-            page().text(left + indent - 6 - mw, y + p.text.size * 0.92, marker, mf, p.text.size, fmt != "bullet" ? p.text.color : kHeading);
+            if (task) {
+                const double bs = p.text.size * 0.72, bx = left + indent - 6 - bs, by = y + p.text.size * 0.92 - bs;
+                page().rect(bx, by, bs, bs, std::nullopt, kHeading, 0.9);
+                if (task == 2) {
+                    page().line(bx + bs * 0.2, by + bs * 0.55, bx + bs * 0.42, by + bs * 0.8, kHeading, 1.3);
+                    page().line(bx + bs * 0.42, by + bs * 0.8, bx + bs * 0.85, by + bs * 0.2, kHeading, 1.3);
+                }
+            } else {
+                const double mw = pdf::textWidth(mf, marker, p.text.size);
+                page().text(left + indent - 6 - mw, y + p.text.size * 0.92, marker, mf, p.text.size, fmt != "bullet" ? p.text.color : kHeading);
+            }
             Para itemPara = p;
             itemPara.firstLine = 0;
             placeLines(ls, left + indent, right - left - indent - p.indentRight, itemPara);

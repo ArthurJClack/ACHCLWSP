@@ -212,6 +212,22 @@ void testCommands(const std::filesystem::path& dir) {
     CHECK(!run(s, "layout.frame_add doc=lay1 type=rect page=9").ok);
     CHECK(run(s, "layout.frame_add doc=lay1 type=rect x=0 y=0 w=20 h=10 fill=cmyk(0,100,0,0) name=box").ok);
     CHECK(doc->findFrame("box") && doc->findFrame("box")->id == "f2");
+    // the window's view: frames with boxes, and retyping a frame keeps its look
+    r = run(s, "layout.frames doc=lay1 page=1");
+    CHECK(r.ok && toText(*r.field("ids")) == "f1,f2" && toText(*r.field("types")) == "text,rect");
+    CHECK(std::get<NumberList>(*r.field("boxes")).size() == 8 && near(std::get<NumberList>(*r.field("boxes"))[0], 20));
+    r = run(s, "layout.info doc=lay1 frame=f1");
+    CHECK(r.ok && toText(*r.field("markup")) == "Hello **world**");
+    CHECK(run(s, "layout.frame_text doc=lay1 frame=f1 text=\"Goodbye *moon*\nsecond line\"").ok);
+    {
+        const Story& st = doc->stories[doc->findFrame("f1")->story];
+        CHECK(st.paragraphs.size() == 2 && st.paragraphs[0].text() == "Goodbye moon" && st.paragraphs[1].text() == "second line");
+        CHECK(st.paragraphs[0].runs.back().props.italic.value_or(false) && st.paragraphs[0].runs.front().props.size.value_or(0) == 24);
+        CHECK(st.paragraphs[1].runs.front().props.size.value_or(0) == 24);
+    }
+    s.history().undo();
+    CHECK(doc->stories[doc->findFrame("f1")->story].paragraphs[0].text() == "Hello world");
+    CHECK(!run(s, "layout.frame_text doc=lay1 frame=f2 text=x").ok);
     // formatting overrides reach every run
     CHECK(run(s, "layout.frame_set doc=lay1 frame=f1 font=times italic=true color=navy").ok);
     for (const auto& run : doc->stories[doc->findFrame("f1")->story].paragraphs[0].runs) {

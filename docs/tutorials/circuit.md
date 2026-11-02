@@ -579,7 +579,7 @@ wrote rc.png (58035 bytes)
 - The operating point uses each source's value at t = 0, so the pulse source is at 0 V.
 - In the transient, OUT charges to 4.96 V during each 5 ms pulse (five time constants) and discharges in between. `rc.csv` has `time,V(OUT)` rows to plot elsewhere; `preview=true` attaches the plot as a PNG (Claude sees it; batch just reports it).
 - Switches conduct when their field says so: `circuit.edit doc=$c ref=SW1 fields=state=on`. A potentiometer's wiper is `fields=wiper=0.25`.
-- Transistors, MOSFETs, regulators and generic ICs are not simulated: `sim_op` and `sim_tran` refuse to run with them on the sheet unless `ignore_unsupported=true`, which leaves them out. Headers, crystals and dev boards are always left out with a note (as the header was in task 1). Op-amps are ideal amplifiers with a gain of 100000 and no supply limits, so a comparator circuit will swing past its rails.
+- Regulators and generic ICs are not simulated (transistors and MOSFETs are, see task 11): `sim_op` and `sim_tran` refuse to run with them on the sheet unless `ignore_unsupported=true`, which leaves them out. Headers, crystals and dev boards are always left out with a note (as the header was in task 1). Op-amps are ideal amplifiers with a gain of 100000 and no supply limits, so a comparator circuit will swing past its rails.
 
 **Claude.** *"What's the -3 dB point of a 10k and 100 nF low-pass? Simulate a 5 V square wave through it and show me."* Claude builds the circuit, runs `circuit_sim_tran preview=true` and looks at the plot; for the corner frequency it can run a `SIN` source at 159 Hz and read the amplitude from the `max` it reports.
 
@@ -800,6 +800,115 @@ Open a `.circuit.json`, `.kicad_sch`, `.kicad_pcb` or `.kicad_pro` in the electr
 
 Every click asks `circuit.hit` what is under the mouse and then runs the ordinary command (`circuit.place`, `circuit.wire`, `circuit.move`, `circuit.remove`, `circuit.unwire`, `circuit.footprint_move`, `circuit.trace`, `circuit.via`), so each one shows in the history, Undo takes it back, and a batch script or Claude can do exactly the same. Scroll zooms, a right or middle drag (or Space and drag) moves around, and **Fit** shows it all.
 
+## Task 11: a transistor amplifier and its frequency response
+
+The simulator models NPN and PNP transistors (Ebers-Moll: beta 100 by default, `fields=beta=250` to change it) and N- and P-channel MOSFETs (square law: `fields=vth=2;kp=0.1`). `circuit.sim_ac` sweeps frequency and reports gain and phase: the source with an `ac=` field drives the sweep (otherwise the first voltage source, at 1 V).
+
+A common-emitter stage on 12 V, biased by a 100k/22k divider:
+
+**Batch** (`amp.txt`):
+
+```text
+circuit.new title=amp -> c
+circuit.place doc=$c symbol=npn ref=Q1
+circuit.place doc=$c symbol=resistor ref=R1 value=100k
+circuit.place doc=$c symbol=resistor ref=R2 value=22k
+circuit.place doc=$c symbol=resistor ref=RC value=4.7k
+circuit.place doc=$c symbol=resistor ref=RE value=1k
+circuit.place doc=$c symbol=capacitor ref=CIN value=10u
+circuit.place doc=$c symbol=capacitor ref=CE value=100u
+circuit.place doc=$c symbol=vsource ref=V1 value=0 fields=ac=1
+circuit.power doc=$c symbol=+12v pins=R1.1,RC.1
+circuit.net doc=$c name=IN pins=V1.1,CIN.1
+circuit.net doc=$c name=B pins=CIN.2,R1.2,R2.1,Q1.1
+circuit.net doc=$c name=OUT pins=RC.2,Q1.3
+circuit.net doc=$c name=E pins=Q1.2,RE.1,CE.1
+circuit.power doc=$c symbol=gnd pins=R2.2,RE.2,CE.2,V1.2
+circuit.sim_op doc=$c
+circuit.sim_ac doc=$c start=1 stop=10meg probes=OUT path=amp.csv preview=true
+```
+
+The operating point puts the collector at 6.06 V (about half the supply, as you want), and the sweep:
+
+```text
+ac sweep 1Hz to 10MHz, 141 points:
+  OUT: 11.1 dB at 1Hz, 47.2 dB at 10MHz, -3 dB at 88.1Hz
+f3db(OUT): 88.0653
+gain_db(OUT): 47.2186
+```
+
+47 dB is a gain of about 230, which is gm x RC for 1.27 mA. The low corner comes from the coupling and bypass capacitors. The transistor model has no junction capacitance, so the gain stays flat at the top end where a real 2N3904 would roll off in the tens of MHz. `amp.csv` has `freq,dB(OUT),deg(OUT)`.
+
+**Claude.** *"Design me a common-emitter amp with about 40 dB of gain from 100 Hz up."* Claude places the parts, runs `circuit_sim_op` to check the bias and `circuit_sim_ac` to read `gain_db` and `f3db`, and adjusts RC, RE or the capacitors until both numbers are right.
+
+## Task 12: multi-unit parts and buses
+
+Quad and dual parts come as separate units you can put anywhere on the sheet: `opamp_dual` (units A, B and the power unit), `opamp_quad`, `nand_quad` (a 74HC00) and `inverter_hex` (a 74HC04). Placing one puts every unit side by side; `unit=` places one unit on its own, and `ref=` joins it to a part already there. Pins are numbered as on the package, so `U1.1` is unit A's output wherever unit A is drawn, and the footprint goes on the first unit only.
+
+```text
+circuit.place doc=$c symbol=opamp_quad
+circuit.place doc=$c symbol=nand_quad ref=U2 unit=1 x=40 y=10
+circuit.place doc=$c symbol=nand_quad ref=U2 unit=2 x=40 y=20
+```
+
+A **bus** is one thick line carrying many nets. Name it like KiCad does, `D[0..7]` for D0 to D7 or `{SDA,SCL}` for a group, and tap pins onto it; each tap gets a short entry and a label, so the nets join exactly as if you had wired them:
+
+```text
+circuit.bus doc=$c name=D[0..7] from=30,5 to=30,40
+circuit.bus_tap doc=$c bus=D pins=U1.2..9
+circuit.bus_tap doc=$c bus=D pins=J1.1..8
+```
+
+`U1.2..9` is pins 2 to 9 in order. KiCad buses and bus entries open and save both ways.
+
+## Task 13: push and shove, length tuning and any angle
+
+`circuit.trace shove=true` pushes other nets' traces aside instead of overlapping them: they bend around the new trace with 45 degree jogs and stay connected, and traces they bump push the next ones (three levels deep). Pads and vias never move, so a push that would hit one is left as it was and reported. The window's Trace tool shoves by default.
+
+```text
+circuit.trace doc=$c points=12,10.9,28,10.9 layer=F shove=true
+1 trace segments on F.Cu; pushed 1 trace aside
+```
+
+`circuit.length` prints the copper length of each net, and `circuit.tune` stretches one with meanders (trombone bumps) until it is a given length or as long as another net, the way memory buses and USB pairs are matched:
+
+```text
+circuit.length doc=$c nets=D0,D1
+circuit.tune doc=$c net=D1 match=D0
+circuit.tune doc=$c net=CLK length=40 amplitude=1.2 spacing=0.6
+Net-(J1-2): 32 mm -> 40 mm (target 40)
+```
+
+Bumps go on the net's longest straight traces, on whichever side has room; meanders only add length, so the reply says when a net is already longer or there was no room.
+
+Footprints turn to any whole degree (`circuit.footprint_move ref=U1 rot=30`). Turned rectangular pads are drawn, checked and written to Gerber as their true slanted shape; KiCad files keep the angle.
+
+## Task 14: make your own footprints
+
+When a part isn't in the built-in list, make its footprint from the land pattern numbers on the datasheet. It goes in your footprint library, a folder of KiCad `.kicad_mod` files (`footprints` next to the suite's settings, or the folder in `WETWARESUITE_FOOTPRINTS`), so later circuits and KiCad itself can use it:
+
+```text
+circuit.footprint_make name=SOP-16_W7.5 kind=dual pins=16 pitch=1.27 span=9.4 pad_w=0.6 pad_h=2
+circuit.footprint_make name=VQFN-24_4x4 kind=quad pins=24 pitch=0.5 span=3.9 pad_w=0.25 pad_h=0.8 exposed=2.6
+circuit.footprint_make name=BGA-36_0.8 kind=grid pins=36 pitch=0.8 pad_w=0.4
+circuit.place doc=$c symbol=ic pins=24 footprint=VQFN-24_4x4
+```
+
+Kinds: `smd2` (two-pad chips; pitch is pad centre to pad centre), `row` (headers and connectors), `dual` (SOIC/SOP/DIP; `span` is row centre to row centre), `quad` (QFP/QFN; `span` is across the pads, `exposed` the centre pad), `grid` (BGA; balls are named A1, A2 ... B1, skipping I, O, Q, S, X and Z) and `blank`. `pad_w` is a pad's width along its row, `pad_h` its length out from the body; `drill=` makes through-hole pads.
+
+`circuit.footprint_pad` edits the footprint on one part: move a pad (`x`, `y` or `dx`, `dy`), resize it, change its shape, hole or number, add one (a number the footprint doesn't have) or remove one. Without changes it lists the pads. The part gets its own copy, which the circuit file keeps, and `circuit.footprint_save` puts it in your library (or `path=` copies in a `.kicad_mod` from anywhere; `list=true` lists the library).
+
+```text
+circuit.footprint_pad doc=$c ref=U2 number=17 x=0 y=0 w=2.4 h=6 name=SOP-16_EP
+circuit.footprint_save doc=$c ref=U2
+```
+
+**Claude.** *"Here's the datasheet land pattern for a TPS63020 (VSON-14, 0.5 mm pitch, 3x4 mm): make the footprint and put it on U3."* Claude calls `circuit_footprint_make` with `kind=dual`, the pitch, span and pad sizes, `preview=true` to compare it with the drawing, then `ref=U3`, and `circuit_footprint_pad` for the thermal pad.
+
+## Task 15: the board in 3D, out to cad
+
+`circuit.export path=board.step` (or `.stl`, `.obj`, `.glb`, `.3mf`) writes the board as a solid: the outline with its holes (mounting holes and anything 2 mm or bigger) and a body for each part, at its height. Open it in cad to design an enclosure around it, or in model to render it.
+
 ## Looking things up
 
 ```sh
@@ -880,7 +989,7 @@ footprint: SOIC-8
 
 ### Footprints
 
-`circuit.footprints` lists the 38 families: `R/C/L/LED_0402/0603/0805/1206` (LED pad 1 = cathode), `Fuse_0805/1206`, `D_SOD-123`, `D_SOD-323`, `D_SMA`, `D_0805`, `R_THT`/`L_THT` (axial, 10.16 mm), `D_THT` (DO-41), `C_THT` (disc, 5.08 mm), `CP_THT` (radial, 2.54 mm), `LED_THT` (5 mm), `HC49`, `SOT-23`, `SOT-23-5`, `SOT-23-6`, `SOT-223`, `TO-92`, `TO-220`, `SOIC-N`, `TSSOP-N` (0.65 mm), `TQFP-N` (32/44 at 0.8 mm, 48/64/100 at 0.5 mm; `LQFP-N` too), `QFN-N` (with the exposed pad as pad N+1), `DIP-N`, `PinHeader_1xNN`, `PinHeader_2xNN`, `TerminalBlock_1xNN`, `USB_Micro-B`, `TestPoint_Pad_1.5mm`, `MountingHole_2.2/2.7/3.2/4.3mm` (non-plated, for M2 to M4), `Buzzer_12mm`, `SW_PUSH_6mm`, `SW_SPDT`, `Pot_THT`, `Arduino_Uno_Shield`, `Arduino_Nano`, `ESP32_DevKit`, `BluePill`, `RPi_Pico`, `ESP32-WROOM-32`. KiCad library names such as `Package_SO:SOIC-8_3.9x4.9mm_P1.27mm` map onto them.
+`circuit.footprints` lists the 38 families: `R/C/L/LED_0402/0603/0805/1206` (LED pad 1 = cathode), `Fuse_0805/1206`, `D_SOD-123`, `D_SOD-323`, `D_SMA`, `D_0805`, `R_THT`/`L_THT` (axial, 10.16 mm), `D_THT` (DO-41), `C_THT` (disc, 5.08 mm), `CP_THT` (radial, 2.54 mm), `LED_THT` (5 mm), `HC49`, `SOT-23`, `SOT-23-5`, `SOT-23-6`, `SOT-223`, `TO-92`, `TO-220`, `SOIC-N`, `TSSOP-N` (0.65 mm), `TQFP-N` (32/44 at 0.8 mm, 48/64/100 at 0.5 mm; `LQFP-N` too), `QFN-N` (with the exposed pad as pad N+1), `DIP-N`, `PinHeader_1xNN`, `PinHeader_2xNN`, `TerminalBlock_1xNN`, `USB_Micro-B`, `TestPoint_Pad_1.5mm`, `MountingHole_2.2/2.7/3.2/4.3mm` (non-plated, for M2 to M4), `Buzzer_12mm`, `SW_PUSH_6mm`, `SW_SPDT`, `Pot_THT`, `Arduino_Uno_Shield`, `Arduino_Nano`, `ESP32_DevKit`, `BluePill`, `RPi_Pico`, `ESP32-WROOM-32`. KiCad library names such as `Package_SO:SOIC-8_3.9x4.9mm_P1.27mm` map onto them. Footprints you make (task 14) are listed after them.
 
 ## Command reference
 
@@ -902,13 +1011,13 @@ footprint: SOIC-8
 | `circuit.symbol_info` | `symbol` (required), `pins`, `pin_names` | pin positions relative to the part |
 | `circuit.footprints` | | |
 | `circuit.preview` | `view` (schematic, pcb, 3d), `grid`, `highlight` (a net), `layers` (both, top, bottom, inner), `from_below`, `ratsnest` (default true), `net_names`, `angle`, `tilt`, `mask` (3d), `size` (default 1400 px) | a PNG for Claude; writes nothing |
-| `circuit.export` | `path` (required), `view`, `grid`, `highlight`, `layers`, `from_below`, `ratsnest`, `net_names`, `angle`, `tilt`, `mask`, `scale` (px per grid unit or per mm; the width for 3d) | `.svg`, `.png`, or `.pdf` (schematic only); 3d is `.png` |
+| `circuit.export` | `path` (required), `view`, `grid`, `highlight`, `layers`, `from_below`, `ratsnest`, `net_names`, `angle`, `tilt`, `mask`, `scale` (px per grid unit or per mm; the width for 3d) | `.svg`, `.png`, or `.pdf` (schematic only); 3d is `.png`; `.step`, `.stl`, `.obj`, `.glb`, `.3mf` write the board as a solid |
 
 ### Schematic
 
 | command | parameters | notes |
 |---|---|---|
-| `circuit.place` | `symbol` (required), `ref`, `value`, `x`, `y` (grid units, default right of what is there), `rot` (0/90/180/270, counter-clockwise), `mirror`, `footprint`, `pins` (ic, header, header2), `pin_names` (ic), `fields` (`k=v;k2=v2`) | replies with every pin's position |
+| `circuit.place` | `symbol` (required), `ref`, `value`, `unit` (multi-unit parts), `x`, `y` (grid units, default right of what is there), `rot` (0/90/180/270, counter-clockwise), `mirror`, `footprint`, `pins` (ic, header, header2), `pin_names` (ic), `fields` (`k=v;k2=v2`) | replies with every pin's position |
 | `circuit.edit` | `ref` (required), `value`, `footprint`, `new_ref`, `pins`, `pin_names`, `fields` (`k=` removes k) | |
 | `circuit.move` | `ref` (required), `x`, `y` or `dx`, `dy`, `rot`, `mirror` | wires on its pins follow |
 | `circuit.remove` | `ref` (required) | with the wires and labels only it used, and its footprint |
@@ -920,6 +1029,8 @@ footprint: SOIC-8
 | `circuit.no_connect` | `pins` (required) | |
 | `circuit.unwire` | `pin`, `x`+`y`, `net`, or `all=true` | removes wires and labels |
 | `circuit.annotate` | `renumber` (default false) | |
+| `circuit.bus` | `name` (required: `D[0..7]` or `{A,B}`), `points` or `from`+`to`, `remove` | |
+| `circuit.bus_tap` | `bus`, `pins` (required; `U1.2..9` ranges), `members` | an entry and a label per pin |
 
 ### Checks and outputs
 
@@ -933,6 +1044,7 @@ footprint: SOIC-8
 | `circuit.export_netlist` | `path` (required), `format` (auto, kicad, json, text) | |
 | `circuit.sim_op` | `ignore_unsupported` | |
 | `circuit.sim_tran` | `tstop` (required, e.g. `10m`), `step` (default tstop/500), `probes` (nets; default up to 8), `path` (CSV), `ignore_unsupported` | |
+| `circuit.sim_ac` | `start` (default 10), `stop` (default 1meg), `per_decade` (default 20), `probes`, `path` (CSV), `ignore_unsupported` | gain, phase, -3 dB corners; driven by the source with `ac=` |
 
 ### Board
 
@@ -940,9 +1052,14 @@ footprint: SOIC-8
 |---|---|---|
 | `circuit.board` | `width`, `height`, `x`, `y` (top-left, default 0,0) or `points` (polygon), `layers` (2 or 4) | mm; `layers` alone keeps the outline |
 | `circuit.pcb_place` | `all` (default false), `spacing` (default 2 mm) | packs footprints by connection, mounting holes to the corners; makes an outline if there is none |
-| `circuit.footprint_move` | `ref` (required), `x`, `y` (centre) or `dx`, `dy`, `rot`, `side` (top, bottom) | |
+| `circuit.footprint_move` | `ref` (required), `x`, `y` (centre) or `dx`, `dy`, `rot` (any degree), `side` (top, bottom) | |
 | `circuit.pads` | `ref`, `net` | positions in mm, sizes, layers, nets |
-| `circuit.trace` | `points` (required, mm), `layer` (F, B, In1, In2; default F), `width`, `net` | |
+| `circuit.trace` | `points` (required, mm), `layer` (F, B, In1, In2; default F), `width`, `net`, `shove` | `shove=true` pushes other traces aside |
+| `circuit.length` | `nets` | copper length per net, mm |
+| `circuit.tune` | `net` (required), `length` or `match` (another net), `amplitude` (1 mm), `spacing` (0.5 mm) | meanders |
+| `circuit.footprint_make` | `name`, `kind` (required: smd2, row, dual, quad, grid, blank), `pins`, `pitch`, `span`, `pad_w`, `pad_h`, `drill`, `shape`, `columns`, `exposed`, `ref`, `save` (default true) | into your library |
+| `circuit.footprint_pad` | `ref` (required), `number`, `x`, `y`, `dx`, `dy`, `w`, `h`, `shape`, `drill`, `plated`, `new_number`, `remove`, `name` | edits that part's copy |
+| `circuit.footprint_save` | `ref`, `name`, `path` (a .kicad_mod), `list` | |
 | `circuit.via` | `x`, `y` (required), `net`, `drill`, `diameter` | |
 | `circuit.route` | `nets`, `skip`, `layers` (1, 2 or 4; default 2), `via_cost` (default 8), `time_limit` (default 60 s) | keeps existing copper |
 | `circuit.unroute` | `net`, `layer` (F, B, In1, In2) | all copper when neither is given |
@@ -981,14 +1098,14 @@ RS-274X with X2 file attributes, coordinates in mm (4.6 format). Pours are writt
 
 - **Positions of the Arduino Uno and ESP32 DevKit headers are close but not guaranteed**: check them against your actual board before ordering (`circuit.pads ref=A1` prints them). The Nano and Blue Pill follow 2.54 mm grids and are exact for the common clones.
 - **BJT pinout:** `npn`/`pnp` pins are 1 = B, 2 = E, 3 = C to match the SOT-23 footprint. Through-hole parts such as the 2N3904 in TO-92 are E-B-C; with `footprint=TO-92` the TO-92 pads are numbered 1-2-3 left to right, so with `footprint=TO-92` pin 1 (B) lands on the emitter. Use SOT-23 transistors, or check the pad order against the datasheet before ordering.
-- Rotations are multiples of 90 degrees, on the schematic and the board (KiCad parts at other angles are turned to the nearest right angle, with a warning). Text is always horizontal.
-- Built-in symbols have one unit (a dual op-amp is `lm358` with both halves in one symbol); multi-unit parts come only from KiCad. Hierarchical sheets are flattened on import and saved back as one flat sheet. No buses (KiCad bus wires are skipped; the labels on them still join their nets).
+- Schematic rotations are multiples of 90 degrees; footprints take any whole degree. Turned round and oval pads are exact; DRC treats a turned rectangular pad as its upright bounding box, so it is a little cautious near one. Text is always horizontal.
+- Multi-unit built-ins are `opamp_dual`, `opamp_quad`, `nand_quad` and `inverter_hex` (`lm358` is still one symbol with both halves). Hierarchical sheets are flattened on import and saved back as one flat sheet.
 - A pin, label or wire end lying on the middle of a wire connects to it, as in KiCad. `circuit.connect` avoids this, but hand-drawn `circuit.wire` paths can make junctions you didn't mean: check `circuit.nets`.
 - Power and ground symbols can crowd labels next to tightly packed module pins. The connection is right; for a cleaner drawing use `circuit.net name=GND pins=...` there instead.
 - KiCad files: pours are whole-board here, so a KiCad zone with its own outline grows to the board's (with a warning); board cut-outs, blind and micro vias, more than four copper layers, curved board edges (kept as short straight pieces) and KiCad's design rules (they live in the `.kicad_pro`) are not carried over. Saved KiCad files embed every symbol and footprint and name built-in footprints `wetwaresuite:R_0805`, so KiCad shows them without a library but "Update PCB from Schematic" will want a library footprint for parts that never had one. A netlist (`.net`) has no drawing, so it is laid out on a grid with net labels.
 - Traces, vias and pours keep the net name they were made with; after renaming a net on the schematic, unroute and re-route it.
-- The autorouter is a grid maze router with a time limit, made for boards with tens of parts. Dense boards may leave connections unrouted; route those by hand or loosen the grid (`circuit.rules grid=0.25`). It doesn't do length matching, differential pairs or impedance.
+- The autorouter is a grid maze router with a time limit, made for boards with tens of parts. Dense boards may leave connections unrouted; route those by hand or loosen the grid (`circuit.rules grid=0.25`). It doesn't route differential pairs or control impedance; match lengths afterwards with `circuit.tune`. Shoving moves traces only (never vias or footprints) and keeps them at 45 degrees.
 - Pours fill the whole board on a 0.1 mm raster (no pour outlines of your own); pads join them through four thermal spokes, or solidly with `thermal=false`.
 - Two or four copper layers. The autorouter uses inner layers only with `layers=4`; planes are usually better there.
-- The 3D view is boxes and cylinders by package, for checking placement and clearances by eye, not a model to export.
-- The simulator handles R, C, L, diodes and LEDs (Shockley model), switches, potentiometers, ideal op-amps and sources. No transistors, no ICs, no AC analysis, no temperature; transient is backward Euler with a fixed step, so make `step` small compared with your time constants.
+- The 3D view and the STEP/STL export are boxes and cylinders by package, good for enclosures and clearances, not photo-real parts.
+- The simulator handles R, C, L, diodes and LEDs (Shockley model), BJTs (Ebers-Moll), MOSFETs (square law with channel-length modulation), switches, potentiometers, ideal op-amps and sources. Transistors have no junction capacitance, so AC sweeps don't roll off at high frequency; no regulators or other ICs, no noise, no temperature; transient is backward Euler with a fixed step, so make `step` small compared with your time constants.

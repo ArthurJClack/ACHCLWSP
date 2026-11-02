@@ -187,10 +187,33 @@ void testInpaintStripes() {
     std::printf("vertical stripes continued: %d of %d pixels\n", good, total);
     CHECK(good * 100 >= total * 95);
 
+    // a big hole (a whole person) is filled on a smaller copy and refined back up
+    {
+        std::string big = newDoc(s, 640, 480, "#000000");
+        Image& bi = layerOf(s, big);
+        for (int y = 0; y < 480; ++y)
+            for (int x = 0; x < 640; ++x) bi.set(x, y, stripe(y, x));
+        punchHole(bi, 200, 100, 260, 280, {255, 0, 0, 255});
+        auto b0 = std::chrono::steady_clock::now();
+        Result br = s.run("photo.remove_object", {{"doc", big}, {"x", std::int64_t{200}}, {"y", std::int64_t{100}}, {"width", std::int64_t{260}},
+                                                  {"height", std::int64_t{280}}});
+        auto bms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - b0).count();
+        CHECK(br.ok);
+        int bg = 0, bt = 0, red = 0;
+        for (int y = 100; y < 380; ++y)
+            for (int x = 200; x < 460; ++x) {
+                ++bt;
+                if (maxDiff(bi.at(x, y), stripe(y, x)) <= 30) ++bg;
+                if (maxDiff(bi.at(x, y), {255, 0, 0, 255}) <= 30) ++red;
+            }
+        std::printf("remove_object 260x280: %lld ms, stripes %d of %d\n", static_cast<long long>(bms), bg, bt);
+        CHECK(red == 0);
+        CHECK(bg * 100 >= bt * 70);
+    }
     // too big is refused in plain words
-    std::string big = newDoc(s, 400, 400, "#808080");
-    Result tooBig = s.run("photo.remove_object", {{"doc", big}, {"x", std::int64_t{50}}, {"y", std::int64_t{50}}, {"width", std::int64_t{300}},
-                                                  {"height", std::int64_t{300}}});
+    std::string huge = newDoc(s, 2200, 2100, "#808080");
+    Result tooBig = s.run("photo.remove_object", {{"doc", huge}, {"x", std::int64_t{10}}, {"y", std::int64_t{10}}, {"width", std::int64_t{2150}},
+                                                  {"height", std::int64_t{2000}}});
     CHECK(!tooBig.ok && tooBig.message.find("limit") != std::string::npos);
     CHECK(!s.run("photo.remove_object", {{"doc", id}, {"x", std::int64_t{10}}, {"y", std::int64_t{10}}, {"width", std::int64_t{5}},
                                          {"height", std::int64_t{5}}, {"patch", std::int64_t{99}}})

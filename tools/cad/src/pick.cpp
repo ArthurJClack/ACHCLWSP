@@ -8,6 +8,7 @@
 #include <map>
 #include <tuple>
 
+#include "blend.hpp"
 #include "build.hpp"
 #include "cmdutil.hpp"
 
@@ -198,6 +199,63 @@ ParamSpec numberSpec(const std::string& name, const std::string& help, double fa
     return {name, ParamType::Number, help, false, {}, fallback};
 }
 
+// The ray of a point of the view (u, v and the camera, like app.view) or of ray=x,y,z,dx,dy,dz.
+bool viewRay(CadDoc& doc, const Params& p, Vec3& o, Vec3& d, std::string& error, double* pxPerUnit = nullptr) {
+    if (has(p, "ray")) {
+        const auto items = splitList(stringParam(p, "ray"));
+        if (items.size() != 6) {
+            error = "ray is x,y,z,dx,dy,dz";
+            return false;
+        }
+        double v[6];
+        for (int i = 0; i < 6; ++i) v[i] = doc.eval(items[static_cast<std::size_t>(i)]);
+        o = {v[0], v[1], v[2]};
+        d = mesh::normalize(Vec3{v[3], v[4], v[5]});
+    } else {
+        OrbitView view;
+        view.yaw = numberParam(p, "yaw", 45);
+        view.pitch = numberParam(p, "pitch", 35.26);
+        view.zoom = numberParam(p, "zoom", 1);
+        view.panX = numberParam(p, "pan_x", 0);
+        view.panY = numberParam(p, "pan_y", 0);
+        const int w = static_cast<int>(intParam(p, "width", 800)), h = static_cast<int>(intParam(p, "height", 600));
+        if (w < 1 || h < 1) {
+            error = "width and height must be positive";
+            return false;
+        }
+        const mesh::Projection c = mesh::toProjection(mesh::orbitCamera(doc.mesh, view, w, h, doc.viewOptions()));
+        const double a = (numberParam(p, "u", 0.5) * w - w / 2.0) / c.scale + c.cx;
+        const double b = (h / 2.0 - numberParam(p, "v", 0.5) * h) / c.scale + c.cy;
+        const mesh::Bounds bb = mesh::bounds(doc.mesh);
+        const double back = mesh::length(bb.max - bb.min) + std::fabs(mesh::dot(bb.min, c.forward)) +
+                            std::fabs(mesh::dot(bb.max, c.forward)) + 1;
+        d = c.forward;
+        o = c.right * a + c.up * b - d * back;
+        if (pxPerUnit) *pxPerUnit = c.scale;
+    }
+    return true;
+}
+
+std::vector<ParamSpec> viewParams() {
+    return {numberSpec("u", "0..1 across the view", 0.5), numberSpec("v", "0..1 down the view", 0.5),
+            numberSpec("yaw", "view yaw, degrees", 45), numberSpec("pitch", "view pitch, degrees", 35.26),
+            numberSpec("zoom", "view zoom", 1), numberSpec("pan_x", "view pan, model radii", 0), numberSpec("pan_y", "view pan", 0),
+            {"width", ParamType::Int, "view width, px", false, {}, std::int64_t{800}},
+            {"height", ParamType::Int, "view height, px", false, {}, std::int64_t{600}},
+            str("ray", "instead of the view: a ray start and direction x,y,z,dx,dy,dz")};
+}
+
+// Closest approach of a ray (o, unit d) and a segment ab: the distance between them, and how far
+// along the ray (s) and the segment (t, 0..1) it is.
+double raySegment(const Vec3& o, const Vec3& d, const Vec3& a, const Vec3& b, double& s, double& t) {
+    const Vec3 u = b - a, w = o - a;
+    const double uu = mesh::dot(u, u), ud = mesh::dot(u, d), uw = mesh::dot(u, w), dw = mesh::dot(d, w);
+    const double den = uu - ud * ud;
+    t = den > 1e-18 ? std::clamp((uw - ud * dw) / den, 0.0, 1.0) : 0.0;
+    s = std::max(0.0, mesh::dot(a + u * t - o, d));
+    return mesh::length(o + d * s - (a + u * t));
+}
+
 }  // namespace
 
 void registerPickCommands(Session& session) {
@@ -208,40 +266,15 @@ void registerPickCommands(Session& session) {
              "outline loops as a count then x,y,z points each, its area and centre) and the body's bounds. Give the "
              "view as u,v (0..1 across and down) with yaw/pitch/zoom/pan_x/pan_y/width/height like app.view, or a "
              "ray=x,y,z,dx,dy,dz. Pass face= on to cad.sketch (on=body) or cad.push_pull.",
-             {docParam(), numberSpec("u", "0..1 across the view", 0.5), numberSpec("v", "0..1 down the view", 0.5),
-              numberSpec("yaw", "view yaw, degrees", 45), numberSpec("pitch", "view pitch, degrees", 35.26),
-              numberSpec("zoom", "view zoom", 1), numberSpec("pan_x", "view pan, model radii", 0), numberSpec("pan_y", "view pan", 0),
-              {"width", ParamType::Int, "view width, px", false, {}, std::int64_t{800}},
-              {"height", ParamType::Int, "view height, px", false, {}, std::int64_t{600}},
-              str("ray", "instead of the view: a ray start and direction x,y,z,dx,dy,dz")},
+             [] {
+                 auto ps = viewParams();
+                 ps.insert(ps.begin(), docParam());
+                 return ps;
+             }(),
              false, true},
             cadCommand(session, [](CadDoc& doc, const Params& p) {
                 Vec3 o, d;
-                if (has(p, "ray")) {
-                    const auto items = splitList(stringParam(p, "ray"));
-                    if (items.size() != 6) return Result::failure("ray is x,y,z,dx,dy,dz");
-                    double v[6];
-                    for (int i = 0; i < 6; ++i) v[i] = doc.eval(items[static_cast<std::size_t>(i)]);
-                    o = {v[0], v[1], v[2]};
-                    d = mesh::normalize(Vec3{v[3], v[4], v[5]});
-                } else {
-                    OrbitView view;
-                    view.yaw = numberParam(p, "yaw", 45);
-                    view.pitch = numberParam(p, "pitch", 35.26);
-                    view.zoom = numberParam(p, "zoom", 1);
-                    view.panX = numberParam(p, "pan_x", 0);
-                    view.panY = numberParam(p, "pan_y", 0);
-                    const int w = static_cast<int>(intParam(p, "width", 800)), h = static_cast<int>(intParam(p, "height", 600));
-                    if (w < 1 || h < 1) return Result::failure("width and height must be positive");
-                    const mesh::Projection c = mesh::toProjection(mesh::orbitCamera(doc.mesh, view, w, h, doc.viewOptions()));
-                    const double a = (numberParam(p, "u", 0.5) * w - w / 2.0) / c.scale + c.cx;
-                    const double b = (h / 2.0 - numberParam(p, "v", 0.5) * h) / c.scale + c.cy;
-                    const mesh::Bounds bb = mesh::bounds(doc.mesh);
-                    const double back = mesh::length(bb.max - bb.min) + std::fabs(mesh::dot(bb.min, c.forward)) +
-                                        std::fabs(mesh::dot(bb.max, c.forward)) + 1;
-                    d = c.forward;
-                    o = c.right * a + c.up * b - d * back;
-                }
+                if (std::string error; !viewRay(doc, p, o, d, error)) return Result::failure(error);
                 Hit hit;
                 double best = 1e300;
                 for (const auto& b : doc.bodies)
@@ -280,6 +313,119 @@ void registerPickCommands(Session& session) {
                     .with("centre", triple(f.centre))
                     .with("outline", outline)
                     .with("bounds", NumberList{bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z});
+                return r;
+            }, false));
+
+    reg.add({"cad.pick_edge", "Pick Edge",
+             "Say which sharp edge is at a point of the 3D view (or nearest a ray), as clicking an edge does in SolidWorks "
+             "or Onshape: its body, ends, midpoint and whether it is outer or inner, plus the chain of edges that carry on "
+             "smoothly from it (all of a rounded corner's run, a whole circle). Pass near= (the chain's midpoints) and "
+             "target= (the body) to cad.fillet or cad.chamfer. Hidden edges behind the part are not picked.",
+             [] {
+                 auto ps = viewParams();
+                 ps.insert(ps.begin(), docParam());
+                 ps.push_back(numberSpec("pixels", "how close to the edge counts, px (view)", 8));
+                 ps.push_back(numberSpec("tolerance", "how close counts, model units (ray; default 1% of the part)", 0));
+                 ps.push_back({"chain", ParamType::Bool, "also take the edges that carry on smoothly from it", false, {}, true});
+                 return ps;
+             }(),
+             false, true},
+            cadCommand(session, [](CadDoc& doc, const Params& p) {
+                Vec3 o, d;
+                double scale = 0;
+                if (std::string error; !viewRay(doc, p, o, d, error, &scale)) return Result::failure(error);
+                const mesh::Bounds all = mesh::bounds(doc.mesh);
+                double tol = scale > 0 ? numberParam(p, "pixels", 8) / scale : numberParam(p, "tolerance", 0);
+                if (!(tol > 0)) tol = 0.01 * (mesh::length(all.max - all.min) + 1e-9);
+                // how far the ray goes before it enters the part: edges further than that are hidden
+                double front = 1e300;
+                for (const auto& b : doc.bodies)
+                    for (std::size_t t = 0; t < b.mesh.triangleCount(); ++t) {
+                        const double s = hitTriangle(o, d, b.mesh.corner(t, 0), b.mesh.corner(t, 1), b.mesh.corner(t, 2));
+                        if (s >= 0 && s < front && mesh::length(b.mesh.faceNormal(t)) > 0) front = s;
+                    }
+                const Body* body = nullptr;
+                std::vector<detail::SharpEdge> edges;
+                std::size_t pick = 0;
+                double best = 1e300;
+                for (const auto& b : doc.bodies) {
+                    auto es = detail::sharpEdges(b.mesh, 30);
+                    for (std::size_t i = 0; i < es.size(); ++i) {
+                        double s = 0, t = 0;
+                        const double dist = raySegment(o, d, es[i].a, es[i].b, s, t);
+                        if (dist > tol || s > front + 2 * tol) continue;
+                        // nearer the ray wins; at a tie the one in front
+                        const double score = dist + 1e-6 * s;
+                        if (score < best) {
+                            best = score;
+                            body = &b;
+                            edges = es;
+                            pick = i;
+                        }
+                    }
+                }
+                if (!body) {
+                    Result r = Result::success("no edge there", false);
+                    r.with("doc", stringParam(p, "doc")).with("hit", false);
+                    return r;
+                }
+                // the chain: edges sharing an end that carry on within 35 degrees, inner with inner, outer with outer
+                std::vector<std::size_t> chain{pick};
+                if (boolParam(p, "chain", true)) {
+                    const double eps = 1e-6 * (mesh::length(all.max - all.min) + 1);
+                    std::vector<char> in(edges.size(), 0);
+                    in[pick] = 1;
+                    const double cosLimit = std::cos(35 * mesh::kPi / 180);
+                    for (std::size_t k = 0; k < chain.size() && chain.size() < 4096; ++k) {
+                        const auto& e = edges[chain[k]];
+                        for (std::size_t j = 0; j < edges.size(); ++j) {
+                            if (in[j] || edges[j].convex != e.convex) continue;
+                            const auto& f = edges[j];
+                            const Vec3 ends[2] = {e.a, e.b};
+                            for (int side = 0; side < 2 && !in[j]; ++side) {
+                                const Vec3& at = ends[side];
+                                const Vec3 out = side == 0 ? mesh::normalize(e.a - e.b) : mesh::normalize(e.b - e.a);  // carrying on past this end
+                                Vec3 next;
+                                if (mesh::length(f.a - at) < eps) next = mesh::normalize(f.b - f.a);
+                                else if (mesh::length(f.b - at) < eps) next = mesh::normalize(f.a - f.b);
+                                else continue;
+                                if (mesh::dot(out, next) >= cosLimit) {
+                                    in[j] = 1;
+                                    chain.push_back(j);
+                                }
+                            }
+                        }
+                    }
+                }
+                const auto& e = edges[pick];
+                NumberList near, segments;
+                double length = 0;
+                for (std::size_t i : chain) {
+                    const Vec3 mid = (edges[i].a + edges[i].b) * 0.5;
+                    near.insert(near.end(), {mid.x, mid.y, mid.z});
+                    segments.insert(segments.end(), {edges[i].a.x, edges[i].a.y, edges[i].a.z, edges[i].b.x, edges[i].b.y, edges[i].b.z});
+                    length += mesh::length(edges[i].b - edges[i].a);
+                }
+                std::string nearText;
+                for (std::size_t i = 0; i < near.size(); ++i) nearText += (i ? "," : "") + num(near[i]);
+                const Vec3 mid = (e.a + e.b) * 0.5;
+                Result r = Result::success(std::string(e.convex ? "an outer" : "an inner") + " edge of " + body->feature + " at " + at(mid) +
+                                               (chain.size() > 1 ? ", with " + std::to_string(chain.size() - 1) + " more carrying on from it" : std::string()) +
+                                               ", length " + num(length),
+                                           true);
+                r.with("doc", stringParam(p, "doc"))
+                    .with("hit", true)
+                    .with("body", body->feature)
+                    .with("a", triple(e.a))
+                    .with("b", triple(e.b))
+                    .with("midpoint", triple(mid))
+                    .with("outer", e.convex)
+                    .with("out", triple(mesh::normalize(e.n1 + e.n2)))  // between the two faces, away from the part
+                    .with("angle", e.angle)
+                    .with("edges", static_cast<std::int64_t>(chain.size()))
+                    .with("length", length)
+                    .with("near", nearText)
+                    .with("segments", segments);
                 return r;
             }, false));
 

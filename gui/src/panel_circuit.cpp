@@ -209,7 +209,7 @@ void Shell::circuitClick(ImVec2 picture) {
         if (tool == "wire" && circuit_.startX != x && circuit_.startY != y) pts.insert(pts.end(), {x, circuit_.startY});
         pts.insert(pts.end(), {x, y});
         Result r = tool == "wire" ? run("circuit.wire", {{"doc", currentDoc_}, {"points", pts}})
-                                  : run("circuit.trace", {{"doc", currentDoc_}, {"points", pts}, {"layer", circuit_.layer}});
+                                  : run("circuit.trace", {{"doc", currentDoc_}, {"points", pts}, {"layer", circuit_.layer}, {"shove", true}});
         // keep going from the end, unless it landed on a pin or pad (the usual end of a wire)
         if (r.ok && kind != "pin" && kind != "pad") {
             circuit_.startX = x, circuit_.startY = y;

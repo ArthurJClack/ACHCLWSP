@@ -198,7 +198,8 @@ void registerCommands(Session& session) {
 
     reg.add({"photo.open",
              "Open image",
-             "Open an image file as a new document. Reads PNG, JPEG, BMP, TGA, GIF, HDR, PNM, WebP, TIFF, layered OpenRaster (.ora, "
+             "Open an image file as a new document. Reads PNG, JPEG, BMP, TGA, GIF, HDR, PNM, WebP, TIFF, camera raw .dng "
+             "(developed as shot; change it with photo.develop_raw), layered OpenRaster (.ora, "
              "everything kept), Photoshop .psd (layers, groups, masks, blend modes; flattened when it can't read the layers) "
              "and SVG (turned into pixels at its own size, at least 1024 pixels across; saves as .png next to it). "
              "Returns the document id to use with other commands.",
@@ -211,8 +212,14 @@ void registerCommands(Session& session) {
                     try {
                         auto doc = svg ? openSvg(path) : openImage(path);
                         std::string id = s->workspace().add(doc, "img");
-                        Result r = Result::success("opened " + path + " as " + id);
+                        std::string msg = "opened " + path + " as " + id;
+                        if (lowerExt(path) == "dng") msg += " (camera raw, developed as shot: photo.develop_raw changes exposure, white balance...)";
+                        else if (doc->sourceBits == 16) msg += " (16-bit: edits run at 8 bits, .png/.tif saves keep 16)";
+                        if (!doc->colorProfile.empty()) msg += "\ncolour profile: " + doc->colorProfile + " (shown and edited as sRGB)";
+                        Result r = Result::success(msg);
                         return r.with("doc", id)
+                            .with("bits", static_cast<std::int64_t>(doc->sourceBits))
+                            .with("profile", doc->colorProfile)
                             .with("width", static_cast<std::int64_t>(doc->image.width))
                             .with("height", static_cast<std::int64_t>(doc->image.height))
                             .with("layers", static_cast<std::int64_t>(doc->image.layers.size()));
@@ -279,6 +286,8 @@ void registerCommands(Session& session) {
                                           : "\nselection: " + std::to_string(b.x0) + "," + std::to_string(b.y0) + " " +
                                                 std::to_string(b.width()) + "x" + std::to_string(b.height());
                     }
+                    if (doc.sourceBits == 16) text += "\nopened from a 16-bit file: .png/.tif saves keep 16 bits";
+                    if (!doc.colorProfile.empty()) text += "\ncolour profile of the file: " + doc.colorProfile + " (converted to sRGB)";
                     Result r = Result::success(text);
                     return r.with("doc", stringParam(p, "doc"))
                         .with("width", static_cast<std::int64_t>(doc.image.width))
@@ -307,10 +316,12 @@ void registerCommands(Session& session) {
              "Save image",
              "Save the image. The extension picks the format: .ora keeps everything (layers, groups, adjustment, text and "
              "shape layers, styles); .psd keeps layers, groups, masks and blend modes for Photoshop, GIMP and Krita (the "
-             "result says what it had to flatten); .png, .jpg, .bmp, .tga, .tif, .webp and .ppm save the flattened image.",
+             "result says what it had to flatten); .png, .jpg, .bmp, .tga, .tif, .webp and .ppm save the flattened image. "
+             ".png and .tif can be 16 bits per channel: images opened from 16-bit files save that way unless bits=8.",
              {docParam(),
               {"path", ParamType::String, "file to write, e.g. out.png", true},
-              {"quality", ParamType::Int, "JPEG quality 1..100", false, {}, std::int64_t{90}}},
+              {"quality", ParamType::Int, "JPEG quality 1..100", false, {}, std::int64_t{90}},
+              {"bits", ParamType::Int, "bits per channel for .png/.tif: 8 or 16 (default: what the opened file had)", false}},
              false},
             imageCommand(
                 session,
@@ -323,9 +334,11 @@ void registerCommands(Session& session) {
                     if (!canSaveImage(path)) {
                         return Result::failure("can't save ." + lowerExt(path) + "; use one of: ora, psd, " + joinList(writableExtensions()));
                     }
+                    const auto bits = intParam(p, "bits", 0);
+                    if (bits != 0 && bits != 8 && bits != 16) return Result::failure("bits must be 8 or 16");
                     std::vector<std::string> notes;
                     try {
-                        saveImage(doc, path, static_cast<int>(intParam(p, "quality", 90)), &notes);
+                        saveImage(doc, path, static_cast<int>(intParam(p, "quality", 90)), &notes, static_cast<int>(bits));
                     } catch (const std::exception& e) {
                         return Result::failure(e.what());
                     }

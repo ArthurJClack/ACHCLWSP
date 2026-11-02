@@ -484,6 +484,22 @@ std::string describeFrame(const LayoutDoc& doc, const Frame& f, const std::map<s
     return s;
 }
 
+// A story as the little markup text= takes: a paragraph a line, **bold**, *italic*, __underline__.
+std::string storyMarkup(const Story& st) {
+    std::string out;
+    for (std::size_t i = 0; i < st.paragraphs.size(); ++i) {
+        if (i) out += "\n";
+        for (const auto& r : st.paragraphs[i].runs) {
+            std::string open, close;
+            if (r.props.bold.value_or(false)) open += "**", close = "**" + close;
+            if (r.props.italic.value_or(false)) open += "*", close = "*" + close;
+            if (r.props.underline.value_or(false)) open += "__", close = "__" + close;
+            out += open + r.text + close;
+        }
+    }
+    return out;
+}
+
 Result edited(LayoutDoc& doc, const Params& p, const std::string& message, int page, const std::string& frame = {}) {
     Result r = Result::success(message, frame.empty() ? Value{} : Value{frame});
     // no "doc" field when a frame is involved, so a batch `-> name` captures the frame id
@@ -734,7 +750,7 @@ static void registerDocuments(Session& session) {
                         }
                         auto it = layouts.find(f->story);
                         if (it != layouts.end()) r.with("overset", static_cast<std::int64_t>(it->second.overset));
-                        r.with("paragraphs", static_cast<std::int64_t>(st.paragraphs.size()));
+                        r.with("paragraphs", static_cast<std::int64_t>(st.paragraphs.size())).with("markup", storyMarkup(st));
                     }
                     if (f->type == FrameType::Image) r.with("dpi", effectiveDpi(*f));
                     r.message = text;
@@ -1109,6 +1125,64 @@ static void registerFrames(Session& session) {
                     return edited(doc, p, "changed " + id, std::max(page, 0), id);
                 }));
     }
+
+    reg.add({"layout.frame_text", "Retype Frame",
+             "Retype a text frame's words (a paragraph a line, **bold**, *italic*, __underline__) keeping its look: each "
+             "paragraph keeps the style, size, font and colour of the one it replaces. layout.info frame= gives the text as markup.",
+             {docParam(), frameParam(), str("text", "the new words"), previewParam()}, true},
+            layoutCommand(session, [](LayoutDoc& doc, const Params& p) -> Result {
+                std::string error;
+                int page = -1;
+                Frame* f = frameArg(doc, p, error, &page);
+                if (!f) return Result::failure(error);
+                if (f->type != FrameType::Text) return Result::failure(f->id + " isn't a text frame");
+                Story& st = doc.stories[f->story];
+                const std::vector<Paragraph> old = st.paragraphs;
+                std::vector<Paragraph> fresh = parseText(stringParam(p, "text", ""), false);
+                if (fresh.empty()) fresh.emplace_back();
+                for (std::size_t i = 0; i < fresh.size(); ++i) {
+                    if (old.empty()) break;
+                    const Paragraph& was = old[std::min(i, old.size() - 1)];
+                    fresh[i].style = was.style;
+                    fresh[i].props = was.props;
+                    // the look of the run it replaces (first run of that paragraph), the new emphasis on top
+                    CharProps base = was.runs.empty() ? CharProps{} : was.runs.front().props;
+                    base.bold.reset(), base.italic.reset(), base.underline.reset();
+                    const bool wasBold = !was.runs.empty() && was.runs.front().props.bold.value_or(false) &&
+                                         std::all_of(was.runs.begin(), was.runs.end(), [](const Run& r) { return r.props.bold.value_or(false); });
+                    for (auto& r : fresh[i].runs) {
+                        CharProps mine = base;
+                        mine.merge(r.props);
+                        if (wasBold && !r.props.bold) mine.bold.reset();
+                        r.props = mine;
+                        if (r.style.empty() && !was.runs.empty()) r.style = was.runs.front().style;
+                    }
+                }
+                st.paragraphs = std::move(fresh);
+                return edited(doc, p, "retyped " + f->id, std::max(page, 0), f->id);
+            }));
+
+    reg.add({"layout.frames", "List Frames",
+             "The frames on one page, for a window to draw handles on: ids, types and boxes (mm, x y w h each, in the order "
+             "drawn, bottom first).",
+             {docParam(), {"page", ParamType::Int, "page (1-based)", false, {}, std::int64_t{1}}}, false, true},
+            layoutCommand(session, [](LayoutDoc& doc, const Params& p) -> Result {
+                std::string error;
+                const int page = pageArg(doc, p, error);
+                if (page < 0) return Result::failure(error);
+                const Page& pg = doc.pages[static_cast<std::size_t>(page)];
+                std::string ids, types;
+                NumberList boxes;
+                for (const auto& f : pg.frames) {
+                    ids += (ids.empty() ? "" : ",") + f.id;
+                    types += (types.empty() ? "" : ",") + std::string(toString(f.type));
+                    boxes.insert(boxes.end(), {f.x, f.y, f.w, f.h});
+                }
+                Result r = Result::success(std::to_string(pg.frames.size()) + " frame(s) on page " + std::to_string(page + 1));
+                r.with("doc", stringParam(p, "doc")).with("page", static_cast<std::int64_t>(page + 1)).with("pages", static_cast<std::int64_t>(doc.pages.size()))
+                    .with("ids", ids).with("types", types).with("boxes", boxes).with("size", NumberList{pg.width, pg.height});
+                return r;
+            }, false));
 
     reg.add({"layout.frame_delete", "Delete Frame", "Delete a frame; a linked text frame's text flows on into the rest of its chain.",
              {docParam(), frameParam(), previewParam()}, true},

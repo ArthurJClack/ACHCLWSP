@@ -43,6 +43,9 @@
 #if WW_TOOL_LEVELS
 #include "wetwaresuite/levels/levels.hpp"
 #endif
+#if WW_TOOL_SCENE
+#include "wetwaresuite/levels/scene.hpp"
+#endif
 #if WW_TOOL_CAD
 #include "wetwaresuite/cad/cad.hpp"
 #endif
@@ -165,6 +168,9 @@ void registerTools(Session& session, const std::set<std::string>& requested) {
 #endif
 #if WW_TOOL_LEVELS
     if (want("levels")) levels::registerCommands(session);
+#endif
+#if WW_TOOL_SCENE
+    if (want("scene")) scene::registerCommands(session);
 #endif
 #if WW_TOOL_CAD
     if (want("cad")) cad::registerCommands(session);

@@ -126,6 +126,7 @@ Result exportTimeline(const Timeline& tl, const fs::path& output, const Params& 
     rq.audioPath = (tmp.path() / "mix.wav").string();
     EncodePlan plan;
     std::uintmax_t size = 0;
+    std::string hwFallback;
     // a platform's file size limit can take a few tries: each one with less bitrate (gifs: smaller and fewer frames)
     for (int attempt = 0;; ++attempt) {
         try {
@@ -179,7 +180,16 @@ Result exportTimeline(const Timeline& tl, const fs::path& output, const Params& 
             }
             enc.closeInput();
             const int code = enc.wait();
-            if (!ok || code != 0) return Result::failure("ffmpeg failed: " + enc.error());
+            if (!ok || code != 0) {
+                // a graphics card encoder that tried and failed (busy, out of sessions, old driver): again on the CPU
+                if (plan.encoder.rfind("h264_", 0) == 0) {
+                    hwFallback = plan.encoder + ": " + enc.error();
+                    rq.encoder = "cpu";
+                    fs::remove(output, ec);
+                    continue;
+                }
+                return Result::failure("ffmpeg failed: " + enc.error());
+            }
         }
         size = fs::file_size(output, ec);
         if (plan.maxBytes <= 0 || static_cast<double>(size) <= plan.maxBytes) break;
@@ -195,6 +205,12 @@ Result exportTimeline(const Timeline& tl, const fs::path& output, const Params& 
                            (plan.maxBytes > 0 ? " (" + num(std::round(size / 1e5) / 10) + " MB, under the " + num(plan.maxBytes / 1e6) + " MB limit)" : ""),
                        output);
     r.with("mode", std::string(plan.streamCopy ? "copy" : "encode"));
+    if (!plan.encoder.empty() && !plan.streamCopy) {
+        r.with("encoder", plan.encoder);
+        if (plan.encoder.rfind("h264_", 0) == 0) r.message += " (encoded on the graphics card: " + plan.encoder + ")";
+    }
+    if (!hwFallback.empty()) r.with("hw_fallback", hwFallback);
+    if (plan.video && !plan.streamCopy) r.with("hw_decode", !hardwareDecodeArgs().empty());
     if (plan.video) r.with("frames", static_cast<std::int64_t>(plan.frames)).with("fps", plan.fps);
     if (plan.maxBytes > 0) r.with("limit_mb", plan.maxBytes / 1e6);
     return r;
@@ -275,7 +291,11 @@ void registerExportCommands(Session& session) {
               {"at", ParamType::Number, "png/jpg: time of the frame", false, {}, 0.0},
               {"subtitles", ParamType::String, "burn the captions of this .srt/.vtt file into the picture", false},
               {"gif_fps", ParamType::Int, "gif: frames per second", false, {}, std::int64_t{15}},
-              {"gif_width", ParamType::Int, "gif: width in px", false, {}, std::int64_t{480}}, overwriteParam(),
+              {"gif_width", ParamType::Int, "gif: width in px", false, {}, std::int64_t{480}},
+              {"encoder", ParamType::String,
+               "H.264 encoder: auto uses the graphics card (NVIDIA, Intel, AMD, Apple) when ffmpeg can, except at quality=best; cpu always uses libx264",
+               false, {"auto", "cpu", "nvenc", "qsv", "amf", "videotoolbox"}, std::string("auto")},
+              overwriteParam(),
               {"background", ParamType::Bool,
                "return right away and export in the background; cut.export_status shows how far it got (the window does this)", false, {}, false}},
              false},
@@ -284,6 +304,7 @@ void registerExportCommands(Session& session) {
                 rq.preset = stringParam(p, "preset");
                 rq.quality = stringParam(p, "quality", "good");
                 rq.mode = stringParam(p, "mode", "auto");
+                rq.encoder = stringParam(p, "encoder", "auto");
                 if (stringParam(p, "range", "all") == "in_out") {
                     if (tl.inPoint < 0 && tl.outPoint < 0) return Result::failure("there are no in/out points (cut.set_in_out sets them)");
                     rq.start = std::max(0.0, tl.inPoint);

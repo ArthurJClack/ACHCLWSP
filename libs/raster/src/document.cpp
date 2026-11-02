@@ -4,9 +4,12 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 
 #include "wetwaresuite/raster/codec.hpp"
+#include "wetwaresuite/raster/color_profile.hpp"
 #include "wetwaresuite/raster/parallel.hpp"
 #include "wetwaresuite/raster/psd.hpp"
 #include "wetwaresuite/raster/selection.hpp"
@@ -61,7 +64,13 @@ std::shared_ptr<ImageDoc> openImage(const std::filesystem::path& path) {
         }
     }
     if (!layered) {
-        Image img = load(path);
+        if (!std::filesystem::exists(path)) throw std::runtime_error("file not found: " + path.string());
+        std::ifstream in(path, std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(in)), {});
+        Image img = decode(bytes);
+        const FileColorInfo info = describeColor(bytes);
+        doc->sourceBits = info.bits >= 16 ? 16 : 8;
+        doc->colorProfile = info.profile;
         doc->image.width = img.width();
         doc->image.height = img.height();
         doc->image.layers.push_back({"Background", std::move(img)});
@@ -71,7 +80,7 @@ std::shared_ptr<ImageDoc> openImage(const std::filesystem::path& path) {
     return doc;
 }
 
-void saveImage(const ImageDoc& doc, const std::filesystem::path& path, int quality, std::vector<std::string>* notes) {
+void saveImage(const ImageDoc& doc, const std::filesystem::path& path, int quality, std::vector<std::string>* notes, int bits) {
     if (notes) notes->clear();
     if (ext(path) == "ora") {
         saveOra(doc.image, path);
@@ -79,7 +88,9 @@ void saveImage(const ImageDoc& doc, const std::filesystem::path& path, int quali
         auto n = savePsd(doc.image, path);
         if (notes) *notes = std::move(n);
     } else {
-        save(doc.flatten(), path, quality);
+        const int want = bits > 0 ? bits : doc.sourceBits >= 16 ? 16 : 8;
+        save(doc.flatten(), path, quality, savesBits(path, want) ? want : 8);
+        if (notes && want == 16 && !savesBits(path, 16)) notes->push_back("." + ext(path) + " is 8-bit only; save as .png or .tif for 16 bits");
     }
 }
 

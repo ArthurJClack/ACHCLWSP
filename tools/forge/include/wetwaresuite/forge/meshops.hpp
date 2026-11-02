@@ -7,6 +7,7 @@
 #include <string>
 
 #include "wetwaresuite/mesh/mesh.hpp"
+#include "wetwaresuite/raster/image.hpp"
 
 namespace wetwaresuite::forge {
 
@@ -36,5 +37,26 @@ void recomputeNormals(mesh::Mesh& m, double creaseDegrees = 60.0);
 // with `creaseDegrees` when `normals` is set (decimation drops normals and UVs).
 mesh::Mesh decimateRatio(const mesh::Mesh& m, double ratio, bool normals = true, double creaseDegrees = 60.0);
 mesh::Mesh decimateTo(const mesh::Mesh& m, std::size_t triangles, bool normals = true, double creaseDegrees = 60.0);
+
+// Texture baking: details of a high-poly mesh painted into a low-poly mesh's UV layout,
+// as in Blender, Substance or xNormal. For every texel the low mesh covers, a ray along
+// the low surface's normal finds the high surface; the normal map stores the high
+// normal in the low mesh's tangent space (OpenGL style, green up, what Godot and Blender
+// read), the AO map how much of the sky the high surface sees.
+struct BakeOptions {
+    int size = 512;            // texture width and height, px
+    bool normal = true, ao = true;
+    int aoSamples = 24;        // rays per texel
+    double distance = 0;       // how far from the low surface to look for the high one (0: 4% of the size)
+    double aoDistance = 0;     // how far a ray can be blocked for AO (0: 15% of the size)
+    int padding = 4;           // px of colour grown past each UV island's edge, against seams
+    bool directXGreen = false; // flip green (DirectX / Unreal style)
+};
+struct BakeResult {
+    raster::Image normalMap, aoMap;
+    std::size_t texels = 0, missed = 0;  // texels covered, and those where no high surface was found
+};
+// The low mesh needs UVs (inside 0..1); throws std::runtime_error with a readable message.
+BakeResult bakeMaps(const mesh::Mesh& low, const mesh::Mesh& high, const BakeOptions& options);
 
 }  // namespace wetwaresuite::forge

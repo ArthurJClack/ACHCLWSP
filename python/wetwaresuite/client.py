@@ -260,7 +260,8 @@ class Suite:
         self.binary = find_binary(binary)
         self.raise_errors = raise_errors
         self.timeout = timeout
-        args = [self.binary, "mcp"]
+        # every command as a method needs every schema, not the catalog big servers list
+        args = [self.binary, "mcp", "--all-tools"]
         if tools:
             args += ["--tools", ",".join(tools)]
         try:

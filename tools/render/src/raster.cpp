@@ -35,18 +35,18 @@ V3 shade(const World& w, const Surface& s, const V3& d, bool shadows) {
     const float nv = std::max(dot(n, wo), 0.0f);
     const V3 f0 = lerp(V3{0.04f, 0.04f, 0.04f}, s.base, m.metallic);
     const float fr = pow5(1 - nv);
-    const V3 F = f0 + (V3{1, 1, 1} - f0) * fr * (1 - m.roughness * 0.7f);
+    const V3 F = f0 + (V3{1, 1, 1} - f0) * fr * (1 - s.rough * 0.7f);
     V3 c = m.emission;
     const float diffuseShare = (1 - m.metallic) * (1 - m.transmission);
     c += s.base * w.skyAmbient(n) * diffuseShare;
     const V3 r = reflect(d, n);
     // a little studio fill so metals and glass never go black under a dark sky
-    const V3 env = vmax(lerp(w.skyColor(r), w.skyAmbient(r), std::min(1.0f, m.roughness * 1.4f)), V3{0.06f, 0.06f, 0.06f});
-    c += F * env * (m.transmission > 0 ? 1.0f : (m.metallic > 0 ? 1.0f : 1.0f - m.roughness * 0.8f));
+    const V3 env = vmax(lerp(w.skyColor(r), w.skyAmbient(r), std::min(1.0f, s.rough * 1.4f)), V3{0.06f, 0.06f, 0.06f});
+    c += F * env * (m.transmission > 0 ? 1.0f : (m.metallic > 0 ? 1.0f : 1.0f - s.rough * 0.8f));
     Surface sd = s;
     if (m.transmission > 0) sd.base = sd.base * (1 - m.transmission);
     c += directLight(w, sd, n, wo, nullptr, shadows && !w.nodes.empty());
-    if (m.roughness < kMirror && m.transmission <= 0) {
+    if (s.rough < kMirror && m.transmission <= 0) {
         // smooth surfaces show a soft highlight for point-like lights
         for (const auto& L : w.lights) {
             const V3 wi = L.type == 1 ? -L.dir : normalize(L.position - s.p);

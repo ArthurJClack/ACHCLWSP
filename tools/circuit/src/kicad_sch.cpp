@@ -317,8 +317,22 @@ private:
                     }
                 }
                 if (w.pts.size() >= 2) c.wires.push_back(std::move(w));
-            } else if (n.is("bus") || n.is("bus_entry")) {
-                warn("buses aren't supported: bus wires were skipped (the labels on them still join their nets)");
+            } else if (n.is("bus")) {
+                // drawn as a bus; KiCad names it with a label on it, so it's named from the nearest bus label later
+                Bus b;
+                if (const Sx* pts = n.child("pts")) {
+                    for (const auto& p : pts->list) {
+                        if (p.is("xy")) b.pts.push_back({p.num(1) / kGrid, p.num(2) / kGrid});
+                    }
+                }
+                if (b.pts.size() >= 2) c.buses.push_back(std::move(b));
+            } else if (n.is("bus_entry")) {
+                const Sx* at = n.child("at");
+                const Sx* size = n.child("size");
+                if (at && size && !c.buses.empty()) {
+                    const Pt a{at->num(1) / kGrid, at->num(2) / kGrid};
+                    c.buses.back().entries.push_back({a, {a.x + size->num(1) / kGrid, a.y + size->num(2) / kGrid}});
+                }
             } else if (n.is("label") || n.is("global_label") || n.is("hierarchical_label")) {
                 Label l;
                 l.pos = {xy(n.child("at")).x / kGrid, xy(n.child("at")).y / kGrid};
@@ -481,12 +495,41 @@ private:
             }
             for (auto& l : child.labels) move(l.pos);
             for (auto& p : child.noConnects) move(p);
+            for (auto& b : child.buses) {
+                for (auto& p : b.pts) move(p);
+                for (auto& [a, e] : b.entries) move(a), move(e);
+                c.buses.push_back(std::move(b));
+            }
             for (auto& p : child.parts) c.parts.push_back(std::move(p));
             for (auto& w : child.wires) c.wires.push_back(std::move(w));
             for (auto& l : child.labels) c.labels.push_back(std::move(l));
             for (auto& p : child.noConnects) c.noConnects.push_back(p);
         }
+        nameBuses(c);
         return c;
+    }
+
+    // a bus is named by a label sitting on it (D[0..7]); that label names the bus, not a net
+    static void nameBuses(Circuit& c) {
+        for (auto& b : c.buses) {
+            if (!b.name.empty()) continue;
+            for (auto it = c.labels.begin(); it != c.labels.end(); ++it) {
+                if (it->name.find_first_of("[{") == std::string::npos || busMembers(it->name).size() < 2) continue;
+                bool on = false;
+                for (std::size_t i = 1; i < b.pts.size() && !on; ++i) {
+                    const Pt a = b.pts[i - 1], e = b.pts[i], q = it->pos;
+                    const double cross = (e.x - a.x) * (q.y - a.y) - (e.y - a.y) * (q.x - a.x);
+                    on = std::abs(cross) < 1e-6 && q.x >= std::min(a.x, e.x) - 1e-6 && q.x <= std::max(a.x, e.x) + 1e-6 &&
+                         q.y >= std::min(a.y, e.y) - 1e-6 && q.y <= std::max(a.y, e.y) + 1e-6;
+                }
+                if (!on) continue;
+                b.name = it->name;
+                b.members = busMembers(b.name);
+                c.labels.erase(it);
+                break;
+            }
+            if (b.name.empty()) b.name = "BUS" + std::to_string(&b - c.buses.data() + 1);
+        }
     }
 
     // unannotated (R?) and repeated references get fresh ones; multi-unit parts keep one footprint
@@ -693,6 +736,14 @@ std::string toKicadSchematic(const Circuit& c) {
     auto uuid = [&] { return uuidOf(rootUuid + "/" + std::to_string(n++)); };
     for (const auto& [a, b] : segs) {
         o << "  (wire (pts (xy " << at(a) << ") (xy " << at(b) << "))\n    (stroke (width 0) (type default))\n    (uuid " << uuid() << ")\n  )\n";
+    }
+    for (const auto& bus : c.buses) {
+        for (std::size_t i = 1; i < bus.pts.size(); ++i)
+            o << "  (bus (pts (xy " << at(bus.pts[i - 1]) << ") (xy " << at(bus.pts[i]) << "))\n    (stroke (width 0) (type default))\n    (uuid " << uuid() << ")\n  )\n";
+        for (const auto& [a, e] : bus.entries)
+            o << "  (polyline (pts (xy " << at(a) << ") (xy " << at(e) << "))\n    (stroke (width 0) (type default))\n    (uuid " << uuid() << ")\n  )\n";
+        if (!bus.pts.empty())
+            o << "  (label \"" << bus.name << "\" (at " << at(bus.pts.front()) << " 0)\n    (effects (font (size 1.27 1.27)) (justify left bottom))\n    (uuid " << uuid() << ")\n  )\n";
     }
     // junctions where three or more wire ends and pins meet
     std::vector<std::pair<Pt, int>> ends;

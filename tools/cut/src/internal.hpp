@@ -132,5 +132,6 @@ void registerTitleCommands(Session& session);
 void registerAudioCommands(Session& session);
 void registerExportCommands(Session& session);
 void registerFileCommands(Session& session);
+void registerProxyCommands(Session& session);
 
 }  // namespace wetwaresuite::cut

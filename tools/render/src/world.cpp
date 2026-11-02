@@ -88,9 +88,95 @@ void generatedUvs(const Object& o, const mesh::Mesh& m, std::size_t t, float u[3
 
 void World::build(const Scene& scene) {
     sky = scene.sky;
-    skyType = sky.type == "color" ? 1 : sky.type == "none" ? 2 : 0;
+    skyType = sky.type == "color" ? 1 : sky.type == "none" ? 2 : sky.type == "hdri" ? 3 : 0;
     std::map<std::string, int> texIndex;
     mesh::Bounds all;
+
+    // Loads an image once; colour textures go from sRGB to linear, data maps stay as they are.
+    auto loadTexture = [&](const std::string& file, bool colour, const std::string& owner) -> int {
+        if (file.empty()) return -1;
+        const std::string key = (colour ? "c:" : "d:") + file;
+        auto it = texIndex.find(key);
+        if (it != texIndex.end()) return it->second;
+        int index = -1;
+        try {
+            raster::Image img = raster::load(file);
+            Texture tex;
+            tex.w = img.width();
+            tex.h = img.height();
+            tex.px.resize(static_cast<std::size_t>(tex.w) * static_cast<std::size_t>(tex.h));
+            float lut[256];
+            for (int i = 0; i < 256; ++i) lut[i] = colour ? srgbToLinear(static_cast<float>(i) / 255.0f) : static_cast<float>(i) / 255.0f;
+            for (int y = 0; y < tex.h; ++y) {
+                for (int x = 0; x < tex.w; ++x) {
+                    const std::uint8_t* px = img.pixel(x, y);
+                    tex.px[static_cast<std::size_t>(y) * static_cast<std::size_t>(tex.w) + static_cast<std::size_t>(x)] = {lut[px[0]], lut[px[1]], lut[px[2]]};
+                }
+            }
+            index = static_cast<int>(textures.size());
+            textures.push_back(std::move(tex));
+        } catch (const std::exception& e) {
+            warnings.push_back("image for '" + owner + "' not used: " + e.what());
+        }
+        texIndex.emplace(key, index);
+        return index;
+    };
+    auto makeMat = [&](const Material& m, const std::string& owner) {
+        Mat mat = toMat(m);
+        mat.texture = loadTexture(m.texture, true, owner);
+        mat.normalMap = loadTexture(m.normalMap, false, owner);
+        mat.roughnessMap = loadTexture(m.roughnessMap, false, owner);
+        mat.normalStrength = static_cast<float>(m.normalStrength);
+        return mat;
+    };
+
+    if (skyType == 3) {
+        int hi = -1;
+        try {
+            raster::Image img = raster::load(sky.hdri);
+            hdri.w = img.width();
+            hdri.h = img.height();
+            hdri.px.resize(static_cast<std::size_t>(hdri.w) * static_cast<std::size_t>(hdri.h));
+            for (int y = 0; y < hdri.h; ++y) {
+                for (int x = 0; x < hdri.w; ++x) {
+                    const std::uint8_t* px = img.pixel(x, y);
+                    // 8-bit panoramas clip the sun; lift the brightest values so it still casts light
+                    V3 c{srgbToLinear(px[0] / 255.0f), srgbToLinear(px[1] / 255.0f), srgbToLinear(px[2] / 255.0f)};
+                    const float l = maxComponent(c);
+                    if (l > 0.9f) c *= 1.0f + (l - 0.9f) * 40.0f;
+                    hdri.px[static_cast<std::size_t>(y) * static_cast<std::size_t>(hdri.w) + static_cast<std::size_t>(x)] = c;
+                }
+            }
+            hi = 0;
+        } catch (const std::exception& e) {
+            warnings.push_back("hdri not used: " + std::string(e.what()));
+        }
+        if (hi < 0) {
+            skyType = 0;
+        } else {
+            hdriTurn = static_cast<float>(sky.rotation * kPiF / 180.0);
+            // average incoming light per axis direction (cosine weighted), for the preview's ambient term
+            const V3 axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            float wsum[6] = {0, 0, 0, 0, 0, 0};
+            for (auto& a : hdriAmbient) a = {0, 0, 0};
+            const int sy = 32, sx = 64;
+            for (int j = 0; j < sy; ++j) {
+                const float theta = (static_cast<float>(j) + 0.5f) / sy * kPiF;
+                for (int i = 0; i < sx; ++i) {
+                    const float phi = (static_cast<float>(i) + 0.5f) / sx * 2 * kPiF;
+                    const V3 d{std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi), std::cos(theta)};
+                    const V3 c = skyColor(d);
+                    const float solid = std::sin(theta);
+                    for (int k = 0; k < 6; ++k) {
+                        const float w = std::max(0.0f, dot(d, axes[k])) * solid;
+                        hdriAmbient[k] += c * w;
+                        wsum[k] += w;
+                    }
+                }
+            }
+            for (int k = 0; k < 6; ++k) hdriAmbient[k] = wsum[k] > 0 ? hdriAmbient[k] / wsum[k] : V3{0, 0, 0};
+        }
+    }
 
     // non-planes first, so auto-sized ground planes can fit around them
     std::vector<std::pair<const Object*, mesh::Mesh>> meshes;
@@ -115,36 +201,12 @@ void World::build(const Scene& scene) {
 
     for (auto& [obj, m] : meshes) {
         const Object& o = *obj;
-        Mat mat = toMat(o.material);
-        if (!o.material.texture.empty()) {
-            auto it = texIndex.find(o.material.texture);
-            if (it == texIndex.end()) {
-                int index = -1;
-                try {
-                    raster::Image img = raster::load(o.material.texture);
-                    Texture tex;
-                    tex.w = img.width();
-                    tex.h = img.height();
-                    tex.px.resize(static_cast<std::size_t>(tex.w) * static_cast<std::size_t>(tex.h));
-                    float lut[256];
-                    for (int i = 0; i < 256; ++i) lut[i] = srgbToLinear(static_cast<float>(i) / 255.0f);
-                    for (int y = 0; y < tex.h; ++y) {
-                        for (int x = 0; x < tex.w; ++x) {
-                            const std::uint8_t* p = img.pixel(x, y);
-                            tex.px[static_cast<std::size_t>(y) * static_cast<std::size_t>(tex.w) + static_cast<std::size_t>(x)] = {lut[p[0]], lut[p[1]], lut[p[2]]};
-                        }
-                    }
-                    index = static_cast<int>(textures.size());
-                    textures.push_back(std::move(tex));
-                } catch (const std::exception& e) {
-                    warnings.push_back("texture for '" + o.name + "' not used: " + e.what());
-                }
-                it = texIndex.emplace(o.material.texture, index).first;
-            }
-            mat.texture = it->second;
-        }
         const int mi = static_cast<int>(mats.size());
-        mats.push_back(mat);
+        mats.push_back(makeMat(o.material, o.name));
+        const bool byPart = !o.parts.empty() && o.partOf && o.partOf->size() == m.triangleCount();
+        if (byPart) {
+            for (const auto& part : o.parts) mats.push_back(makeMat(part, o.name));
+        }
 
         const mesh::Mat4 xf = o.matrix();
         const bool uvs = m.hasUvs();
@@ -152,7 +214,7 @@ void World::build(const Scene& scene) {
         tris.reserve(tris.size() + nt);
         for (std::size_t t = 0; t < nt; ++t) {
             Tri tri;
-            tri.material = mi;
+            tri.material = byPart ? mi + 1 + std::clamp((*o.partOf)[t], 0, static_cast<int>(o.parts.size()) - 1) : mi;
             if (!uvs) generatedUvs(o, m, t, tri.u, tri.v);
             for (int k = 0; k < 3; ++k) {
                 const std::uint32_t vi = m.indices[t * 3 + static_cast<std::size_t>(k)];
@@ -166,6 +228,17 @@ void World::build(const Scene& scene) {
                 }
             }
             if (length(cross(tri.p[1] - tri.p[0], tri.p[2] - tri.p[0])) <= 0) continue;
+            {
+                const V3 e1 = tri.p[1] - tri.p[0], e2 = tri.p[2] - tri.p[0];
+                const float du1 = tri.u[1] - tri.u[0], dv1 = tri.v[1] - tri.v[0];
+                const float du2 = tri.u[2] - tri.u[0], dv2 = tri.v[2] - tri.v[0];
+                const float det = du1 * dv2 - du2 * dv1;
+                if (std::fabs(det) > 1e-12f) {
+                    const float r = 1.0f / det;
+                    tri.tangent = (e1 * dv2 - e2 * dv1) * r;
+                    tri.bitangent = (e2 * du1 - e1 * du2) * r;
+                }
+            }
             tris.push_back(tri);
         }
     }
@@ -459,8 +532,21 @@ Surface World::surface(const Hit& h) const {
     s.v = tr.v[0] * b0 + tr.v[1] * h.b1 + tr.v[2] * h.b2;
     s.mat = &mats[static_cast<std::size_t>(tr.material)];
     s.base = s.mat->color;
-    if (s.mat->texture >= 0) {
-        s.base *= textures[static_cast<std::size_t>(s.mat->texture)].sample(s.u * s.mat->textureScale, s.v * s.mat->textureScale);
+    s.rough = s.mat->roughness;
+    const float su = s.u * s.mat->textureScale, sv = s.v * s.mat->textureScale;
+    if (s.mat->texture >= 0) s.base *= textures[static_cast<std::size_t>(s.mat->texture)].sample(su, sv);
+    if (s.mat->roughnessMap >= 0) s.rough = std::clamp(s.rough * textures[static_cast<std::size_t>(s.mat->roughnessMap)].sample(su, sv).y, 0.0f, 1.0f);
+    if (s.mat->normalMap >= 0 && dot(tr.tangent, tr.tangent) > 0) {
+        const V3 c = textures[static_cast<std::size_t>(s.mat->normalMap)].sample(su, sv);
+        const float k = s.mat->normalStrength;
+        const V3 tn{(c.x * 2 - 1) * k, (c.y * 2 - 1) * k, std::max(c.z * 2 - 1, 0.05f)};
+        V3 T = tr.tangent - s.n * dot(s.n, tr.tangent);
+        if (dot(T, T) > 1e-20f) {
+            T = normalize(T);
+            V3 B = cross(s.n, T);
+            if (dot(B, tr.bitangent) < 0) B = -B;
+            s.n = normalize(T * tn.x + B * tn.y + s.n * tn.z);
+        }
     }
     return s;
 }
@@ -468,6 +554,13 @@ Surface World::surface(const Hit& h) const {
 V3 World::skyColor(const V3& d) const {
     const float k = static_cast<float>(sky.strength);
     if (skyType == 2) return {0, 0, 0};
+    if (skyType == 3) {
+        // equirectangular: u around z (u = 0.5 looks down +x), v from the bottom (-z) to the top (+z)
+        float u = std::atan2(d.y, d.x) - hdriTurn;
+        u = 0.5f - u / (2 * kPiF);
+        const float v = 0.5f + std::asin(std::clamp(d.z, -1.0f, 1.0f)) / kPiF;
+        return hdri.sample(u, v) * k;
+    }
     if (skyType == 1) return V3(sky.zenith) * k;
     const V3 z(sky.zenith), h(sky.horizon), g(sky.ground);
     if (d.z >= 0) return lerp(h, z, std::sqrt(std::min(d.z, 1.0f))) * k;
@@ -477,6 +570,12 @@ V3 World::skyColor(const V3& d) const {
 V3 World::skyAmbient(const V3& n) const {
     const float k = static_cast<float>(sky.strength);
     if (skyType == 2) return {0, 0, 0};
+    if (skyType == 3) {
+        const V3 a = n.x >= 0 ? hdriAmbient[0] : hdriAmbient[1];
+        const V3 b = n.y >= 0 ? hdriAmbient[2] : hdriAmbient[3];
+        const V3 c = n.z >= 0 ? hdriAmbient[4] : hdriAmbient[5];
+        return (a * (n.x * n.x) + b * (n.y * n.y) + c * (n.z * n.z)) * 1.0f;  // already scaled by strength
+    }
     if (skyType == 1) return V3(sky.zenith) * k;
     const V3 up = (V3(sky.zenith) + V3(sky.horizon)) * 0.5f;
     const V3 down = (V3(sky.ground) + V3(sky.horizon)) * 0.5f;
@@ -533,9 +632,9 @@ V3 evalBrdf(const Surface& s, const V3& n, const V3& wo, const V3& wi) {
     if (nl <= 0 || nv <= 0) return {0, 0, 0};
     const Mat& m = *s.mat;
     const V3 diffuse = s.base * ((1 - m.metallic) / kPiF);
-    if (m.roughness < kMirror) return diffuse;
+    if (s.rough < kMirror) return diffuse;
     const V3 f0 = lerp(V3{0.04f, 0.04f, 0.04f}, s.base, m.metallic);
-    const float a = ggxAlpha(m.roughness), a2 = a * a;
+    const float a = ggxAlpha(s.rough), a2 = a * a;
     const V3 h = normalize(wo + wi);
     const float nh = std::max(dot(n, h), 0.0f), vh = std::max(dot(wo, h), 0.0f);
     const float dd = nh * nh * (a2 - 1) + 1;

@@ -398,6 +398,30 @@ The material fields, for `render.add`, `render.material` and the scene file:
 | `ior` | 1..3 | glass refraction: 1.33 water, 1.5 glass, 2.4 diamond |
 | `opacity` | 0..1 | below 1 lets light straight through, for cut-outs and ghosts |
 | `texture`, `texture_scale` | image file, repeats | image multiplied into the colour; `texture=""` removes it |
+| `normal_map`, `normal_strength` | image file, 0..4 (1) | tangent-space normal map (green up, as Blender and glTF bake them) for fine bumps, scratches and weave; uses the same UVs and `texture_scale` |
+| `roughness_map` | image file | grey image multiplied into `roughness` (glTF metal-rough maps work too: the green channel is read); white keeps the roughness, black makes that spot mirror-smooth |
+
+**Models with several materials.** `render.add path=chair.obj` reads the OBJ's `.mtl` too: each `usemtl` group becomes a *part* with its own material (`Kd` colour, `Ns`/`Pr` roughness, `Pm` metallic, `Ke` glow, `d` opacity, `Ni` ior, `map_Kd` texture, `norm`/`map_Bump` normal map, `map_Pr` roughness map). `render.info` and the add message list them (`2 materials: 1 red, 2 blue`). `render.material name=chair part=blue roughness=0.7` changes one part (by name or number); without `part=` every part gets the change. Saved scenes keep your edits to each part. Other formats still come in with one material (open them in [model](model.md) to keep theirs).
+
+```text
+render.add doc=$s path=two.obj name=box
+render.material doc=$s name=box part=blue roughness=0.4
+```
+
+```text
+added box: mesh (12 triangles, two.obj) at 0,0,0; 2 materials: 1 red, 2 blue
+box / blue: colour #1a33e6, roughness 0.4, metallic 1
+```
+
+**HDRI skies.** `render.sky hdri=studio.jpg` lights the scene from a 2:1 equirectangular panorama (any image the suite reads) and shows it behind the objects; `rotation=90` turns it about the up axis and `strength` scales it. Bright parts (the sun, windows, softboxes) cast the light and the reflections you see in metals and glass, which is what makes product shots look real. 8-bit panoramas clip the sun, so the brightest pixels are boosted a little to keep its shadows.
+
+```text
+render.sky doc=$s hdri=sky.png rotation=30
+```
+
+```text
+sky: hdri sky.png turned 30 deg, strength 0.5
+```
 
 ## Command reference
 
@@ -435,7 +459,7 @@ All commands take `doc=` (an open scene id). `render.render`, `render.preview`, 
 
 ### render.remove, render.transform, render.material
 
-`render.remove name=` deletes an object or light. `render.transform name=` takes `position`, `rotation`, `scale`, `move`, `turn`, `visible` (objects) or `position`, `move`, `target` (lights). `render.material name=` (or `*`) takes the material params.
+`render.remove name=` deletes an object or light. `render.transform name=` takes `position`, `rotation`, `scale`, `move`, `turn`, `visible` (objects) or `position`, `move`, `target` (lights). `render.material name=` (or `*`) takes the material params, and `part=` (a name or number) for one material of a multi-material model.
 
 ### render.light
 
@@ -455,7 +479,9 @@ All commands take `doc=` (an open scene id). `render.render`, `render.preview`, 
 
 | param | default | meaning |
 | --- | --- | --- |
-| `type` | gradient | `gradient`, `color`, `none` |
+| `type` | gradient | `gradient`, `color`, `none`, `hdri` |
+| `hdri` | | 2:1 panorama image; sets type `hdri` and shows it behind the objects |
+| `rotation` | 0 | degrees to turn the hdri about the up axis |
 | `zenith`, `horizon`, `ground` | blue, pale blue, brown-grey | gradient colours (up, horizon, below) |
 | `color` | | one colour (sets type `color`) |
 | `strength` | 0.5 | how bright the sky looks and how much it lights the scene |
@@ -522,7 +548,7 @@ Example prompts:
 - **Lights are invisible.** Point, sun and area lights light the scene but don't appear in the picture or in mirrors; for a visible light source, add an object with an `emissive` material (glowing objects light the scene in path mode, but they are noisier than real lights).
 - **No caustics.** Shadows of glass are lighter and tinted but don't focus light; the light through glass onto surfaces behind it is approximate.
 - **The preview is a sketch.** It shows materials roughly (no refraction, simple reflections of the sky, glass drawn see-through), and emissive objects don't light anything.
-- **Materials are one per object.** OBJ/glTF materials and vertex colours are ignored; texture alpha isn't used for cut-outs (use `opacity`), and there are no normal or roughness maps.
+- **Materials from files.** OBJ files keep their `.mtl` materials (one part each); glTF, FBX and other formats come in with one material, and vertex colours are ignored. Texture alpha isn't used for cut-outs (use `opacity`), and there are no metallic, emission or displacement maps.
 - **No animation** beyond turntables (camera orbits). Objects can't move between frames yet.
 - **Meshes are copied in.** A scene keeps the geometry from when it was added; reopen the file or re-add the document after changing it.
-- **No depth of field, motion blur, volumes (fog), subsurface scattering or HDR environment maps.** Skies are a gradient or a flat colour.
+- **No depth of field, motion blur, volumes (fog) or subsurface scattering.** HDRI skies read 8-bit images (PNG, JPEG ...); `.hdr`/`.exr` floating-point panoramas aren't read yet, so convert them first.

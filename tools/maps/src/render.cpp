@@ -377,6 +377,9 @@ View makeView(const Map& map, const RenderOptions& o, std::vector<std::string>& 
     if (v.crs.kind == Crs::TransverseMercator && ll.width() > 40) warnings.push_back("a transverse Mercator/UTM view this wide distorts a lot; webmercator or wgs84 suit large areas");
     if (v.crs.kind == Crs::WebMercator) v.domain = {-180, -85.06, 180, 85.06};
     if (v.crs.kind == Crs::TransverseMercator) v.domain = {std::max(-180.0, v.crs.lon0 - 75), -90, std::min(180.0, v.crs.lon0 + 75), 90};
+    if (v.crs.kind == Crs::EqualEarth) v.domain = {-180, -90, 180, 90};
+    // an azimuthal view: the hemisphere around its centre (the far side folds over)
+    if (v.crs.kind == Crs::Laea) v.domain = {std::max(-180.0, v.crs.lon0 - 90), std::max(-90.0, v.crs.lat0 - 90), std::min(180.0, v.crs.lon0 + 90), std::min(90.0, v.crs.lat0 + 90)};
     // and not much beyond what the view shows
     BBox seen;
     for (int i = 0; i <= 10; ++i) {
@@ -509,7 +512,8 @@ std::vector<float> hillshade(const Grid& g) {
 }
 
 bool sameCrs(const Crs& a, const Crs& b) {
-    return a.kind == b.kind && (a.kind != Crs::TransverseMercator || (a.lon0 == b.lon0 && a.k0 == b.k0 && a.falseEasting == b.falseEasting && a.falseNorthing == b.falseNorthing));
+    return a.kind == b.kind && (a.kind == Crs::Geographic || a.kind == Crs::WebMercator ||
+                                (a.lon0 == b.lon0 && a.lat0 == b.lat0 && a.k0 == b.k0 && a.falseEasting == b.falseEasting && a.falseNorthing == b.falseNorthing));
 }
 
 std::shared_ptr<raster::Image> rasterize(const View& v, const Grid& g, const Style& st) {
@@ -1770,6 +1774,12 @@ std::string MapDoc::summary() const {
 RenderOptions previewOptions(const Map& map) {
     RenderOptions o;
     o.width = 800;
+    if (map.viewAspect > 0) {
+        // the window's shape, about a thousand px on the long side
+        const double a = std::clamp(map.viewAspect, 0.2, 5.0);
+        o.width = a >= 1 ? 1000 : static_cast<int>(std::lround(1000 * a));
+        o.height = a >= 1 ? static_cast<int>(std::lround(1000 / a)) : 1000;
+    }
     o.title = map.title;
     return o;
 }
@@ -1799,6 +1809,14 @@ double renderMetresPerPixel(const Map& map, const RenderOptions& options) {
     std::vector<std::string> warnings;
     const View v = makeView(map, options, warnings);
     return metresPerPixel(v, v.H / 2.0);
+}
+
+bool MapDoc::setViewShape(int width, int height) {
+    if (width < 16 || height < 16) return false;
+    const double a = static_cast<double>(width) / height;
+    if (map.viewAspect > 0 && std::abs(a - map.viewAspect) < 0.03 * a) return false;
+    map.viewAspect = a;
+    return true;
 }
 
 std::unique_ptr<Attachment> MapDoc::preview() const {

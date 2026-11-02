@@ -99,7 +99,13 @@ inline double signedDistance(const Shape& s, Pt p) {
 }
 
 inline Shape padShape(const WorldPad& p) {
-    if (p.shape == PadShape::Rect) return boxShape(p.pos, p.w / 2, p.h / 2);
+    if (p.angle != 0 && p.shape != PadShape::Rect) {  // a turned oval is still a capsule, just slanted
+        const double r = std::min(p.rw, p.rh) / 2, half = std::max(p.rw, p.rh) / 2 - r;
+        const double a = p.angle * 3.14159265358979323846 / 180 + (p.rw >= p.rh ? 0 : 3.14159265358979323846 / 2);
+        const Pt d{half * std::cos(a), -half * std::sin(a)};
+        return capsule({p.pos.x - d.x, p.pos.y - d.y}, {p.pos.x + d.x, p.pos.y + d.y}, r);
+    }
+    if (p.shape == PadShape::Rect) return boxShape(p.pos, p.w / 2, p.h / 2);  // turned: its upright bounding box
     if (p.shape == PadShape::Circle || std::abs(p.w - p.h) < 1e-9) return capsule(p.pos, p.pos, std::min(p.w, p.h) / 2);
     const double r = std::min(p.w, p.h) / 2;
     if (p.w > p.h) return capsule({p.pos.x - (p.w / 2 - r), p.pos.y}, {p.pos.x + (p.w / 2 - r), p.pos.y}, r);

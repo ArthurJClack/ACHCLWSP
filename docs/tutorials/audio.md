@@ -630,6 +630,51 @@ Open a project (or a song) in the sound app and the right panel gets an **Effect
 
 The timeline below the waveform still moves, trims and splits clips by dragging (see [the window](gui.md#the-timeline)).
 
+## Task 8: record, overdub and share a reverb
+
+**Recording.** `audio.record_start` listens to the default microphone (or `device=` from `audio.record_devices`; `device=tone` is a 440 Hz test tone for checking levels), `audio.record_status` gives the time and level, and `audio.record_stop` opens the take as a new audio document. `audio.record seconds=5` does all three in one blocking step for scripts. With no sound card it records silence in real time, so scripts behave the same on a server.
+
+```text
+# take.txt: a 5-second take onto a project track, with a shared reverb
+audio.record seconds=5 channels=1 -> take
+audio.project_new -> p
+audio.track_add project=$p name=Vocal
+audio.clip_add project=$p track=0 doc=$take at=1 fade_in=0.05 fade_out=0.3
+audio.bus_add project=$p fx=reverb name=Hall
+audio.send project=$p track=0 bus=0 level=-8
+audio.fx_add project=$p bus=0 type=eq values="bands=highpass 300"
+audio.sends project=$p
+```
+
+`audio.bus_add` makes a shared effects bus (a reverb bus starts all wet); `audio.send` feeds part of a track into it after the track's volume and pan, and `off=true` removes the send. A bus's rack takes the usual `audio.fx_*` and `audio.automate` commands with `bus=`; `audio.bus_set` changes its level or mutes it.
+
+**In the window.** **Rec** on the play bar records into a new clip. In a project it records onto the picked track (or a new "Recording" track) at the timeline cursor, with the project playing along so you can overdub; the meter goes amber near the top and red once it clipped. On a clip in the timeline, drag the white squares on its top edge to fade in or out and the yellow line to change its gain. On a single waveform, the corner squares fade the selection (or the whole file) and the yellow knob changes its volume. In the Effects panel, **+ Reverb bus** and **+ Delay bus** add buses; pick a track to get a send slider per bus (far left is off), or pick a bus for its level, mute and rack.
+
+![recording, fade handles and a send to a reverb bus](images/sound-record-buses.png)
+
+## Task 9: use your own plugins (CLAP)
+
+The rack also takes **CLAP** effect plugins already installed on the computer (free ones like Airwindows Consolidated, Surge XT effects, ChowTape and Dragonfly Reverb ship CLAP builds). The app looks in the standard folders (`~/.clap` and `/usr/lib/clap` on Linux, `%COMMONPROGRAMFILES%\CLAP` and `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows, `~/Library/Audio/Plug-Ins/CLAP` and `/Library/Audio/Plug-Ins/CLAP` on a Mac) plus any folders in `WETWARESUITE_CLAP_PATH`.
+
+```text
+# plugins.txt: find plugins, put one on a track and automate it
+audio.plugins
+audio.plugin_params plugin="Dragonfly Hall Reverb"
+audio.project_open path=mix.json -> p
+audio.plugin_add project=$p track=0 plugin="Dragonfly Hall Reverb" values="Dry Level=60"
+audio.fx_list project=$p track=0
+audio.automate project=$p track=0 target=fx0.p2 points=0,20,4,80
+audio.export project=$p path=mix.wav
+```
+
+`plugin=` takes a `.clap` file, a key from `audio.plugins` (`file#id`), the plugin's id or its name. Settings go by name or by `p<id>` (what `audio.plugin_params` lists), save with the project, change with `audio.fx_set` and automate as `fx<n>.p<id>`. If a project is opened on a computer without the plugin, that slot passes the sound through untouched and the setting values are kept.
+
+**In the window.** In the Effects panel, **+ Plugin** lists the effect plugins found on this computer (**Look again** after installing one). A plugin's settings get sliders like the built-in effects, and they show up in the envelope's list.
+
+![a CLAP plugin in a track's rack with its slider](images/sound-plugins.png)
+
+**Hear edits while it plays.** Every change made while a clip or project plays (an EQ tweak, a moved clip, a fade) is swapped into playback at the same spot. Scripts do the same with `audio.refresh`.
+
 ## More editing
 
 Everyday edits in one script (`edit.txt`):
@@ -784,6 +829,9 @@ Common parameters: `doc` (an open document), `start`/`end` (seconds; default the
 | `audio.fx_add` | add an effect to a track's or the master's rack | `track` or `master=true`, `type`, `values`, `at` |
 | `audio.fx_set` / `audio.fx_remove` / `audio.fx_move` | change, bypass, remove or reorder an effect | `track` or `master`, `fx`, `values`, `bypass`, `to` |
 | `audio.fx_list` | the racks with every setting (read-only) | `track` or `master` (default: all) |
+| `audio.plugins` | the CLAP plugins on this computer (read-only) | `folder` (another place to look) |
+| `audio.plugin_params` | a plugin's settings, with their `p<id>` keys (read-only) | `plugin` |
+| `audio.plugin_add` | put a CLAP effect plugin in a rack | `track`, `bus` or `master=true`, `plugin`, `values`, `at` |
 | `audio.automate` | draw a lane | `track` or `master`, `target` (volume, pan, fx<i>.<setting>), `points` (time,value pairs), `mode` (replace, add, clear) |
 | `audio.automation` | the lanes (read-only) | `track` or `master` |
 | `audio.marker_add` / `audio.marker_remove` / `audio.markers` | markers and regions on a document or project | `doc` (aud1 or proj1), `name`, `at`, `end`, `marker` |
@@ -804,12 +852,13 @@ See [playback](playback.md) for the details.
 
 ## Limitations
 
-- **No recording yet.** Playback is live (`audio.play`, see [playback](playback.md)), but it plays a copy taken when it starts, so edits are heard on the next play.
+- **Recording** is one input at a time, mono or stereo, up to six hours per take, with no monitoring through effects and no latency compensation when overdubbing (nudge the clip if it lands late). Playback re-renders the whole mix after an edit, so a long project can hiccup for a moment on a slow PC.
+- **Plugins** are CLAP effects only (no VST2/VST3/AU and no instruments), and they run while mixing with no plugin window of their own: settings are sliders in the panel. A plugin that crashes takes the app down with it, since plugins run inside it.
 - **Undo keeps a full copy** of the document for every step, so very long files (an hour of stereo is about 1.3 GB as float) use a lot of memory over many edits. Close documents you've saved, or work on parts.
 - **Effects on a range** only process that range: a reverb or echo tail stops at `end` (blended over 5 ms). Use `tail=` on whole-file edits, or leave room after the range.
 - **Noise reduction** is spectral gating, good on steady noise (hiss, hum, fans, room tone). It doesn't remove wind, reverb or a TV in the background, and pushed hard it sounds watery. Clicks have `audio.declick` and hum `audio.dehum`. The click repair rebuilds up to a few milliseconds from the sound on both sides, which is clean on speech and sustained music. Sharp attacks (drums, plucks) can be taken for clicks, so limit it to a range there, and long scratches are left alone.
 - **Time stretching and pitch shifting** are WSOLA-based: clean on speech and steady material within about 0.5x-2x and a few semitones; extreme settings smear transients, and pitch shifting moves formants (no formant preservation).
 - **Loudness** follows ITU-R BS.1770-4 (K-weighting, 400 ms gated blocks); true peak is 4x oversampled near the loudest samples. Surround channel weights assume the L R C LFE Ls Rs order.
-- **Multitrack**: clips are copies made when added (later edits to the document don't reach the project). Effects are per track and on the master, not per clip, and there are no sends or buses. Ducking listens to one track. Automation points are joined by straight lines (no curves). In the sound app the project gets a timeline you drag clips around on (see [the window](gui.md#the-timeline)), and an effects rack and envelope editor in the right panel.
+- **Multitrack**: clips are copies made when added (later edits to the document don't reach the project). Effects are per track, per bus and on the master, not per clip; sends are post-fader only. Ducking listens to one track. Automation points are joined by straight lines (no curves). In the sound app the project gets a timeline you drag clips around on (see [the window](gui.md#the-timeline)), and an effects rack and envelope editor in the right panel.
 - **Formats**: without ffmpeg only WAV, MP3, FLAC and Ogg Vorbis open and only WAV saves. WAV files are limited to 4 GB (no RF64); AIFF is written through ffmpeg as 16- or 24-bit. Metadata (tags, cover art) isn't kept, and markers live in project files only (they aren't written into WAV cue chunks).
 - **Batch and split** write files and can't be undone; they never change their input folder.

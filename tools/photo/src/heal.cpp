@@ -285,12 +285,14 @@ struct Inpainter {
     std::vector<std::uint8_t> known;
     std::vector<float> conf, lum;
     std::vector<std::uint8_t> validSource;  // patch centred here is fully inside and untouched
+    std::vector<int> from;                  // filled pixels: the pixel they were copied from (-1: never masked)
     int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
 
     Inpainter(Image& image, const Mask& mask, int patch)
         : img(image), W(image.width()), H(image.height()), r(patch / 2), side(patch) {
         const std::size_t N = static_cast<std::size_t>(W) * H;
         known.resize(N);
+        from.assign(N, -1);
         conf.resize(N);
         lum.resize(N);
         for (std::size_t i = 0; i < N; ++i) {
@@ -434,6 +436,7 @@ struct Inpainter {
                 const std::uint8_t* q = img.pixel(sx + dx, sy + dy);
                 std::uint8_t* p = img.pixel(x, y);
                 std::copy(q, q + 4, p);
+                from[i] = (sy + dy) * W + sx + dx;
                 known[i] = 1;
                 conf[i] = c;
                 lum[i] = luminance(static_cast<int>(i));
@@ -443,6 +446,163 @@ struct Inpainter {
         return filled;
     }
 };
+
+}  // namespace
+
+namespace {
+
+// Criminisi at one level; `from` gets where each filled pixel came from.
+bool inpaintLevel(Image& img, const Mask& mask, int patch, std::vector<int>* from, std::string& error) {
+    Inpainter ip(img, mask, patch);
+    if (std::none_of(ip.validSource.begin(), ip.validSource.end(), [](std::uint8_t v) { return v != 0; })) {
+        error = "there isn't enough untouched picture around the area to copy from; select a smaller area or use a smaller patch size";
+        return false;
+    }
+    std::size_t left = mask.count();
+    while (left > 0) {
+        auto pick = ip.nextTarget();
+        if (pick.x < 0) break;  // cannot happen while pixels are left: the image is never fully masked here
+        int sx = 0, sy = 0;
+        if (!ip.bestSource(pick.x, pick.y, sx, sy)) {
+            error = "found nothing to copy from";
+            return false;
+        }
+        left -= ip.paste(pick.x, pick.y, sx, sy, pick.conf);
+    }
+    if (from) *from = std::move(ip.from);
+    return true;
+}
+
+// Sources whose (2r+1)^2 patch is inside the image and untouched by the mask.
+std::vector<std::uint8_t> validCentres(const Mask& mask, int r) {
+    const int W = mask.width, H = mask.height;
+    std::vector<int> sat(static_cast<std::size_t>(W + 1) * (H + 1), 0);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+            sat[static_cast<std::size_t>(y + 1) * (W + 1) + x + 1] = mask.bits[static_cast<std::size_t>(y) * W + x] + sat[static_cast<std::size_t>(y) * (W + 1) + x + 1] +
+                                                                     sat[static_cast<std::size_t>(y + 1) * (W + 1) + x] - sat[static_cast<std::size_t>(y) * (W + 1) + x];
+    std::vector<std::uint8_t> ok(static_cast<std::size_t>(W) * H, 0);
+    auto at = [&](int xx, int yy) { return sat[static_cast<std::size_t>(yy) * (W + 1) + xx]; };
+    for (int y = r; y + r < H; ++y)
+        for (int x = r; x + r < W; ++x) ok[static_cast<std::size_t>(y) * W + x] = at(x + r + 1, y + r + 1) - at(x - r, y + r + 1) - at(x + r + 1, y - r) + at(x - r, y - r) == 0;
+    return ok;
+}
+
+// Big holes: fill a small copy with Criminisi, then carry where each pixel came from up the
+// pyramid and refine it with a few PatchMatch passes per level (Wexler/Barnes style), so a
+// whole person or car fills in seconds instead of hours.
+bool inpaintPyramid(Image& img, const Mask& mask, int patch, std::string& error) {
+    std::vector<Image> imgs{img};
+    std::vector<Mask> masks{mask};
+    while (masks.back().count() > kMaxInpaintPixels / 2 && imgs.back().width() > 48 && imgs.back().height() > 48) {
+        imgs.push_back(half(imgs.back()));
+        masks.push_back(half(masks.back()));
+    }
+    if (masks.back().count() > kMaxInpaintPixels) {
+        error = "the area covers too much of the picture to fill from what's left";
+        return false;
+    }
+    std::vector<int> from;
+    if (!inpaintLevel(imgs.back(), masks.back(), std::min(patch, 7), &from, error)) return false;
+    const int pr = 2;  // 5x5 patches when refining
+    std::uint32_t seed = 12345;
+    auto rnd = [&seed] {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 8;
+    };
+    for (int level = static_cast<int>(imgs.size()) - 2; level >= 0; --level) {
+        Image& I = imgs[static_cast<std::size_t>(level)];
+        const Mask& M = masks[static_cast<std::size_t>(level)];
+        const int W = I.width(), H = I.height();
+        const int cW = imgs[static_cast<std::size_t>(level) + 1].width();
+        const std::vector<std::uint8_t> valid = validCentres(M, pr);
+        std::vector<int> pix;
+        for (int i = 0; i < W * H; ++i)
+            if (M.bits[static_cast<std::size_t>(i)]) pix.push_back(i);
+        std::vector<int> map(static_cast<std::size_t>(W) * H, -1);
+        // nearest valid source to a wanted spot, by a small spiral
+        auto snap = [&](int x, int y) {
+            x = std::clamp(x, pr, W - 1 - pr), y = std::clamp(y, pr, H - 1 - pr);
+            for (int rad = 0; rad < std::max(W, H); rad = rad ? rad * 2 : 1) {
+                for (int k = 0; k < 16; ++k) {
+                    const int xx = std::clamp(x + (rad ? static_cast<int>(rnd() % (2 * rad + 1)) - rad : 0), pr, W - 1 - pr);
+                    const int yy = std::clamp(y + (rad ? static_cast<int>(rnd() % (2 * rad + 1)) - rad : 0), pr, H - 1 - pr);
+                    if (valid[static_cast<std::size_t>(yy) * W + xx]) return yy * W + xx;
+                }
+            }
+            return -1;
+        };
+        for (int t : pix) {
+            const int x = t % W, y = t / W;
+            const int c = (y / 2) * cW + x / 2;
+            const int f = from.empty() || c >= static_cast<int>(from.size()) ? -1 : from[static_cast<std::size_t>(c)];
+            int s = -1;
+            if (f >= 0) s = snap(2 * (f % cW) + (x & 1), 2 * (f / cW) + (y & 1));
+            if (s < 0) s = snap(x, y);
+            if (s < 0) {
+                error = "found nothing to copy from";
+                return false;
+            }
+            map[static_cast<std::size_t>(t)] = s;
+            std::copy(I.pixel(s % W, s / W), I.pixel(s % W, s / W) + 4, I.pixel(x, y));
+        }
+        auto dist = [&](int t, int s, long long cap) {
+            const int tx = t % W, ty = t / W, sx = s % W, sy = s / W;
+            long long d = 0;
+            for (int dy = -pr; dy <= pr; ++dy) {
+                const int y1 = ty + dy;
+                if (y1 < 0 || y1 >= H) continue;
+                for (int dx = -pr; dx <= pr; ++dx) {
+                    const int x1 = tx + dx;
+                    if (x1 < 0 || x1 >= W) continue;
+                    const std::uint8_t* a = I.pixel(x1, y1);
+                    const std::uint8_t* b = I.pixel(sx + dx, sy + dy);
+                    for (int ch = 0; ch < 3; ++ch) {
+                        const int e = static_cast<int>(a[ch]) - b[ch];
+                        d += e * e;
+                    }
+                }
+                if (d >= cap) return d;
+            }
+            return d;
+        };
+        const int passes = level == 0 ? 2 : 3;
+        for (int pass = 0; pass < passes; ++pass) {
+            const bool rev = pass & 1;
+            for (std::size_t k = 0; k < pix.size(); ++k) {
+                const int t = pix[rev ? pix.size() - 1 - k : k];
+                const int tx = t % W, ty = t / W;
+                int best = map[static_cast<std::size_t>(t)];
+                long long bestD = dist(t, best, std::numeric_limits<long long>::max());
+                auto tryS = [&](int s) {
+                    if (s < 0 || s >= W * H || !valid[static_cast<std::size_t>(s)] || s == best) return;
+                    const long long d = dist(t, s, bestD);
+                    if (d < bestD) bestD = d, best = s;
+                };
+                // propagate from the neighbours already done this pass
+                const int step = rev ? 1 : -1;
+                for (const auto& [nx, ny] : {std::pair{tx + step, ty}, std::pair{tx, ty + step}}) {
+                    if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                    const int n = map[static_cast<std::size_t>(ny) * W + nx];
+                    if (n < 0) continue;
+                    const int sx = n % W - step * (nx != tx), sy = n / W - step * (ny != ty);
+                    if (sx >= 0 && sy >= 0 && sx < W && sy < H) tryS(sy * W + sx);
+                }
+                // random search around the current best, shrinking
+                for (int rad = std::max(W, H) / 2; rad >= 1; rad /= 2) {
+                    const int bx = best % W, by = best / W;
+                    tryS(std::clamp(by + static_cast<int>(rnd() % (2 * rad + 1)) - rad, 0, H - 1) * W +
+                         std::clamp(bx + static_cast<int>(rnd() % (2 * rad + 1)) - rad, 0, W - 1));
+                }
+                map[static_cast<std::size_t>(t)] = best;
+                std::copy(I.pixel(best % W, best / W), I.pixel(best % W, best / W) + 4, I.pixel(tx, ty));
+            }
+        }
+        from = std::move(map);
+    }
+    img = std::move(imgs.front());
+    return true;
+}
 
 }  // namespace
 
@@ -461,28 +621,13 @@ bool inpaint(Image& img, const Mask& mask, int patch, std::string& error) {
         error = "the area is empty (it lies outside the image or has no size)";
         return false;
     }
-    if (n > kMaxInpaintPixels) {
-        error = "the area to remove is " + std::to_string(n) + " pixels, which would take too long; the limit is " +
-                std::to_string(kMaxInpaintPixels) + " (about 245x245). Select a smaller area, or remove the object in a few parts.";
+    if (n > kMaxRemovePixels) {
+        error = "the area to remove is " + std::to_string(n) + " pixels; the limit is " + std::to_string(kMaxRemovePixels) +
+                ". Select a smaller area, or remove the object in a few parts.";
         return false;
     }
-    Inpainter ip(img, mask, patch);
-    if (std::none_of(ip.validSource.begin(), ip.validSource.end(), [](std::uint8_t v) { return v != 0; })) {
-        error = "there isn't enough untouched picture around the area to copy from; select a smaller area or use a smaller patch size";
-        return false;
-    }
-    std::size_t left = n;
-    while (left > 0) {
-        auto pick = ip.nextTarget();
-        if (pick.x < 0) break;  // cannot happen while pixels are left: the image is never fully masked here
-        int sx = 0, sy = 0;
-        if (!ip.bestSource(pick.x, pick.y, sx, sy)) {
-            error = "found nothing to copy from";
-            return false;
-        }
-        left -= ip.paste(pick.x, pick.y, sx, sy, pick.conf);
-    }
-    return true;
+    if (n > kMaxInpaintPixels) return inpaintPyramid(img, mask, patch, error);
+    return inpaintLevel(img, mask, patch, nullptr, error);
 }
 
 // ---------------------------------------------------------------- commands
@@ -688,8 +833,9 @@ void registerHealCommands(Session& session) {
     reg.add({"photo.remove_object",
              "Remove object",
              "Content-aware fill: erase something (a person, a sign, a power line) and fill the gap with picture from "
-             "around it, continuing lines and textures into the hole. Works on small and medium areas (up to 60000 "
-             "pixels, about 245x245); remove bigger things in parts.",
+             "around it, continuing lines and textures into the hole. Small areas are filled patch by patch, most "
+             "structured edges first; big ones (a whole person or car, up to 4 million pixels) on a smaller copy first "
+             "and refined back up to full size.",
              removeParams,
              true},
             imageCommand(session, removeObject));

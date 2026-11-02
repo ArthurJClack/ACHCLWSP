@@ -394,6 +394,8 @@ void registerSketchConstraintCommands(Session& session);
 void registerAssemblyCommands(Session& session);
 void registerDrawingCommands(Session& session);
 void registerPickCommands(Session& session);
+void registerConfigCommands(Session& session);
+void registerSheetMetalCommands(Session& session);
 
 void registerCommands(Session& session) {
     auto& reg = session.registry();
@@ -402,6 +404,8 @@ void registerCommands(Session& session) {
     registerSketchConstraintCommands(session);
     registerAssemblyCommands(session);
     registerDrawingCommands(session);
+    registerConfigCommands(session);
+    registerSheetMetalCommands(session);
 
     // ---- documents ----------------------------------------------------------------
 

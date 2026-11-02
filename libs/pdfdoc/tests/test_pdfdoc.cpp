@@ -1,3 +1,4 @@
+#include <cmath>
 #include "wetwaresuite/pdfdoc/fonts.hpp"
 #include "wetwaresuite/pdfdoc/writer.hpp"
 #include "check.hpp"
@@ -94,6 +95,34 @@ int main() {
         CHECK(upd.size() < 30000);
         const std::string hex = glyphText(*builtinSans(), "\xD0\x96" "A");
         CHECK(hex.size() == 10 && hex.front() == '<' && hex.back() == '>');
+    }
+    // compact subsets: renumbered glyphs, per-glyph tables shrink
+    {
+        const auto& f = *builtinSans();
+        const int ga = f.glyphIndex('A'), gz = f.glyphIndex(0x0416);
+        std::vector<int> oldOf;
+        const std::string sub = f.subsetCompact({ga, gz}, oldOf);
+        CHECK(oldOf.size() >= 3 && oldOf[0] == 0);
+        auto t = TrueType::fromBytes(sub, "compact");
+        CHECK(t->glyphCount() == static_cast<int>(oldOf.size()));
+        for (std::size_t n = 0; n < oldOf.size(); ++n) CHECK(std::abs(t->glyphAdvance(static_cast<int>(n)) - f.glyphAdvance(oldOf[n])) < 0.01);
+        CHECK(sub.size() < f.subset({ga, gz}).size());
+    }
+    // fallback fonts: the built-in one first, system fonts only for what it lacks
+    CHECK(unicodeFontIndex(0x03A9) == 0 && needsUnicode(0x03A9));  // Greek: built in
+    CHECK(!needsUnicode('A'));
+    CHECK(unicodeFontAt(0) == builtinSans() && unicodeFontAt(9999) == nullptr);
+    if (unicodeFontIndex(0x4E2D) > 0) {  // a system font with Chinese (most machines have one)
+        CHECK(needsUnicode(0x4E2D) && unicodeFontFor(0x4E2D)->embeddable());
+        Writer wc;
+        UnicodeFallback uni(wc);
+        const std::string ops = uni.show("A \xCE\xA9 \xE4\xB8\xAD\xE6\x96\x87", "F1", 12);
+        CHECK(ops.find("/FU 12 Tf") != std::string::npos && ops.find("/FU" + std::to_string(unicodeFontIndex(0x4E2D)) + " 12 Tf") != std::string::npos);
+        CHECK(uni.resources().size() == 2);
+        uni.finish();
+        const std::string pdf = wc.finish(1, 0);
+        CHECK(pdf.find("/CIDToGIDMap /Identity") != std::string::npos);  // Roboto: small, kept as is
+        CHECK(pdf.find("/CIDToGIDMap " ) != std::string::npos && pdf.size() < 60000);  // the CJK font: a compact subset
     }
     return check::summary("pdfdoc");
 }

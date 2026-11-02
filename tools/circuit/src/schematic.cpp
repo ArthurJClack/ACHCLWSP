@@ -117,6 +117,8 @@ const Part* Circuit::part(const std::string& ref) const { return const_cast<Circ
 
 std::shared_ptr<const Symbol> symbolOf(const Part& part) {
     if (part.customSymbol) return part.customSymbol;
+    if (part.unit > 0)
+        if (auto u = findSymbolUnit(part.symbol, part.unit)) return u;
     return findSymbol(part.symbol, part.pins, part.pinNames);
 }
 
@@ -149,6 +151,24 @@ PinRef resolvePin(const Circuit& c, const std::string& text, std::string& error)
     if (!part) {
         error = "no part " + ref + " (circuit.parts lists them)";
         return out;
+    }
+    if (part->unit > 0) {  // a multi-unit part: the pin may be on another unit with the same ref
+        const std::string ur = upper(part->ref);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const auto& q : c.parts) {
+                if (q.unit <= 0 || upper(q.ref) != ur) continue;
+                auto qs = symbolOf(q);
+                if (!qs) continue;
+                for (const auto& pd : qs->pins) {
+                    if (pass == 0 ? pd.number == pin : upper(pd.name) == upper(pin)) {
+                        out.part = &q;
+                        out.pin = &pd;
+                        out.pos = pinPos(q, pd);
+                        return out;
+                    }
+                }
+            }
+        }
     }
     auto sym = symbolOf(*part);
     if (!sym) {
@@ -830,6 +850,38 @@ void removePart(Circuit& c, const std::string& ref) {
     std::erase_if(c.parts, [&](const Part& p) { return &p == part; });
 }
 
+std::vector<std::string> busMembers(const std::string& raw) {
+    std::string name = raw;
+    while (!name.empty() && name.front() == ' ') name.erase(0, 1);
+    while (!name.empty() && name.back() == ' ') name.pop_back();
+    std::vector<std::string> out;
+    const auto open = name.find('['), dots = name.find("..");
+    if (open != std::string::npos && dots != std::string::npos && name.back() == ']' && dots > open) {
+        const std::string base = name.substr(0, open);
+        try {
+            const int a = std::stoi(name.substr(open + 1, dots - open - 1)), b = std::stoi(name.substr(dots + 2, name.size() - dots - 3));
+            if (std::abs(a - b) > 255) return {};
+            for (int i = a;; i += a <= b ? 1 : -1) {
+                out.push_back(base + std::to_string(i));
+                if (i == b) break;
+            }
+        } catch (...) {
+            return {};
+        }
+        return out;
+    }
+    std::string list = name;
+    if (!list.empty() && list.front() == '{' && list.back() == '}') list = list.substr(1, list.size() - 2);
+    std::stringstream ss(list);
+    std::string part;
+    while (std::getline(ss, part, ',')) {
+        while (!part.empty() && part.front() == ' ') part.erase(0, 1);
+        while (!part.empty() && part.back() == ' ') part.pop_back();
+        if (!part.empty()) out.push_back(part);
+    }
+    return out;
+}
+
 void sheetBounds(const Circuit& c, double& x0, double& y0, double& x1, double& y1) {
     x0 = y0 = 1e9;
     x1 = y1 = -1e9;
@@ -848,6 +900,9 @@ void sheetBounds(const Circuit& c, double& x0, double& y0, double& x1, double& y
         add(toSheet(p, {sym->maxX, sym->minY}));
         if (!sym->power) add(toSheet(p, {sym->refPos.x, sym->refPos.y - 0.7}));
         add(toSheet(p, sym->valuePos));
+    }
+    for (const auto& b : c.buses) {
+        for (const auto& p : b.pts) add(p);
     }
     for (const auto& w : c.wires) {
         for (const auto& p : w.pts) add(p);

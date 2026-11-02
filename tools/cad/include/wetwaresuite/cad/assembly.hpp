@@ -1,6 +1,7 @@
 // Assemblies: parts (cad documents or mesh files) placed as components and
 // held together by mates (coincident, concentric, distance, angle, parallel,
-// perpendicular, fastened). Mates are solved numerically for the components'
+// perpendicular, fastened, gear, rack). Distance and angle mates can be limits
+// (min/max) instead of fixed values. Mates are solved numerically for the components'
 // positions; the first component is fixed by default. The assembled model is
 // a mesh document, so previews, exports and drawings work on it as on a part.
 #pragma once
@@ -38,11 +39,13 @@ struct Component {
 // second hole of a pattern).
 struct Mate {
     std::string name;
-    std::string type;  // coincident, concentric, distance, angle, parallel, perpendicular, fastened
+    std::string type;  // coincident, concentric, distance, angle, parallel, perpendicular, fastened, gear, rack
     std::string a, b;
-    std::string value;  // distance / angle: an expression over the assembly's parameters
-    bool flip = false;  // planes: face the same way instead of opposite
-    std::vector<double> lock;  // fastened: the relative pose when it was made
+    std::string value;  // distance / angle: an expression over the assembly's parameters; gear: turns of b per
+                        // turn of a; rack: distance b slides per radian a turns (the pinion's pitch radius)
+    std::string min, max;  // distance / angle: limits instead of (or as well as) a value; empty = none
+    bool flip = false;  // planes: face the same way instead of opposite; gear / rack: turn the same way
+    std::vector<double> lock;  // fastened: the relative pose when it was made; gear / rack: both poses at the last solve
 };
 
 const std::vector<std::string>& mateTypes();
@@ -64,6 +67,9 @@ public:
     int dof = 0;
     int redundant = 0;
     std::vector<std::string> freeComponents;
+    std::vector<std::string> limitsHit;  // limit mates holding at a bound after solve()
+    // the next solve() holds this component where it is and moves the rest (dragging); cleared by solve()
+    std::string hold;
 
     std::string kind() const override { return "assembly"; }
     std::string summary() const override;

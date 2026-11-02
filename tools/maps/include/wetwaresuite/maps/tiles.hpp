@@ -97,6 +97,13 @@ std::filesystem::path packsDir();
 std::vector<std::filesystem::path> findMapPacks();
 std::optional<std::filesystem::path> bestMapPack();  // the installed pack with the deepest zoom
 
+// Offline address search: the names of places and points of interest in a pack's vector tiles
+// (layers places, pois, place_label, ...), read once (zoom 12 or less, at most 20,000 tiles) and
+// kept in the cache folder. Point features with "name" and "kind".
+std::vector<Feature> packPlaces(const std::filesystem::path& pack);
+// Every installed pack's places, kept in memory until a pack changes.
+std::shared_ptr<const std::vector<Feature>> allPackPlaces();
+
 // ---- Mapbox Vector Tiles -------------------------------------------------------------
 
 struct MvtLayer {

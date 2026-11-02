@@ -271,6 +271,7 @@ struct ChildProcess::Impl {
     DWORD pid = 0;
     int code = -1;
     bool ended = true;
+    bool dropErrors = false;
 };
 
 ChildProcess::ChildProcess() : impl_(new Impl) {}
@@ -328,6 +329,12 @@ bool ChildProcess::start(const std::vector<std::string>& args, const std::filesy
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = outWrite;
     si.hStdError = outWrite;
+    HANDLE nul = nullptr;
+    if (impl_->dropErrors) {
+        nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+        if (nul != INVALID_HANDLE_VALUE) si.hStdError = nul;
+        else nul = nullptr;
+    }
     si.hStdInput = inRead;
     PROCESS_INFORMATION pi{};
     // the extra variables are set here for the child to inherit, then put back
@@ -347,6 +354,7 @@ bool ChildProcess::start(const std::vector<std::string>& args, const std::filesy
     for (const auto& [k, v] : saved) SetEnvironmentVariableW(k.c_str(), v.size() == 1 && v[0] == L'\0' ? nullptr : v.c_str());
     CloseHandle(outWrite);
     CloseHandle(inRead);
+    if (nul) CloseHandle(nul);
     if (!ok) {
         CloseHandle(outRead);
         CloseHandle(inWrite);
@@ -444,6 +452,8 @@ void ChildProcess::kill() {
     }
 }
 
+void ChildProcess::dropErrors(bool on) { impl_->dropErrors = on; }
+
 long long ChildProcess::pid() const { return static_cast<long long>(impl_->pid); }
 
 #else
@@ -454,6 +464,7 @@ struct ChildProcess::Impl {
     int in = -1;
     int code = -1;
     bool ended = true;
+    bool dropErrors = false;
 };
 
 namespace {
@@ -516,6 +527,7 @@ bool ChildProcess::start(const std::vector<std::string>& args, const std::filesy
     }
     const std::string path = program->string();
     const std::string dir = cwd.string();
+    const bool dropErrors = impl_->dropErrors;
     std::vector<char*> argv;
     for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
@@ -527,7 +539,8 @@ bool ChildProcess::start(const std::vector<std::string>& args, const std::filesy
         if (!err) {
             dup2(inp[0], STDIN_FILENO);
             dup2(outp[1], STDOUT_FILENO);
-            dup2(outp[1], STDERR_FILENO);
+            const int nul = dropErrors ? open("/dev/null", O_WRONLY) : -1;
+            dup2(nul >= 0 ? nul : outp[1], STDERR_FILENO);
             signal(SIGPIPE, SIG_DFL);
             for (const auto& [k, v] : env) setenv(k.c_str(), v.c_str(), 1);
             execv(path.c_str(), argv.data());
@@ -643,6 +656,8 @@ void ChildProcess::kill() {
     impl_->code = 128 + SIGKILL;
     impl_->ended = true;
 }
+
+void ChildProcess::dropErrors(bool on) { impl_->dropErrors = on; }
 
 long long ChildProcess::pid() const { return static_cast<long long>(impl_->pid); }
 

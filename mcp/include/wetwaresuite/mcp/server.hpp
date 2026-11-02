@@ -9,16 +9,29 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "wetwaresuite/core/command.hpp"
 
 namespace wetwaresuite::mcp {
 
+// How tools/list shows the commands. A big registry (the all-in-one suite has over 1,300
+// commands) costs a client megabytes of schemas and makes it pick worse, so Auto switches to
+// Catalog there: tools/list holds find_tools, describe_tools and run_tool (plus undo, redo,
+// history and documents), and every command is still callable by its own name.
+enum class ToolMode { Auto, All, Catalog };
+inline constexpr std::size_t kCatalogThreshold = 150;  // Auto: catalog above this many commands
+
 struct ServerInfo {
     std::string name;
     std::string version;
     std::string instructions;  // sent to the client on initialize: how to use these tools
+    ToolMode mode = ToolMode::All;
 };
+
+// Takes --catalog / --all-tools out of `args` (mcp command line), setting `mode`; Auto when neither.
+ToolMode takeToolModeArgs(std::vector<std::string>& args);
+const char* toolModeUsage();
 
 class Server {
 public:
@@ -34,9 +47,14 @@ public:
     // "photo.resize" -> "photo_resize"
     static std::string toolName(const std::string& commandId);
 
+    // true when tools/list shows the catalog tools instead of every command
+    bool catalog() const;
+
 private:
     const std::string& toolsJson();                           // cached until the registry changes
     std::string commandFor(const std::string& tool);          // MCP tool name -> command id ("" = none)
+    std::string callTool(const std::string& tool, const std::string& argumentsJson);  // a tools/call result, as json text
+    std::string catalogJson();
     Session& session_;
     ServerInfo info_;
     std::string tools_;

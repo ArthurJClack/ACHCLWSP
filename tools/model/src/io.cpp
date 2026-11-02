@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <set>
@@ -188,6 +189,8 @@ std::string toJson(const ModelDoc& doc) {
     j["scene"] = {{"active", s.active},       {"selectMode", toString(s.selectMode)}, {"editMode", s.editMode},
                   {"cursor", vec(s.cursor)},  {"frame", s.frame},                     {"frameStart", s.frameStart},
                   {"frameEnd", s.frameEnd},   {"fps", s.fps}};
+    j["world"] = {{"type", s.worldType}, {"color", vec(s.worldColor)}, {"hdri", s.hdri}, {"rotation", s.hdriRotation},
+                  {"strength", s.worldStrength}, {"visible", s.worldVisible}};
     json cols = json::array();
     for (const auto& c : s.collections) cols.push_back({{"name", c.name}, {"visible", c.visible}});
     j["collections"] = cols;
@@ -203,7 +206,10 @@ std::string toJson(const ModelDoc& doc) {
                         {"ior", m.ior},
                         {"alpha", m.alpha},
                         {"texture", m.texture},
-                        {"textureScale", m.textureScale}});
+                        {"textureScale", m.textureScale},
+                        {"normalMap", m.normalMap},
+                        {"normalStrength", m.normalStrength},
+                        {"roughnessMap", m.roughnessMap}});
     }
     j["materials"] = mats;
     json meshes = json::object();
@@ -228,6 +234,14 @@ std::string toJson(const ModelDoc& doc) {
             jo["size"] = o.size;
         }
         if (o.type == "camera") jo["fov"] = o.fov;
+        if (!o.bones.empty()) {
+            json bones = json::array();
+            for (const auto& b : o.bones)
+                bones.push_back({{"name", b.name}, {"parent", b.parent}, {"head", vec(b.head)}, {"tail", vec(b.tail)}, {"roll", b.roll},
+                                 {"rotation", vec(b.rotation)}, {"location", vec(b.location)}});
+            jo["bones"] = bones;
+        }
+        if (!o.weights.empty()) jo["weights"] = o.weights;
         objs.push_back(jo);
     }
     j["objects"] = objs;
@@ -253,6 +267,15 @@ void fromJson(ModelDoc& doc, const std::string& text) {
         s.frameStart = js.value("frameStart", 1);
         s.frameEnd = js.value("frameEnd", 48);
         s.fps = js.value("fps", 24.0);
+        if (j.contains("world")) {
+            const json& w = j["world"];
+            s.worldType = w.value("type", s.worldType);
+            s.worldColor = getVec(w, "color", s.worldColor);
+            s.hdri = w.value("hdri", "");
+            s.hdriRotation = w.value("rotation", 0.0);
+            s.worldStrength = w.value("strength", s.worldStrength);
+            s.worldVisible = w.value("visible", false);
+        }
         if (j.contains("collections")) {
             s.collections.clear();
             for (const auto& c : j.at("collections")) s.collections.push_back({c.value("name", "Collection"), c.value("visible", true)});
@@ -270,6 +293,9 @@ void fromJson(ModelDoc& doc, const std::string& text) {
             m.alpha = jm.value("alpha", m.alpha);
             m.texture = jm.value("texture", "");
             m.textureScale = jm.value("textureScale", 1.0);
+            m.normalMap = jm.value("normalMap", "");
+            m.normalStrength = jm.value("normalStrength", 1.0);
+            m.roughnessMap = jm.value("roughnessMap", "");
             s.materials.push_back(m);
         }
         const json meshes = j.value("meshes", json::object());
@@ -308,6 +334,18 @@ void fromJson(ModelDoc& doc, const std::string& text) {
             o.power = jo.value("power", 1000.0);
             o.size = jo.value("size", 0.1);
             o.fov = jo.value("fov", 40.0);
+            for (const auto& jb : jo.value("bones", json::array())) {
+                Bone b;
+                b.name = jb.value("name", "Bone");
+                b.parent = jb.value("parent", "");
+                b.head = getVec(jb, "head", b.head);
+                b.tail = getVec(jb, "tail", b.tail);
+                b.roll = jb.value("roll", 0.0);
+                b.rotation = getVec(jb, "rotation", b.rotation);
+                b.location = getVec(jb, "location", b.location);
+                o.bones.push_back(b);
+            }
+            o.weights = jo.value("weights", std::map<std::string, std::vector<float>>{});
             if (o.type == "mesh" && !s.meshes.count(o.data)) throw std::runtime_error("object '" + o.name + "' uses a missing mesh");
             s.objects.push_back(std::move(o));
         }
@@ -386,6 +424,8 @@ std::string writeMtl(const ModelDoc& doc, const std::set<std::string>& used) {
         if (m.alpha < 1) out += "d " + fmt(m.alpha) + "\n";
         if (m.transmission > 0) out += "Ni " + fmt(m.ior) + "\nillum 7\n";
         if (!m.texture.empty()) out += "map_Kd " + m.texture + "\n";
+        if (!m.normalMap.empty()) out += "norm " + m.normalMap + "\n";
+        if (!m.roughnessMap.empty()) out += "map_Pr " + m.roughnessMap + "\n";
     }
     return out;
 }
@@ -454,6 +494,7 @@ std::string exportFile(const ModelDoc& doc, const fs::path& path, const ExportOp
         writeFile(path, toJson(doc));
         return "wrote " + path.string() + " (the whole scene)";
     }
+    if ((ext == "glb" || ext == "gltf") && hasSkin(doc) && opt.objects.empty() && !opt.selectedOnly) return exportSkinnedGltf(doc, path, opt.modifiers);
     const auto objs = exported(doc, opt);
     if (objs.empty()) throw std::runtime_error("nothing to export (no visible mesh objects)");
     if (ext == "obj") {
@@ -527,13 +568,22 @@ void readMtl(ModelDoc& doc, const fs::path& path) {
                 cur->emission = e / s;
                 cur->emissionStrength = s;
             }
-        } else if (cur && tag == "map_Kd") {
+        } else if (cur && (tag == "map_Kd" || tag == "norm" || tag == "map_Bump" || tag == "map_bump" || tag == "bump" || tag == "map_Pr")) {
             std::string rest;
             std::getline(ls, rest);
-            rest.erase(0, rest.find_first_not_of(" \t"));
-            if (!rest.empty()) {
-                const fs::path p(rest);
-                cur->texture = (p.is_absolute() ? p : path.parent_path() / p).string();
+            // options (-bm 0.5 ...) come before the file name
+            std::istringstream words(rest);
+            std::vector<std::string> w;
+            for (std::string s; words >> s;) w.push_back(s);
+            double scale = 1;
+            for (std::size_t i = 0; i + 1 < w.size(); ++i)
+                if (w[i] == "-bm") scale = std::atof(w[i + 1].c_str());
+            if (!w.empty()) {
+                const fs::path p(w.back());
+                const std::string file = (p.is_absolute() ? p : path.parent_path() / p).string();
+                if (tag == "map_Kd") cur->texture = file;
+                else if (tag == "map_Pr") cur->roughnessMap = file;
+                else cur->normalMap = file, cur->normalStrength = std::clamp(scale, 0.0, 4.0);
             }
         }
     }

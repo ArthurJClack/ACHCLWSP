@@ -103,17 +103,18 @@ int serve(const MainSpec& spec, const App& app, const std::vector<std::string>& 
             return 2;
         }
     }
+    const mcp::ToolMode mode = mcp::takeToolModeArgs(rest);
     mcp::TransportOptions transport;
     std::string error;
     if (!mcp::parseTransportArgs(rest, transport, error)) {
-        std::cerr << "error: " << error << "\nusage: " << bin << " mcp [--tools a,b] [--http ...]  (tools: "
-                  << joined(app.tools) << ")\n" << mcp::transportUsage();
+        std::cerr << "error: " << error << "\nusage: " << bin << " mcp [--tools a,b] [--catalog|--all-tools] [--http ...]  (tools: "
+                  << joined(app.tools) << ")\n" << mcp::toolModeUsage() << mcp::transportUsage();
         return 2;
     }
     Session session;
     spec.registerTools(session, keep);
     registerCommands(session, spec.app);
-    mcp::Server server(session, {bin, spec.version, appInstructions(spec.app) + handoffInstructions(spec.app)});
+    mcp::Server server(session, {bin, spec.version, appInstructions(spec.app) + handoffInstructions(spec.app), mode});
     return mcp::serve(server, transport, std::cin, std::cout, std::cerr);
 }
 

@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <vector>
 
 #include "media.hpp"
 #include "render_internal.hpp"
@@ -77,6 +79,59 @@ Source sourceFor(const Clip& c, int rate) {
     return s;
 }
 
+// A clip's sound with steady noise taken out (the audio app's spectral gate), kept while the clip doesn't change.
+audio::Buffer cleanedSound(const Clip& c, const audio::Buffer& seg, int rate) {
+    static std::mutex m;
+    static std::map<std::string, std::shared_ptr<const audio::Buffer>> done;
+    const std::string key = c.source + "|" + tnum(c.in) + "|" + tnum(c.out) + "|" + tnum(c.denoise) + "|" + std::to_string(rate);
+    {
+        std::lock_guard<std::mutex> g(m);
+        if (auto it = done.find(key); it != done.end()) return *it->second;
+    }
+    audio::Buffer b = seg;
+    const audio::NoiseProfile profile = audio::estimateNoise(b);
+    if (!profile.empty()) audio::reduceNoise(b, profile, c.denoise, 1.5, audio::all(b));
+    std::lock_guard<std::mutex> g(m);
+    if (done.size() > 16) done.clear();
+    done[key] = std::make_shared<const audio::Buffer>(b);
+    return b;
+}
+
+// Turns `b` down by depthDb wherever `key` is louder than -40 dBFS: 20 ms steps, down over
+// 0.15 s (starting a little before the sound), held 0.3 s, back up over 0.6 s.
+void applyDuck(audio::Buffer& b, const audio::Buffer& key, double depthDb, int rate) {
+    const std::size_t step = std::max<std::size_t>(1, static_cast<std::size_t>(rate / 50));
+    const std::size_t n = (b.frames() + step - 1) / step;
+    std::vector<bool> loud(n, false);
+    const double thr = std::pow(10.0, -40.0 / 20);
+    for (std::size_t w = 0; w < n; ++w) {
+        double sum = 0;
+        std::size_t count = 0;
+        for (std::size_t i = w * step; i < std::min(key.frames(), (w + 1) * step); ++i, ++count)
+            for (const auto& ch : key.channels) sum += static_cast<double>(ch[i]) * ch[i];
+        loud[w] = count && std::sqrt(sum / (count * key.channels.size())) > thr;
+    }
+    // hold over short pauses, and start a little early so the first word is clear
+    std::vector<bool> on(n, false);
+    const std::size_t hold = 15, lead = 7;
+    for (std::size_t w = 0; w < n; ++w)
+        if (loud[w])
+            for (std::size_t k = w >= lead ? w - lead : 0; k < std::min(n, w + hold); ++k) on[k] = true;
+    const double depth = std::min(0.0, depthDb);
+    const double down = -depth / (0.15 * 50), up = -depth / (0.6 * 50);
+    double g = 0;  // dB now
+    for (std::size_t w = 0; w < n; ++w) {
+        const double target = on[w] ? depth : 0;
+        const double from = g;
+        g = target < g ? std::max(target, g - down) : std::min(target, g + up);
+        for (std::size_t i = w * step; i < std::min(b.frames(), (w + 1) * step); ++i) {
+            const double u = static_cast<double>(i - w * step) / step;
+            const float k = static_cast<float>(std::pow(10.0, (from + (g - from) * u) / 20));
+            for (auto& ch : b.channels) ch[i] *= k;
+        }
+    }
+}
+
 // Seconds this clip overlaps the one before it when they crossfade (0 when they don't).
 double overlapIn(const Timeline& tl, const Track& t, const Clip& c) {
     if (c.transition.empty() || c.transition == "none") return 0;
@@ -117,8 +172,15 @@ audio::Buffer mixAudio(const Timeline& tl, double from, double to, int rate) {
     if (to <= from) to = from;
     const std::size_t total = static_cast<std::size_t>(std::llround((to - from) * rate));
     audio::Buffer out(2, total, rate);
-    for (const auto& track : tl.tracks) {
+    // each track mixed on its own first, so ducked tracks can follow the others
+    std::vector<audio::Buffer> mixed(tl.tracks.size());
+    std::vector<bool> heard(tl.tracks.size(), false);
+    for (std::size_t ti = 0; ti < tl.tracks.size(); ++ti) {
+        const Track& track = tl.tracks[ti];
         if (!tl.sounds(track)) continue;
+        heard[ti] = true;
+        mixed[ti] = audio::Buffer(2, total, rate);
+        audio::Buffer& dest = mixed[ti];
         const bool audioTrack = track.kind == "audio";
         for (const auto& c : track.clips) {
             if (!c.sound() || c.mute || c.hold) continue;
@@ -135,6 +197,7 @@ audio::Buffer mixAudio(const Timeline& tl, double from, double to, int rate) {
                 const std::size_t a = std::min(b.frames(), static_cast<std::size_t>(std::max(0.0, (c.in - src.base) * rate)));
                 const std::size_t e = std::min(b.frames(), static_cast<std::size_t>(std::max(0.0, (c.out - src.base) * rate)));
                 seg = audio::slice(b, {a, std::max(a, e)});
+                if (c.denoise > 0 && !seg.empty()) seg = cleanedSound(c, seg, rate);
             }
             if (c.reverse && !seg.empty()) audio::reverse(seg, audio::all(seg));
             if (std::abs(c.speed - 1) > kEps && !seg.empty() && seg.frames() > 64) {
@@ -177,10 +240,31 @@ audio::Buffer mixAudio(const Timeline& tl, double from, double to, int rate) {
                     pl = pan > 0 ? 1 - pan : 1;
                     pr = pan < 0 ? 1 + pan : 1;
                 }
-                out.channels[0][static_cast<std::size_t>(o)] += static_cast<float>(seg.channels[0][i] * g * pl);
-                out.channels[1][static_cast<std::size_t>(o)] += static_cast<float>(seg.channels[1][i] * g * pr);
+                dest.channels[0][static_cast<std::size_t>(o)] += static_cast<float>(seg.channels[0][i] * g * pl);
+                dest.channels[1][static_cast<std::size_t>(o)] += static_cast<float>(seg.channels[1][i] * g * pr);
             }
         }
+    }
+    // ducking: a track drops while its key (the other, un-ducked tracks, or one named track) is sounding
+    for (std::size_t ti = 0; ti < tl.tracks.size(); ++ti) {
+        const Track& t = tl.tracks[ti];
+        if (!heard[ti] || t.duckUnder.empty() || t.kind != "audio") continue;
+        audio::Buffer key(2, total, rate);
+        bool any = false;
+        for (std::size_t k = 0; k < tl.tracks.size(); ++k) {
+            if (k == ti || !heard[k]) continue;
+            const Track& kt = tl.tracks[k];
+            if (t.duckUnder == "auto" ? !kt.duckUnder.empty() : kt.id != t.duckUnder) continue;
+            for (int ch = 0; ch < 2; ++ch)
+                for (std::size_t i = 0; i < total; ++i) key.channels[static_cast<std::size_t>(ch)][i] += mixed[k].channels[static_cast<std::size_t>(ch)][i];
+            any = true;
+        }
+        if (any) applyDuck(mixed[ti], key, t.duckDb, rate);
+    }
+    for (std::size_t ti = 0; ti < tl.tracks.size(); ++ti) {
+        if (!heard[ti]) continue;
+        for (int ch = 0; ch < 2; ++ch)
+            for (std::size_t i = 0; i < total; ++i) out.channels[static_cast<std::size_t>(ch)][i] += mixed[ti].channels[static_cast<std::size_t>(ch)][i];
     }
     return out;
 }

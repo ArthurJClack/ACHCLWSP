@@ -47,8 +47,16 @@ struct Projection {
     }
 };
 
+// How surfaces are drawn, like Blender's viewport shading: solid (one colour), material (the
+// per-face colours), matcap (a studio clay look from the view, no lights), wireframe (edges only)
+// and xray (see-through faces with every edge, so hidden parts show).
+enum class Shading { Material, Solid, Matcap, Wireframe, XRay };
+const std::vector<std::string>& shadingNames();  // material solid matcap wireframe xray
+std::optional<Shading> parseShading(const std::string& name);
+
 struct RenderOptions {
     View view = View::Iso;
+    Shading shading = Shading::Material;
     std::optional<Orbit> orbit;  // overrides view
     std::optional<Projection> projection;  // overrides view and orbit: no fitting
     raster::Color background{246, 247, 249, 255};  // alpha 0 gives a transparent background

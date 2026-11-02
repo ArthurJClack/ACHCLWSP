@@ -49,8 +49,10 @@ bool poissonBlend(raster::Image& target, const raster::Image* source, const Mask
 // Content-aware fill (Criminisi et al. 2004): fills the masked pixels with
 // patches copied from the rest of the image, most structured edges first,
 // so lines and textures continue into the hole. `patch` is the patch side
-// (odd, 3..31). Refuses areas over kMaxInpaintPixels.
+// (odd, 3..31). Areas over kMaxInpaintPixels are filled on a smaller copy first and
+// refined back up to full size (PatchMatch); areas over kMaxRemovePixels are refused.
 inline constexpr std::size_t kMaxInpaintPixels = 60000;
+inline constexpr std::size_t kMaxRemovePixels = 4'000'000;
 bool inpaint(raster::Image& img, const Mask& mask, int patch, std::string& error);
 
 void registerHealCommands(Session& session);

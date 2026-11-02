@@ -2,8 +2,10 @@
 // files include this; apps use gui.hpp.
 #pragma once
 
+#include <algorithm>
 #include <SDL3/SDL.h>
 
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <map>
@@ -22,6 +24,14 @@
 #include "wetwaresuite/gui/palette.hpp"
 
 namespace wetwaresuite::gui {
+
+// Pushes the default font at exactly `px` screen pixels (the UI's own font scale undone), so text
+// typed over a page or slide is the size the page draws it. Pop with ImGui::PopFont().
+inline void pushFontPx(float px) {
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float scale = st.FontScaleMain * st.FontScaleDpi;
+    ImGui::PushFont(nullptr, scale > 0 ? px / scale : px);
+}
 
 // Adds one typed character (a code point) to UTF-8 text.
 inline void appendUtf8(std::string& out, unsigned c) {
@@ -60,11 +70,34 @@ struct Texture {
     ImTextureID id() const { return static_cast<ImTextureID>(reinterpret_cast<std::intptr_t>(tex)); }
 };
 
-enum class CanvasTool { Move, Select, Brush, Eraser, Fill, Heal, Remove, Clone, Dodge, Burn, Sponge, Smudge, Blur, Pick, Anchor, VecRect, VecEllipse, VecLine, VecPen, VecText };
+enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal, Remove, Clone, Dodge, Burn, Sponge, Smudge, Blur, Pick, Anchor, VecRect, VecEllipse, VecLine, VecPen, VecText, VecGradient, VecBuilder,
+                        BoardSelect, BoardNote, BoardShape, BoardEllipse, BoardText, BoardConnect, BoardPen, GlyphEdit, GlyphDraw };
 enum class SelectShape { Rect, Ellipse, Lasso, Wand };
 
 // Click tools for game levels (levels.*) and pixel-art sprites (forge.sprite_*), game_view.cpp.
-enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket };
+enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket, Select, Translate, Rotate, Scale, Terrain, Stamp, ObjSelect, Shade };
+
+// A Godot-style scene open on the canvas (scene_view.cpp): the tree, the selected node's
+// inspector, and the fixed 2D view (or 3D orbit) the picture was drawn with.
+struct SceneCanvas {
+    std::vector<std::string> paths, types;
+    int dims = 2;
+    std::string selected = ".";
+    bool viewSet = false;               // 2D: the world view stays put once fitted, so dragging doesn't jump
+    double originX = 0, originY = 0, scale = 1;
+    int viewW = 0, viewH = 0;
+    bool haveBox = false;               // the selected node's world box
+    double box[4] = {0, 0, 0, 0};
+    double angle = 35, tilt = 25;       // 3D orbit
+    bool camera = false, helpers = true;
+    // inspector
+    std::string inspectedFor;           // node + change count it was read at
+    std::string type, script, groups;
+    std::vector<std::string> names, values, kinds, sections, choices, edits;
+    char rename[128] = {};
+    int addClass = 0, scriptKind = 0;
+    std::vector<std::string> classes2, classes3;
+};
 
 struct GameCanvas {
     std::string doc, kind;       // the document the state is for; kind "level" or "sprite"
@@ -82,9 +115,33 @@ struct GameCanvas {
     std::string tilesetFor;  // doc/tileset/change the texture shows
     int tsColumns = 1, tsTiles = 0, tsTileW = 16, tsTileH = 16;
     bool grid = true;
+    std::string orientation = "orthogonal";  // isometric, staggered and hexagonal maps pick cells through levels.pick
+    int pixW = 0, pixH = 0;                  // the whole map in px
+    std::vector<std::vector<double>> outlines;  // non-square maps: outlines of the cells a stroke has touched
+    std::vector<double> hoverOutline;
+    int hoverX = -1, hoverY = -1;
+    ImVec2 hoverAt{-1, -1};
+    int brushW = 1, brushH = 1;  // a block of tiles picked in the tileset: Paint stamps it
+    bool tsDragging = false;
+    int tsFrom = 0;
+    bool haveStamp = false;      // Stamp: the map region copied by the first drag
+    int stampX = 0, stampY = 0, stampW = 1, stampH = 1;
+    std::string stampLayer;
+    struct LevelObject {
+        int id = 0;
+        double box[4] = {0, 0, 0, 0};  // px on the map
+        std::string name, type, layer;
+    };
+    std::vector<LevelObject> objects;
+    int selObject = 0;               // object id, 0 = none
+    int objDrag = 0;                 // 1 move, 2 resize
+    ImVec2 objFrom{0, 0};
+    char objName[96] = {}, objType[96] = {}, objKey[64] = {}, objValue[128] = {};
+    int objFor = -1;
     // sprite
     int frame = 0, frames = 1, spriteLayer = 0, width = 0, height = 0;
-    std::vector<std::string> spriteLayers, palette, tags, tagRanges;
+    std::vector<std::string> spriteLayers, palette, tags, tagRanges, tagDirections, tagRepeats;
+    int playTag = -1, playStep = 0, playLoops = 0;  // a tag playing in its own direction: the step in its frame order
     std::vector<bool> layerShown;
     std::vector<int> durations;
     bool onion = false, playing = false, filled = false;
@@ -92,12 +149,14 @@ struct GameCanvas {
     float color[4] = {0, 0, 0, 1};
     std::vector<std::uint8_t> picture;  // the frame on the canvas, RGBA, for the colour picker
     int pictureW = 0, pictureH = 0;
+    // scene
+    SceneCanvas scene;
 };
 
 // A cad sketch open for drawing with the mouse (sketch_view.cpp). Geometry comes from
 // cad.sketch_geometry in sketch units; the view is a centre and pixels per unit.
 struct SketchEdit {
-    enum class Tool { Line, Rect, Circle };
+    enum class Tool { Line, Rect, Circle, Select, Dimension };
     std::string doc, sketch;
     bool active = false;
     std::uint64_t seen = ~0ull;
@@ -119,6 +178,26 @@ struct SketchEdit {
     NumberList faceEdges;
     std::vector<double> face3d;  // the same outline in the part, x,y,z per point, count first per loop
     std::string onBody;          // the body whose face it is on: what its extrude joins or cuts
+    // for picking: points by id, entities and their outlines, and the dimensions written on the sketch
+    std::vector<std::string> pointIds;
+    NumberList pointXy;
+    std::vector<std::pair<std::string, std::string>> entities;  // id, kind
+    std::vector<NumberList> outlines;                           // x,y pairs per entity
+    struct Dim {
+        std::string id, type, value;
+        double x = 0, y = 0, measured = 0;
+        double line[4] = {0, 0, 0, 0};
+        ImVec2 boxMin{0, 0}, boxMax{0, 0};  // where its label was drawn, for clicks
+    };
+    std::vector<Dim> dims;
+    // Select: dragging a point (cad.sketch_move tried on the sketch as it goes)
+    std::string dragPoint;
+    double dragX = 0, dragY = 0, triedX = 1e300, triedY = 1e300, movedAt = 0;
+    // Dimension: the first point clicked, and the dimension being typed (a new one, or an edit)
+    std::string dimFirst;
+    std::string editId, editType, editRefs;
+    char editBuf[128] = {0};
+    bool editOpen = false;
 };
 
 // A point or direction in a 3D view (handles.cpp).
@@ -131,7 +210,8 @@ struct P3 {
 
 // An arrow drawn on the 3D view: drag it to slide something along dir (handles.cpp).
 struct Handle {
-    enum class Kind { PushPull, Move, Field } kind = Kind::PushPull;
+    // Blend: fillet/chamfer size on picked edges; Ring / Scale: a model selection's rotate rings and scale boxes
+    enum class Kind { PushPull, Move, Field, Blend, Ring, Scale } kind = Kind::PushPull;
     P3 base, dir;           // world: where it starts, which way it points (unit length)
     ImU32 colour = 0;
     std::string axis;       // Move: x, y or z
@@ -158,6 +238,16 @@ struct View3d {
         std::vector<std::vector<P3>> loops;
     };
     Face hover, picked;
+    // cad: a sharp edge under the mouse (with the edges carrying on from it), and the ones clicked
+    struct Edge {
+        bool hit = false, outer = true;
+        std::string body, near;     // near: x,y,z of each piece's middle, for cad.fillet near=
+        std::vector<P3> segments;   // pairs of ends
+        P3 mid, out;                // out: away from the part, between the two faces
+    };
+    Edge hoverEdge;
+    std::vector<Edge> edges;
+    bool chamfer = false;  // the picked edges' arrow bevels instead of rounding
     ImVec2 hoverAt{-1e9f, -1e9f};
     std::uint64_t hoverSeen = ~0ull;
     bool moveMode = false;  // the clicked face's arrows move its body instead of pushing/pulling the face
@@ -200,6 +290,24 @@ struct LivePreview {
     bool runNow = false;
 };
 
+// Layout pages (layout_view.cpp): the page shown, its frames (mm boxes), the picked one, a drag
+// and the text frame being typed into.
+struct LayoutView {
+    std::string doc;
+    int page = 1, pages = 1;
+    double pageW = 210, pageH = 297;
+    std::uint64_t seen = ~0ull;
+    std::vector<std::string> ids, types;
+    std::vector<ImVec4> boxes;
+    int selected = -1, handle = -1;
+    bool dragging = false;
+    ImVec2 pressAt{0, 0};
+    ImVec4 start{0, 0, 0, 0}, live{0, 0, 0, 0};
+    bool editing = false, focus = false;
+    std::string text, original, editFrame;
+    int generation = 0;
+};
+
 // Slides (deck_view.cpp): which slide is shown big, the strip of thumbnails, the part of the
 // slide being typed into and an object being dragged. Boxes are in slide points (x, y, w, h).
 struct DeckView {
@@ -219,14 +327,18 @@ struct DeckView {
     // press / drag
     std::string pressKind, pressText;
     int pressObject = 0;
+    float pressFont = 0;
+    ImVec4 pressBg{1, 1, 1, 1}, pressFg{0, 0, 0, 1};
     ImVec4 press{0, 0, 0, 0};
     ImVec2 pressAt{0, 0};
     bool moving = false;
     // the part being edited
     bool editing = false, focus = false;
-    std::string kind, text;
-    int object = 0;
+    std::string kind, text, original;
+    int object = 0, generation = 0;
     ImVec4 box{0, 0, 0, 0};
+    float fontSize = 24;               // slide points
+    ImVec4 bg{1, 1, 1, 1}, fg{0, 0, 0, 1};  // the slide's colours, so the box looks like the slide
 };
 
 // A retouch command waiting to run: it runs on the frame after it is queued, so the
@@ -289,6 +401,14 @@ struct Canvas {
     std::string grabAxis;      // "", "x", "y" or "z"
     bool grabEndClick = false; // the click that kept it isn't also a click to select
     bool grabByHandle = false; // started by dragging an arrow: letting go keeps it
+    // started from a rotate ring or a scale box: the pivot and the axis's direction on screen
+    bool grabExact = false;
+    ImVec2 grabCentre{0, 0}, grabDir{1, 0};
+    float grabFacing = 1;      // rings: +1 when the axis points at the viewer
+    bool grabCtrl = false, grabAlt = false;  // snapping keys last frame
+    // B in a model's edit mode: the next drag draws a box that selects
+    bool boxArmed = false, boxDragging = false;
+    ImVec2 boxFrom{0, 0};
     int orbitW = 0, orbitH = 0;
 
     // selecting (selection_view.cpp)
@@ -313,12 +433,64 @@ struct Canvas {
     int vecDrag = 0;                  // 0 none, 1 move, 2 scale handle, 3 anchor part, 4 drawing a new shape
     int vecHandle = 0;                // scale: handle 0..7; anchor: node * 3 + part (0 anchor, 1 in, 2 out)
     ImVec2 vecStart{0, 0}, vecNow{0, 0};
-    std::vector<ImVec2> penPoints;   // Pen: the corners clicked so far, in drawing units
+    std::vector<ImVec2> penPoints;   // Pen: the anchors clicked so far, in drawing units
+    std::vector<ImVec2> penIn, penOut;  // Pen: each anchor's handles (equal to the anchor = a corner)
+    std::vector<float> guideBoxes;    // smart guides: the other shapes' boxes (x, y, w, h), read when a move starts
+    float guideX = NAN, guideY = NAN; // the guide lines shown while dragging (drawing units), NAN = none
+    std::vector<double> builderPts;   // Shape builder: the points the drag crossed
+    float color2[4] = {1, 1, 1, 1};   // Gradient: the end colour
     bool textOpen = false;           // Text: a box is waiting for words at textAt
     ImVec2 textAt{0, 0};
     std::string textDraft;
 
     GameCanvas game;
+};
+
+// What the in-place document editor's text callback reads and writes (canvas.cpp).
+struct DocEditAccess {
+    int* caret;     // caret position to set once, -1 none
+    char* pending;  // 'b', 'i', 'u' formatting to apply to the selection
+    int* cursor;    // where the caret is now
+};
+
+// A whiteboard on the canvas (board_view.cpp), in board units.
+struct BoardView {
+    std::string doc;
+    std::uint64_t seen = ~0ull;
+    double x = 0, y = 0, w = 1, h = 1, scale = 1;  // what the picture shows (board.view)
+    bool known = false;
+    std::string sel;              // picked element
+    std::string selType;
+    float box[4] = {0, 0, 0, 0};  // its box
+    int drag = 0;                 // 1 move, 2 resize (corner in handle), 3 new shape box, 4 connector, 5 ink
+    int handle = 0;
+    ImVec2 start{0, 0}, now{0, 0};
+    std::string from;             // connector start element
+    std::vector<double> ink;      // ink points
+    bool editing = false;         // typing on sel
+    std::string text;
+    bool focus = false;
+    bool fillChosen = false;      // new shapes take the theme's colours until a colour is picked
+};
+
+// The glyph editor for fonts (glyph_view.cpp), in font units (y up).
+struct GlyphPoint {
+    float x = 0, y = 0;
+    char type = 'o';  // o on-curve, c cubic control, q quadratic control
+};
+struct GlyphView {
+    std::string doc;
+    std::string glyph = "A";
+    std::string input = "A";
+    std::uint64_t seen = ~0ull;
+    bool exists = false;
+    float advance = 600, ascender = 800, descender = -200, xHeight = 500, capHeight = 700;
+    std::vector<std::vector<GlyphPoint>> contours;
+    int dragC = -1, dragP = -1;
+    ImVec2 dragStart{0, 0}, dragNow{0, 0};
+    std::vector<ImVec2> drawing;  // Draw tool: corners clicked so far
+    bool cut = false;
+    float scale = 1, ox = 0, oy = 0;  // screen = (ox + x * scale, oy - y * scale)
 };
 
 // A timeline's moving picture while it plays (video_play.cpp): frames drawn on a worker
@@ -373,6 +545,17 @@ struct Transport {
     double position = 0, length = 0, start = 0, end = 0;
     double cue = 0;  // where Play starts when nothing is playing
     float volumeDb = 0;
+    std::uint64_t liveSeen = 0;  // edits already swapped into what's playing
+    // recording (sound app): into a new clip, or onto a project track at recAt
+    bool recording = false, recClipped = false;
+    std::string recProject;
+    double recAt = 0, recSeconds = 0, recPeakDb = -200;
+    // proxies of big video sources (video app): made in the background after each change
+    std::uint64_t proxySeen = ~0ull;
+    std::string proxyDoc;
+    double proxyPolled = -10;
+    int proxyCount = 0, proxyReady = 0;
+    bool proxiesOn = true, proxyMaking = false;
 };
 
 // The timeline panel's own state (timeline_view.cpp).
@@ -382,8 +565,9 @@ struct TimelineState {
     double scroll = 0;  // seconds at the left edge
     double cursor = 0;  // where Split cuts
     std::string selTrack, selClip;
-    enum class Drag { None, Cursor, Move, TrimStart, TrimEnd } drag = Drag::None;
+    enum class Drag { None, Cursor, Move, TrimStart, TrimEnd, FadeIn, FadeOut, Gain, Key } drag = Drag::None;
     double grabT = 0, origStart = 0, origLength = 0, headroom = -1, tailroom = -1;
+    double origValue = 0, dragValue = 0;  // a fade (seconds) or gain (dB) handle while it's dragged
 };
 
 // The cell grid shown for spreadsheet documents (grid_view.cpp).
@@ -391,6 +575,12 @@ struct GridState {
     std::string doc;
     int sheet = -1;  // -1: start on the document's active sheet
     int row = 0, col = 0;
+    int row2 = 0, col2 = 0;   // the other corner of the selected range (== row, col for one cell)
+    bool selecting = false;   // dragging out a range
+    bool filling = false;     // dragging the fill handle
+    int fillRow = 0, fillCol = 0;  // where the fill handle is dragged to
+    bool focusGrid = false;        // the grid has the keyboard (Ctrl+B/I/U style the range)
+    ImVec4 fillPick{1, 1, 1, 1}, inkPick{0, 0, 0, 1};  // the format bar's colour pickers while open
     bool editing = false;
     bool focusEdit = false;   // give the cell editor keyboard focus next frame
     bool caretToEnd = false;  // started by typing: keep the typed text, caret after it
@@ -444,6 +634,7 @@ public:
     void frame();                         // one ImGui frame of every panel
     void onEvent(const SDL_Event& event);  // raw input for strokes, before ImGui sees it
     void openFile(const std::string& path);
+    void followWikiLink(const std::string& name);
     // a command's form, or "settings" for the Aa menu (text size and colours)
     void showAction(const std::string& commandId) {
         if (commandId == "settings") { openSettings_ = true; return; }
@@ -501,6 +692,12 @@ private:
     void closeDoc(const std::string& id);  // asks first when it has unsaved changes
     void closeDocNow(const std::string& id);
     void askSavePopup();
+    void passwordPopup();
+    struct PasswordAsk {
+        bool open = false;
+        std::string path, command, text, error;
+        bool focus = false;
+    } passwordAsk_;
     void noteChange(const std::string& id, const Params& params, const Result& r);
     void showDoc(const std::string& id);
     void nextTab(int step);
@@ -572,8 +769,26 @@ private:
     static bool brushTool(CanvasTool tool);
     static bool vectorDrawTool(CanvasTool tool) {
         return tool == CanvasTool::VecRect || tool == CanvasTool::VecEllipse || tool == CanvasTool::VecLine || tool == CanvasTool::VecPen ||
-               tool == CanvasTool::VecText;
+               tool == CanvasTool::VecText || tool == CanvasTool::VecGradient || tool == CanvasTool::VecBuilder;
     }
+    static bool glyphTool(CanvasTool tool) { return tool == CanvasTool::GlyphEdit || tool == CanvasTool::GlyphDraw; }
+    GlyphView glyph_;
+    bool fontDoc() const;
+    void glyphSync();
+    void glyphSettings();
+    void glyphCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bool active);
+    static bool boardTool(CanvasTool tool) { return tool >= CanvasTool::BoardSelect && tool <= CanvasTool::BoardPen; }
+    // whiteboards on the canvas (board_view.cpp): pick, move, resize, type on shapes, connect, ink
+    BoardView board_;
+    bool boardDoc() const;
+    void boardSettings();
+    void boardCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    void boardSync();
+    ImVec2 boardAt(ImVec2 screen) const;
+    ImVec2 boardScreen(ImVec2 p0, float x, float y) const;
+    void boardRun(const std::string& id, Params p, const char* title);
+    void boardEditText(ImVec2 p0);
+    void vectorGuides(float& dx, float& dy);
     void brushToolSettings();
     bool brushToolPress(ImVec2 screen);  // true when the click picked a clone source
     void runBrushTool();
@@ -604,6 +819,7 @@ private:
     void pdfLoad(bool force);
     void pdfRun(const std::string& command, Params params, const std::string& title);
     void pdfRelease();
+    void gridFormatBar(const CellGrid& layout);
     bool commitCell(const CellGrid& layout, int sheet, int row, int col, const std::string& input);
     // selections on the canvas (selection_view.cpp)
     void selectSettings();
@@ -633,7 +849,17 @@ private:
     void gameLevelSide();
     void gameSpriteSide();
     void gameLevelRelease();
+    void gameObjectInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active, float sx, float sy);
+    void gameObjectPanel();
     void gameSpriteRelease();
+    // Godot-style scenes on the canvas (scene_view.cpp)
+    void sceneSync(bool newDoc);
+    std::string scenePicture();
+    void sceneTools();
+    void sceneToolbar();
+    void sceneSide();
+    void sceneInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active);
+    void sceneSelect(const std::string& path);
 
     // actions (shell.cpp)
     Result run(const std::string& id, const Params& params);
@@ -664,6 +890,7 @@ private:
     std::vector<std::string> docIds() const;
     const CommandInfo* find(const std::string& id) const;
     bool accentButton(const char* label, ImVec2 size = {0, 0});
+    void recordButton();
 
     // tool panels (tool_panels.cpp, panel_*.cpp): the calculator, code editor,
     // file manager, terminal, system monitor and clock fill the middle
@@ -677,6 +904,9 @@ private:
     void beforeHistoryStep();
     void askFolder(const std::string& purpose);
     void folderChosen(const std::string& purpose, const std::string& path);
+    void askFile(const std::string& purpose);  // a file picker whose answer goes to folderChosen
+    void pipelineOpen(const std::string& path);
+    void pipelineChosen(const std::string& purpose, const std::string& path);
     Result query(const std::string& id, const Params& params);  // polls: no history, no switching documents
     void calcPanel();
     void calcKeypad();
@@ -696,6 +926,7 @@ private:
     void codeSync();
     void codeCommit();
     void codeOpenAt(const std::string& path, int line);
+    void codeLanguageServer();  // completion list, hover notes, go to definition, live problems
     void codeRun(const std::string& what);
     void codePoll();
     void codeFind(int step);
@@ -716,6 +947,7 @@ private:
     void monitorPanel();
     void monitorSample();
     void clockPanel();
+    void pipelinePanel();
     void clockTick();
     void clockTimers();
     void clockStopwatch();
@@ -826,6 +1058,9 @@ private:
         double length = 0;        // the clip's length in seconds
         std::uint64_t seen = ~0ull;
         std::string lengthDoc;
+        int handle = 0;          // being dragged: 1 fade-in, 2 fade-out, 3 gain
+        double handleValue = 0;  // seconds of fade, or dB
+        float grabY = 0;
         bool any() const { return a >= 0 && b > a; }
     } audioSel_;
     void audioCanvas(ImDrawList* dl, ImVec2 p0, ImVec2 p1, bool hovered, bool active);
@@ -834,13 +1069,83 @@ private:
     struct DocBlockEdit {
         std::string doc;
         int block = 0;  // 0: nothing open
-        std::string kind, text;
+        std::string kind, text, original;
         float top = 0, bottom = 0;  // in the page picture's pixels
+        float left = 0, right = 0;  // the text column, picture px
+        float fontPx = 14;          // the block's text size in picture px
         bool focus = false;
+        int caret = -1;             // where the caret goes when the box opens (-1: the end)
+        char pending = 0;           // 'b', 'i', 'u': wrap the selection on the next frame
+        int split = -1;             // Enter: the caret position to split the paragraph at
+        int cursor = 0;             // the caret as of the last frame (Enter splits there)
+        int generation = 0;         // bumps on every open so each block gets its own text box
     } docEdit_;
+    void docCommit(bool close);
+    void deckCommit();
     void docCanvas(ImDrawList* dl, ImVec2 p0, bool hovered);
     // the 3D view's arrows and picking (handles.cpp)
     View3d view3d_;
+    // brushing in the 3D view (brush3d.cpp): sculpting a mesh, or painting a bone's weights on a model
+    struct Brush3d {
+        std::string tool;  // "" off; a sculpt brush (draw, inflate, smooth, ...); "weight" in a model
+        float radiusPx = 40, strength = 0.5f;
+        bool invert = false;
+        std::string symmetry = "none";
+        std::string bone, weightMode = "add";
+        bool stroking = false;
+        NumberList rays;
+        std::vector<double> pressures;
+        double lastTry = 0;
+        std::size_t tried = 0;  // rays in the stroke the last trial ran
+    } brush3d_;
+    // the dope sheet under a model's 3D view (dopesheet.cpp)
+    struct DopeSheet {
+        std::string doc;
+        bool open = true, playing = false, hovered = false;
+        struct Row {
+            std::string object, group;  // group "all" = the object's summary row
+            std::vector<int> frames;
+        };
+        std::vector<Row> rows;
+        int frame = 1, start = 1, end = 48;
+        double fps = 24, lastQuery = -1, lastStep = 0;
+        std::string selObject, selGroup;
+        int selFrame = -1;
+        bool dragging = false, dragCopy = false, scrubbing = false;
+        int dragRow = -1, dragTo = 0;
+    } dope_;
+    // free transform handles on a picture (transform_view.cpp)
+    struct FreeTransform {
+        bool active = false;
+        std::string doc;
+        ImVec2 base[4], quad[4], startQuad[4];  // picture px: where the box was, where its corners are now
+        ImVec2 startMouse;
+        float startAngle = 0;
+        int drag = -1;
+        double lastTry = 0;
+    } xform_;
+    // typing a text layer on a picture (transform_view.cpp)
+    struct ImageText {
+        bool open = false, focus = false, bold = false;
+        std::string doc, words;
+        ImVec2 at;
+        float size = 32;
+    } imgText_;
+    void imageTextInput(ImVec2 p0, bool hovered);
+    Params imageTextParams() const;
+    void imageTextFinish(bool keep);
+    Params transformParams() const;
+    void transformStart();
+    void transformFinish(bool keep);
+    void transformToolbar();
+    void transformInput(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    void dopeSheetView();
+    float dopeSheetHeight() const;
+    void dopeSheetRefresh(bool force);
+    void dopeSheetScrub(int frame, bool wrap);
+    void brush3dToolbar();
+    bool brush3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered);
+    Params brush3dParams() const;
     void view3dCamera();  // read the camera the picture was drawn with
     bool view3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bool active);  // true: the mouse is on an arrow
     void view3dDraw(ImDrawList* dl, ImVec2 v0, ImVec2 size);
@@ -850,6 +1155,8 @@ private:
     void formHandles();
     View3d::Face cadPickAt(ImVec2 local);  // the face under a point of the view
     View3d::Face cadPickRay(const P3& from, const P3& dir);
+    View3d::Edge cadEdgeAt(ImVec2 local);  // the sharp edge near a point of the view (cad.pick_edge)
+    void edgeToolbar();
     void handleRelease();
     bool handleTrial(bool final);  // runs the dragged arrow's edit: as a trial, or for good
     void keepView(const ViewCamera& before);  // the part changed size: keep showing what was shown
@@ -881,6 +1188,14 @@ private:
     void showSlide(int n);
     void deckStrip();
     void deckCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    // layout: drag frames, resize by handles, double-click text to retype (layout_view.cpp)
+    LayoutView page_;
+    bool layoutDoc() const;
+    std::string layoutPicture();
+    void layoutRefreshFrames();
+    void layoutShowPage(int n);
+    void layoutCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    void layoutCommit();
     TimelineState timeline_;
     GridState grid_;
     CircuitCanvas circuit_;

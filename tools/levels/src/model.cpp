@@ -911,8 +911,116 @@ std::vector<ObjPoint> objectWorldPoints(const MapObject& ob) {
     return out;
 }
 
+bool orthogonal(const Map& map) { return map.orientation.empty() || map.orientation == "orthogonal"; }
+
+namespace {
+bool shifted(const Map& m, int i) { return (m.staggerIndex == "even") == (((i % 2) + 2) % 2 == 0); }
+double hexSide(const Map& m) { return m.orientation == "hexagonal" ? m.hexSideLength : 0; }
+}  // namespace
+
+std::array<int, 2> mapPixelSize(const Map& m) {
+    const int tw = m.tileWidth, th = m.tileHeight;
+    if (m.orientation == "isometric") return {(m.width + m.height) * tw / 2, (m.width + m.height) * th / 2};
+    if (m.orientation == "staggered" || m.orientation == "hexagonal") {
+        const double s = hexSide(m);
+        if (m.staggerAxis == "x") {
+            const double colW = (tw + s) / 2;
+            return {static_cast<int>(std::ceil(m.width * colW + (tw - colW))), m.height * th + th / 2};
+        }
+        const double rowH = (th + s) / 2;
+        return {m.width * tw + tw / 2, static_cast<int>(std::ceil(m.height * rowH + (th - rowH)))};
+    }
+    return {m.width * tw, m.height * th};
+}
+
+std::array<double, 2> cellOrigin(const Map& m, int x, int y) {
+    const double tw = m.tileWidth, th = m.tileHeight;
+    if (m.orientation == "isometric") return {(x - y) * tw / 2 + m.height * tw / 2 - tw / 2, (x + y) * th / 2};
+    if (m.orientation == "staggered" || m.orientation == "hexagonal") {
+        const double s = hexSide(m);
+        if (m.staggerAxis == "x") return {x * (tw + s) / 2, y * th + (shifted(m, x) ? th / 2 : 0)};
+        return {x * tw + (shifted(m, y) ? tw / 2 : 0), y * (th + s) / 2};
+    }
+    return {x * tw, y * th};
+}
+
+std::vector<ObjPoint> cellOutline(const Map& m, int x, int y) {
+    const auto o = cellOrigin(m, x, y);
+    const double tw = m.tileWidth, th = m.tileHeight, X = o[0], Y = o[1];
+    if (m.orientation == "isometric" || m.orientation == "staggered")
+        return {{X + tw / 2, Y}, {X + tw, Y + th / 2}, {X + tw / 2, Y + th}, {X, Y + th / 2}};
+    if (m.orientation == "hexagonal") {
+        const double s = m.hexSideLength;
+        if (m.staggerAxis == "x") {
+            const double e = (tw - s) / 2;
+            return {{X + e, Y}, {X + e + s, Y}, {X + tw, Y + th / 2}, {X + e + s, Y + th}, {X + e, Y + th}, {X, Y + th / 2}};
+        }
+        const double e = (th - s) / 2;
+        return {{X + tw / 2, Y}, {X + tw, Y + e}, {X + tw, Y + e + s}, {X + tw / 2, Y + th}, {X, Y + e + s}, {X, Y + e}};
+    }
+    return {{X, Y}, {X + tw, Y}, {X + tw, Y + th}, {X, Y + th}};
+}
+
+namespace {
+bool insidePolygon(const std::vector<ObjPoint>& poly, double px, double py) {
+    bool in = false;
+    for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+        if ((poly[i].y > py) != (poly[j].y > py) && px < (poly[j].x - poly[i].x) * (py - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x) in = !in;
+    }
+    return in;
+}
+}  // namespace
+
+std::array<int, 2> cellAt(const Map& m, double px, double py) {
+    const double tw = m.tileWidth, th = m.tileHeight;
+    if (m.orientation == "isometric") {
+        const double rx = px - m.height * tw / 2;
+        return {static_cast<int>(std::floor(py / th + rx / tw)), static_cast<int>(std::floor(py / th - rx / tw))};
+    }
+    if (orthogonal(m)) return {static_cast<int>(std::floor(px / tw)), static_cast<int>(std::floor(py / th))};
+    // staggered and hexagonal: a rough guess, then the cell around it whose shape holds the point
+    const double s = hexSide(m);
+    int gx = 0, gy = 0;
+    if (m.staggerAxis == "x") gx = static_cast<int>(std::floor(px / ((tw + s) / 2))), gy = static_cast<int>(std::floor(py / th));
+    else gx = static_cast<int>(std::floor(px / tw)), gy = static_cast<int>(std::floor(py / ((th + s) / 2)));
+    std::array<int, 2> best{gx, gy};
+    double bestD = 1e300;
+    for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+            const int cx = gx + dx, cy = gy + dy;
+            if (insidePolygon(cellOutline(m, cx, cy), px, py)) return {cx, cy};
+            const auto o = cellOrigin(m, cx, cy);
+            const double d = std::hypot((o[0] + tw / 2 - px) / tw, (o[1] + th / 2 - py) / th);
+            if (d < bestD) bestD = d, best = {cx, cy};
+        }
+    return best;
+}
+
+std::vector<std::array<int, 2>> cellNeighbours(const Map& m, int x, int y) {
+    if (m.orientation == "hexagonal" || m.orientation == "staggered") {
+        // neighbours across each edge, in the shifted-row (or column) layout
+        std::vector<std::array<int, 2>> out;
+        if (m.staggerAxis == "x") {
+            const int up = shifted(m, x) ? 0 : -1;
+            out = {{x, y - 1}, {x, y + 1}, {x - 1, y + up}, {x - 1, y + up + 1}, {x + 1, y + up}, {x + 1, y + up + 1}};
+        } else {
+            const int left = shifted(m, y) ? 0 : -1;
+            out = {{x - 1, y}, {x + 1, y}, {x + left, y - 1}, {x + left + 1, y - 1}, {x + left, y + 1}, {x + left + 1, y + 1}};
+        }
+        if (m.orientation == "staggered") {  // diamonds touch four neighbours: the diagonal ones
+            std::vector<std::array<int, 2>> d;
+            for (const auto& c : out)
+                if (m.staggerAxis == "x" ? c[0] != x : c[1] != y) d.push_back(c);
+            return d;
+        }
+        return out;
+    }
+    return {{x, y - 1}, {x + 1, y}, {x, y + 1}, {x - 1, y}};
+}
+
 Image render(const Map& map, const RenderOptions& o) {
-    const int pw = map.width * map.tileWidth, ph = map.height * map.tileHeight;
+    const auto pxSize = mapPixelSize(map);
+    const int pw = pxSize[0], ph = pxSize[1];
     Color bg{0, 0, 0, 0};
     if (auto c = Color::parse(map.background); c && !map.background.empty()) bg = *c;
     Image img(std::max(1, pw), std::max(1, ph), bg);
@@ -943,7 +1051,24 @@ Image render(const Map& map, const RenderOptions& o) {
             for (int y = 0; y < map.height; ++y) {
                 for (int x = 0; x < map.width; ++x) {
                     const std::uint32_t g = map.at(l, x, y);
-                    if (g & kGidMask) drawCellTile(img, map, animatedGid(map, g, o.time), x * map.tileWidth + ox, y * map.tileHeight + oy, l.opacity, tint);
+                    if (!(g & kGidMask)) continue;
+                    const auto at = cellOrigin(map, x, y);
+                    if (!orthogonal(map)) {
+                        const Tileset* ts = map.tilesetFor(g & kGidMask);
+                        if (!ts || !ts->pixels) {  // a colour tile in the cell's own shape
+                            Color c = placeholderColor(g & kGidMask);
+                            c.a = static_cast<std::uint8_t>(std::lround(255 * std::clamp(l.opacity, 0.0, 1.0)));
+                            std::vector<raster::Point> pts;
+                            for (const auto& p : cellOutline(map, x, y)) pts.push_back({p.x + ox, p.y + oy});
+                            raster::fillPolygon(img, pts, c);
+                            for (std::size_t k = 0; k < pts.size(); ++k)
+                                raster::drawLine(img, pts[k].x, pts[k].y, pts[(k + 1) % pts.size()].x, pts[(k + 1) % pts.size()].y,
+                                                 Color{static_cast<std::uint8_t>(c.r * 3 / 4), static_cast<std::uint8_t>(c.g * 3 / 4), static_cast<std::uint8_t>(c.b * 3 / 4), c.a}, 1);
+                            continue;
+                        }
+                    }
+                    drawCellTile(img, map, animatedGid(map, g, o.time), static_cast<int>(std::lround(at[0])) + ox, static_cast<int>(std::lround(at[1])) + oy, l.opacity,
+                                 tint);
                 }
             }
         }
@@ -960,12 +1085,30 @@ Image render(const Map& map, const RenderOptions& o) {
             if (l.kind != LayerKind::Tiles || !l.collision || !wanted(i)) continue;
             for (int y = 0; y < map.height; ++y) {
                 for (int x = 0; x < map.width; ++x) {
-                    if (map.at(l, x, y) & kGidMask) raster::fillRect(img, x * tw, y * th, tw, th, Color{230, 40, 40, 110});
+                    if (!(map.at(l, x, y) & kGidMask)) continue;
+                    if (orthogonal(map)) {
+                        raster::fillRect(img, x * tw, y * th, tw, th, Color{230, 40, 40, 110});
+                    } else {
+                        std::vector<raster::Point> pts;
+                        for (const auto& p : cellOutline(map, x, y)) pts.push_back({p.x * s, p.y * s});
+                        raster::fillPolygon(img, pts, Color{230, 40, 40, 110});
+                    }
                 }
             }
         }
     }
-    if (o.grid) {
+    if (o.grid && !orthogonal(map)) {
+        const Color gc{0, 0, 0, 60};
+        for (int y = 0; y < map.height; ++y)
+            for (int x = 0; x < map.width; ++x) {
+                const auto pts = cellOutline(map, x, y);
+                for (std::size_t i = 0; i < pts.size(); ++i) {
+                    const auto& a = pts[i];
+                    const auto& b = pts[(i + 1) % pts.size()];
+                    raster::drawLine(img, a.x * s, a.y * s, b.x * s, b.y * s, gc, 1);
+                }
+            }
+    } else if (o.grid) {
         const Color gc{0, 0, 0, 60};
         for (int x = 0; x <= map.width; ++x) raster::fillRect(img, x * tw, 0, 1, img.height(), gc);
         for (int y = 0; y <= map.height; ++y) raster::fillRect(img, 0, y * th, img.width(), 1, gc);

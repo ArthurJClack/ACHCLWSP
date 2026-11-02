@@ -94,6 +94,68 @@ void registerAddCommands(Session& session) {
                     return addClip(tl, q, c, "v1", "matte");
                 }));
     }
+
+    // ---- the media bin ----
+    reg.add({"cut.bin_add", "Import Media",
+             "Bring a video, picture or sound file into the media bin without putting it on the timeline (files added "
+             "with cut.add_* land there too). The window shows the bin above the timeline; drag a file from it onto a track.",
+             {docParam(), {"path", ParamType::String, "the file", true}},
+             true},
+            cutCommand(session, [](Timeline& tl, const Params& p) {
+                const std::string path = requireInput(p, "path");
+                const std::string full = absolute(path);
+                if (std::find(tl.bin.begin(), tl.bin.end(), full) != tl.bin.end()) return Result::success(full + " is already in the bin");
+                tl.bin.push_back(full);
+                Result r = Result::success("added " + std::filesystem::path(full).filename().string() + " to the media bin (" +
+                                           std::to_string(tl.bin.size()) + " file(s))");
+                return r.with("path", full).with("count", static_cast<std::int64_t>(tl.bin.size()));
+            }));
+    reg.add({"cut.bin_remove", "Remove From Bin", "Take a file out of the media bin (clips already on the timeline stay).",
+             {docParam(), {"path", ParamType::String, "the file, as cut.bin lists it", true}},
+             true},
+            cutCommand(session, [](Timeline& tl, const Params& p) {
+                const std::string path = stringParam(p, "path");
+                auto it = std::find(tl.bin.begin(), tl.bin.end(), path);
+                if (it == tl.bin.end()) it = std::find(tl.bin.begin(), tl.bin.end(), absolute(path));
+                if (it == tl.bin.end()) return Result::failure(path + " isn't in the bin (cut.bin lists it)");
+                tl.bin.erase(it);
+                return Result::success("removed " + path + " from the bin");
+            }));
+    reg.add({"cut.bin", "Media Bin",
+             "List the media bin: every file brought in plus any other file a clip plays. rows: path, kind (video, "
+             "image, audio), clips using it.",
+             {docParam()},
+             false, true},
+            cutCommand(
+                session,
+                [](Timeline& tl, const Params&) {
+                    TimelineLayout layout;
+                    tl.timeline(layout);
+                    std::string rows, text;
+                    for (const auto& m : layout.media) {
+                        int uses = 0;
+                        std::string kind;
+                        for (const auto& t : tl.tracks)
+                            for (const auto& c : t.clips)
+                                if (c.source == m) {
+                                    ++uses;
+                                    if (kind.empty() || c.kind == "video") kind = c.kind;
+                                }
+                        if (kind.empty()) {
+                            const std::string e = extOf(m);
+                            static const char* sounds[] = {"wav", "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wma", "aif", "aiff"};
+                            static const char* stills[] = {"png", "jpg", "jpeg", "webp", "bmp", "tga", "tif", "tiff", "psd"};
+                            kind = std::find(std::begin(sounds), std::end(sounds), e) != std::end(sounds)   ? "audio"
+                                   : std::find(std::begin(stills), std::end(stills), e) != std::end(stills) ? "image"
+                                                                                                            : "video";
+                        }
+                        rows += m + "\t" + kind + "\t" + std::to_string(uses) + "\n";
+                        text += "\n  " + std::filesystem::path(m).filename().string() + " (" + kind + (uses ? ", on the timeline" : "") + ")";
+                    }
+                    Result r = Result::success(layout.media.empty() ? "the media bin is empty" : std::to_string(layout.media.size()) + " file(s) in the bin:" + text);
+                    return r.with("rows", rows).with("count", static_cast<std::int64_t>(layout.media.size()));
+                },
+                false));
 }
 
 }  // namespace wetwaresuite::cut

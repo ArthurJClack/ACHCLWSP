@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
+#include <set>
 
 #include "cmd.hpp"
 #include "wetwaresuite/animate/animate.hpp"
@@ -96,6 +98,23 @@ std::vector<std::string> channelsFrom(const std::string& spec) {
         } else {
             throw std::runtime_error("unknown channel '" + c + "' (location, rotation, scale, all or e.g. location.z)");
         }
+    }
+    return out;
+}
+
+// "location.x" -> "location", "pose.arm.rotation.z" -> "pose.arm.rotation"
+std::string channelGroup(const std::string& ch) {
+    const auto dot = ch.rfind('.');
+    return dot == std::string::npos ? ch : ch.substr(0, dot);
+}
+
+// Channels of `o` a dope-sheet row names: empty or "all" = every keyed channel, a group
+// ("location", "pose.arm.rotation") or one channel ("location.z").
+std::vector<std::string> rowChannels(const Object& o, const std::string& row) {
+    std::vector<std::string> out;
+    for (const auto& [ch, keys] : o.keys) {
+        if (keys.empty()) continue;
+        if (row.empty() || row == "all" || ch == row || channelGroup(ch) == row) out.push_back(ch);
     }
     return out;
 }
@@ -236,6 +255,128 @@ void registerRenderCommands(Session& session) {
                 return done("frame " + std::to_string(d.scene.frame) + " of " + std::to_string(d.scene.frameStart) + ".." +
                                 std::to_string(d.scene.frameEnd),
                             d, p);
+            }));
+
+
+    reg.add({"model.keys",
+             "List keys",
+             "The dope sheet as data: for each keyed object a summary row and one row per channel group (location, "
+             "rotation, scale, pose.<bone>.rotation ...) with the frames that hold keys. rows is one line per row: "
+             "object, group (all for the summary) and the frames, separated by tabs.",
+             withDoc({{"object", ParamType::String, "only this object", false}}, false),
+             false},
+            query(session, [](ModelDoc& d, const Params& p) {
+                std::string rows, msg;
+                std::int64_t count = 0;
+                const std::string only = stringParam(p, "object");
+                for (const auto& o : d.scene.objects) {
+                    if (!only.empty() && o.name != only) continue;
+                    std::map<std::string, std::set<int>> groups;
+                    std::set<int> all;
+                    for (const auto& [ch, keys] : o.keys)
+                        for (const auto& k : keys) {
+                            groups[channelGroup(ch)].insert(k.frame);
+                            all.insert(k.frame);
+                        }
+                    if (all.empty()) continue;
+                    auto frames = [](const std::set<int>& s) {
+                        std::string out;
+                        for (int f : s) out += (out.empty() ? "" : ",") + std::to_string(f);
+                        return out;
+                    };
+                    rows += o.name + "\tall\t" + frames(all) + "\n";
+                    msg += o.name + ": frames " + frames(all) + "\n";
+                    for (const auto& [g, s] : groups) {
+                        rows += o.name + "\t" + g + "\t" + frames(s) + "\n";
+                        msg += "  " + g + ": " + frames(s) + "\n";
+                    }
+                    count += static_cast<std::int64_t>(all.size());
+                }
+                if (msg.empty()) msg = "no keys yet (model.keyframe adds them)\n";
+                msg.pop_back();
+                return Result::success(msg)
+                    .with("rows", rows)
+                    .with("frame", static_cast<std::int64_t>(d.scene.frame))
+                    .with("start", static_cast<std::int64_t>(d.scene.frameStart))
+                    .with("end", static_cast<std::int64_t>(d.scene.frameEnd))
+                    .with("fps", d.scene.fps)
+                    .with("keyed_frames", count);
+            }));
+
+    reg.add({"model.key_move",
+             "Move keys",
+             "Drag keys along the timeline (the dope sheet): the keys of object at frame move to frame `to`, for one "
+             "channel group (row=location, rotation, scale, pose.<bone>.rotation, location.z ...) or all of them "
+             "(row=all, the default). Keys already at `to` are replaced. copy=true leaves the originals (duplicate).",
+             withDoc({objectParam(),
+                      {"frame", ParamType::Int, "frame the keys are on", true},
+                      {"to", ParamType::Int, "frame to move them to", true},
+                      {"row", ParamType::String, "channel group, or all", false, {}, std::string("all")},
+                      {"copy", ParamType::Bool, "copy instead of move", false, {}, false}}),
+             true},
+            edit(session, [](ModelDoc& d, const Params& p) {
+                Object& o = target(d, p);
+                const int from = static_cast<int>(intParam(p, "frame")), to = static_cast<int>(intParam(p, "to"));
+                const bool copy = boolParam(p, "copy", false);
+                std::size_t n = 0;
+                for (const auto& ch : rowChannels(o, stringParam(p, "row", "all"))) {
+                    auto& keys = o.keys[ch];
+                    auto it = std::find_if(keys.begin(), keys.end(), [&](const Keyframe& k) { return k.frame == from; });
+                    if (it == keys.end()) continue;
+                    Keyframe k = *it;
+                    if (from == to) {
+                        ++n;
+                        continue;
+                    }
+                    if (!copy) keys.erase(it);
+                    std::erase_if(keys, [&](const Keyframe& x) { return x.frame == to; });
+                    k.frame = to;
+                    keys.push_back(k);
+                    std::sort(keys.begin(), keys.end(), [](const Keyframe& a, const Keyframe& b) { return a.frame < b.frame; });
+                    ++n;
+                }
+                if (n == 0) return Result::failure(o.name + " has no keys at frame " + std::to_string(from) + " in that row");
+                applyFrame(d, d.scene.frame);
+                return done(std::string(copy ? "copied " : "moved ") + std::to_string(n) + " keys of " + o.name + " from frame " +
+                                std::to_string(from) + " to " + std::to_string(to),
+                            d, p);
+            }));
+
+    reg.add({"model.key_delete",
+             "Delete keys",
+             "Remove the keys of object at frame, for one channel group (row=location, pose.<bone>.rotation ...) or "
+             "all of them (the default).",
+             withDoc({objectParam(),
+                      {"frame", ParamType::Int, "frame the keys are on", true},
+                      {"row", ParamType::String, "channel group, or all", false, {}, std::string("all")}}),
+             true},
+            edit(session, [](ModelDoc& d, const Params& p) {
+                Object& o = target(d, p);
+                const int frame = static_cast<int>(intParam(p, "frame"));
+                std::size_t n = 0;
+                for (const auto& ch : rowChannels(o, stringParam(p, "row", "all"))) {
+                    auto& keys = o.keys[ch];
+                    n += static_cast<std::size_t>(std::erase_if(keys, [&](const Keyframe& k) { return k.frame == frame; }));
+                    if (keys.empty()) o.keys.erase(ch);
+                }
+                if (n == 0) return Result::failure(o.name + " has no keys at frame " + std::to_string(frame) + " in that row");
+                return done("removed " + std::to_string(n) + " keys of " + o.name + " at frame " + std::to_string(frame), d, p);
+            }));
+
+    reg.add({"model.scrub",
+             "Scrub",
+             "Show another frame while playing or dragging the playhead: like model.frame frame= but not an undo step "
+             "(Blender doesn't undo frame changes either). wrap=true loops past the end back to the start.",
+             withDoc({{"frame", ParamType::Int, "frame to show", true},
+                      {"wrap", ParamType::Bool, "loop within the frame range", false, {}, false}},
+                     false),
+             false},
+            query(session, [](ModelDoc& d, const Params& p) {
+                int f = static_cast<int>(intParam(p, "frame"));
+                const int a = d.scene.frameStart, b = d.scene.frameEnd;
+                if (boolParam(p, "wrap", false) && b >= a) f = a + (((f - a) % (b - a + 1)) + (b - a + 1)) % (b - a + 1);
+                applyFrame(d, f);
+                return Result::success("frame " + std::to_string(f)).with("doc", stringParam(p, "doc")).with("frame", static_cast<std::int64_t>(f));
             }));
 
     reg.add({"model.render_animation",

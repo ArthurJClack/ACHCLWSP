@@ -1,6 +1,7 @@
 // The model document: objects, evaluation (with a cache), the viewport
 // drawing with Blender's edit-mode overlay, animation channels and undo.
 #include <algorithm>
+#include <cstring>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -142,7 +143,36 @@ void stampObject(const ModelDoc& doc, const Object& o, std::string& s, std::vect
     }
     std::snprintf(buf, sizeof buf, "%.17g|", o.autoSmooth);
     s += buf;
+    if (!o.weights.empty()) {  // vertex groups: a cheap fingerprint of every weight
+        std::uint64_t h = 1469598103934665603ull;
+        for (const auto& [bone, w] : o.weights) {
+            for (char c : bone) h = (h ^ static_cast<unsigned char>(c)) * 1099511628211ull;
+            for (float x : w) {
+                std::uint32_t bits;
+                std::memcpy(&bits, &x, 4);
+                h = (h ^ bits) * 1099511628211ull;
+            }
+        }
+        std::snprintf(buf, sizeof buf, "w%llx|", static_cast<unsigned long long>(h));
+        s += buf;
+    }
     for (const auto& m : o.modifiers) {
+        if (m.type == "armature" && m.enabled) {  // the pose moves the mesh
+            if (const Object* a = doc.object(m.str("object", ""))) {
+                s += "arm(";
+                stampMatrix(s, doc.world(*a));
+                stampMatrix(s, doc.world(o));
+                for (const auto& b : a->bones) {
+                    s += b.name + ":" + b.parent + ":";
+                    for (double v : {b.head.x, b.head.y, b.head.z, b.tail.x, b.tail.y, b.tail.z, b.roll, b.rotation.x, b.rotation.y,
+                                     b.rotation.z, b.location.x, b.location.y, b.location.z}) {
+                        std::snprintf(buf, sizeof buf, "%.17g,", v);
+                        s += buf;
+                    }
+                }
+                s += ")";
+            }
+        }
         s += m.type + (m.enabled ? "+" : "-") + m.name + "{";
         for (const auto& [k, v] : m.num) {
             std::snprintf(buf, sizeof buf, "%.17g", v);
@@ -214,6 +244,22 @@ void ModelDoc::refresh() {
                 for (int k = 0; k < 3; ++k) vc = vc + ev.tris.color[ev.tris.mesh.indices[t * 3 + static_cast<std::size_t>(k)]];
                 vc = vc * (1.0 / 3);
                 c = {c.x * vc.x, c.y * vc.y, c.z * vc.z};
+            }
+            if (!scene.paintBone.empty()) {
+                // weight paint view: blue (0) through green to red (1), like Blender
+                auto wit = o.weights.find(scene.paintBone);
+                double wsum = 0;
+                if (wit != o.weights.end() && t < ev.tris.face.size()) {
+                    const PolyMesh* base = meshOf(o);
+                    const std::uint32_t poly = ev.tris.face[t];
+                    if (base && poly < base->faces.size()) {
+                        const auto& fv = base->faces[poly].v;
+                        for (auto v : fv) wsum += v < wit->second.size() ? wit->second[v] : 0.0;
+                        wsum /= std::max<std::size_t>(1, fv.size());
+                    }
+                }
+                const double x = std::clamp(wsum, 0.0, 1.0);
+                c = x < 0.5 ? Vec3{0.1, 0.2 + 1.4 * x, 0.9 - 1.6 * x} : Vec3{0.2 + 1.6 * (x - 0.5), 0.9 - 1.4 * (x - 0.5), 0.1};
             }
             colors.push_back({byte(c.x), byte(c.y), byte(c.z), 255});
         }
@@ -504,13 +550,13 @@ const raster::Color kSelect{255, 160, 40, 255};
 const raster::Color kActive{255, 200, 90, 255};
 const raster::Color kWire{20, 20, 24, 255};
 
-void drawEdge(Canvas& c, const ViewBuffer& b, const Vec3& a, const Vec3& e, raster::Color col, int thick) {
+void drawEdge(Canvas& c, const ViewBuffer& b, const Vec3& a, const Vec3& e, raster::Color col, int thick, bool through) {
     const Vec2 s0 = b.proj.toScreen(a), s1 = b.proj.toScreen(e);
     const int steps = static_cast<int>(std::ceil(std::max(std::fabs(s1.x - s0.x), std::fabs(s1.y - s0.y)))) + 1;
     for (int i = 0; i <= steps; ++i) {
         const double t = static_cast<double>(i) / steps;
         const Vec3 p = a + (e - a) * t;
-        if (!b.visible(p)) continue;
+        if (!through && !b.visible(p)) continue;
         const int x = static_cast<int>(std::floor(s0.x + (s1.x - s0.x) * t)), y = static_cast<int>(std::floor(s0.y + (s1.y - s0.y) * t));
         for (int dy = 0; dy < thick; ++dy)
             for (int dx = 0; dx < thick; ++dx) c.set(x + dx, y + dy, col);
@@ -552,6 +598,7 @@ bool ModelDoc::renderView(const OrbitView& view, int width, int height, std::vec
     const Object* active = activeObject();
     const PolyMesh* cm = scene.editMode && active ? meshOf(*active) : nullptr;
     const ViewBuffer b = viewBuffer(*this, view, width, height, cm != nullptr);
+    const bool through = view.shading == "xray" || view.shading == "wireframe";  // see (and select) through the mesh
     if (cm) {
         const std::vector<Vec3> pts = cagePositions(*this, *cm, *active);
         const int ai = static_cast<int>(active - scene.objects.data());
@@ -560,12 +607,12 @@ bool ModelDoc::renderView(const OrbitView& view, int width, int height, std::vec
                 canvas.set(static_cast<int>(i % width), static_cast<int>(i / width), kSelect, 0.28);
         for (EdgeKey k : allEdges(*cm)) {
             const bool sel = cm->esel.count(k) > 0;
-            drawEdge(canvas, b, pts[keyA(k)], pts[keyB(k)], sel ? kSelect : kWire, sel ? thick + 1 : thick);
+            drawEdge(canvas, b, pts[keyA(k)], pts[keyB(k)], sel ? kSelect : kWire, sel ? thick + 1 : thick, through);
         }
         if (scene.selectMode == SelectMode::Vertex) {
             const int r = thick + 1;
             for (std::size_t v = 0; v < pts.size(); ++v) {
-                if (!b.visible(pts[v])) continue;
+                if (!through && !b.visible(pts[v])) continue;
                 const Vec2 s = b.proj.toScreen(pts[v]);
                 const int x = static_cast<int>(std::floor(s.x)), y = static_cast<int>(std::floor(s.y));
                 for (int dy = -r; dy <= r; ++dy)
@@ -587,9 +634,28 @@ bool ModelDoc::renderView(const OrbitView& view, int width, int height, std::vec
             }
         }
     }
+    // armatures: each bone a tapered stick from head to tail, the posed one where it is now
+    for (const auto& o : scene.objects) {
+        if (o.type != "armature" || !shown(o)) continue;
+        const Mat4 w = world(o);
+        const auto posed = posedBones(o);
+        for (const auto& bone : o.bones) {
+            auto it = posed.find(bone.name);
+            if (it == posed.end()) continue;
+            const double len = mesh::length(bone.tail - bone.head);
+            const Vec3 h = w.point(it->second.point({0, 0, 0})), t = w.point(it->second.point({0, len, 0}));
+            const raster::Color col = o.selected ? (bone.name == scene.paintBone ? kActive : kSelect) : raster::Color{70, 80, 100, 255};
+            drawEdge(canvas, b, h, t, col, thick + 1, true);
+            const Vec2 sh = b.proj.toScreen(h);
+            const int r = 2 * thick + 1;
+            for (int dy = -r; dy <= r; ++dy)
+                for (int dx = -r; dx <= r; ++dx)
+                    if (dx * dx + dy * dy <= r * r) canvas.set(static_cast<int>(sh.x) + dx, static_cast<int>(sh.y) + dy, col);
+        }
+    }
     // empties, lights and cameras as small crosses
     for (const auto& o : scene.objects) {
-        if (o.type == "mesh" || !shown(o)) continue;
+        if (o.type == "mesh" || o.type == "armature" || !shown(o)) continue;
         const Vec2 s = b.proj.toScreen(world(o).point({0, 0, 0}));
         const int x = static_cast<int>(s.x), y = static_cast<int>(s.y), r = 4 * thick;
         const raster::Color col = o.selected ? kSelect : raster::Color{60, 60, 70, 255};
@@ -606,6 +672,18 @@ bool ModelDoc::renderView(const OrbitView& view, int width, int height, std::vec
 namespace {
 
 double* channelRef(Object& o, const std::string& ch) {
+    if (ch.rfind("pose.", 0) == 0) {  // pose.<bone>.rotation.x
+        const auto last = ch.rfind('.');
+        const auto mid = last == std::string::npos ? std::string::npos : ch.rfind('.', last - 1);
+        if (mid == std::string::npos || mid <= 5) return nullptr;
+        Bone* b = findBone(o, ch.substr(5, mid - 5));
+        if (!b || last + 2 != ch.size()) return nullptr;
+        const std::string group = ch.substr(mid + 1, last - mid - 1);
+        Vec3* v = group == "rotation" ? &b->rotation : group == "location" ? &b->location : nullptr;
+        if (!v) return nullptr;
+        const char axis = ch[last + 1];
+        return axis == 'x' ? &v->x : axis == 'y' ? &v->y : axis == 'z' ? &v->z : nullptr;
+    }
     const auto dot = ch.find('.');
     if (dot == std::string::npos || dot + 2 != ch.size()) return nullptr;
     const std::string group = ch.substr(0, dot);

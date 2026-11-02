@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "wetwaresuite/pdf/reader.hpp"
 #include "wetwaresuite/pdfdoc/fonts.hpp"
 
 namespace wetwaresuite::pdf::detail {
@@ -18,15 +19,20 @@ int glyphEm();
 // rasterFont: 0 sans, 1 sans bold, 2 serif, 3 serif bold, 4 mono, 5 mono bold
 Glyph glyph(int rasterFont, unsigned char winAnsiByte);
 
-// Text the standard fonts can't show (Greek, Cyrillic, ...) uses the built-in Unicode font.
-const pdfdoc::TrueType& unicodeFont();
+// Text the standard fonts can't show (Greek, Cyrillic, CJK, emoji...) uses a Unicode font: the
+// built-in one, else a system fallback (see pdfdoc::unicodeFontIndex).
+const pdfdoc::TrueType& unicodeFont(unsigned codepoint);
 bool needsUnicode(unsigned codepoint);
 struct Run {
     bool unicode = false;
+    int font = -1;     // pdfdoc::unicodeFontIndex of a unicode run
     std::string text;  // UTF-8
 };
 // The text cut where it switches between the standard font and the Unicode one.
 std::vector<Run> splitRuns(const std::string& utf8);
+
+// One object in PDF syntax (strings as hex, refs as "n 0 R", streams with their data as they are).
+std::string writeObject(const Object& o);
 
 // Compact number text for PDF syntax: up to three decimals, no trailing zeros.
 std::string num(double v);

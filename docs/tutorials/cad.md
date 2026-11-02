@@ -34,9 +34,10 @@ what it printed (long outputs are shortened with `...`).
 14. [task: revolve, loft, sweep, draft, rib, thread and reference geometry](#14-task-revolve-loft-sweep-draft-rib-thread-and-reference-geometry)
 15. [task: an assembly with mates](#15-task-an-assembly-with-mates)
 16. [task: a technical drawing](#16-task-a-technical-drawing)
-17. [how sketch features fit the tree](#17-how-sketch-features-fit-the-tree)
-18. [command reference](#18-command-reference)
-19. [limits and troubleshooting](#19-limits-and-troubleshooting)
+17. [task: sheet metal and flat patterns](#17-task-sheet-metal-and-flat-patterns)
+18. [how sketch features fit the tree](#18-how-sketch-features-fit-the-tree)
+19. [command reference](#19-command-reference)
+20. [limits and troubleshooting](#20-limits-and-troubleshooting)
 
 ## 1. the ideas you need
 
@@ -372,6 +373,30 @@ and `cad_save`. If a change breaks the part, the tool result says why (for
 example `feature body: extrude height must be positive`) and nothing changes,
 so Claude can correct it.
 
+### configurations: every size in one file
+
+A loop like the one above works, but the sizes live in your script. A
+**configuration** keeps a named set of parameter values inside the part, like
+SolidWorks' configurations or Onshape's configuration table, so the file
+itself knows its sizes:
+
+```
+cad.open path=bracket.wwcad -> p
+cad.config_add doc=$p name=small values="width=30; t=4"
+cad.config_add doc=$p name=large values="width=60; t=6; hole_d=8"
+cad.config_use doc=$p name=large           # the part rebuilds at that size
+cad.config_list doc=$p                     # small, large (in use)
+cad.config_export doc=$p path=bracket-{name}.stl
+cad.save doc=$p path=bracket.wwcad         # the configurations are saved with it
+```
+
+`values` are `name=value` pairs separated by `;`, and a value can be an
+expression. `config_use` sets those parameters and rebuilds; if a value breaks
+a feature, nothing changes and the reason is given, and Ctrl+Z switches back.
+`config_export` writes one file per configuration (`{name}` in the path is
+replaced) and puts the part back as it was. Any format `cad.save` writes
+works: STL, STEP, 3MF and so on.
+
 ## 5. task: export for 3D printing
 
 STL is what every slicer reads; 3MF is the newer format that keeps units. The
@@ -620,6 +645,46 @@ corners and a soft top edge, and save it as STEP."* It calls `cad_new`,
 `cad_extrude_rect`, `cad_fillet` with `edges: "vertical"`, `cad_shell` with
 `open: "top"`, another `cad_fillet` with `edges: "top"`, then `cad_save` with
 `path: "tray.step"`.
+
+### offset a curved face
+
+Push/pull only moves flat faces. `cad.offset_face` moves any face along its own
+normals, including curved ones: a hole's wall (make the hole bigger or
+smaller), a boss's side, the round of a fillet. `face` is a point on the face,
+and `distance` is positive to add material, negative to cut:
+
+```
+cad.new
+cad.cylinder name=boss diameter=10 height=20
+cad.offset_face target=boss face=5,0,10 distance=1     # now 12 across
+```
+
+It is a feature in the tree like any other, so changing `distance` later
+rebuilds everything after it.
+
+### in the window: click an edge
+
+Hover near an edge of the part and it lights up; **click** it to pick it, with
+every edge that carries on smoothly from it (a rounded corner's whole run, a
+circle's rim). **Ctrl+click** adds more edges of the same body. A picked edge
+gets an arrow: drag it out and the edges round over live, with the radius next
+to the arrow. Switch the bar over the view to **Chamfer** for a bevel, or press
+**Type a size...** for the form. Letting go is one `cad.fillet` (or
+`cad.chamfer`) with `near=` set to the edges you picked, so Ctrl+Z takes it
+back and you can edit the radius in the tree later.
+
+Headless, `cad.pick_edge` does the same picking along a ray or from a view
+point, and returns the `near=` text to pass on:
+
+```
+cad.box name=block width=40 depth=30 height=20
+cad.pick_edge ray=60,15,40,-1,0,-1          # the top right edge: 30 long, outer
+cad.fillet target=block radius=3 near=40,15,20
+```
+
+Hidden edges, behind the part from where you look, are never picked. A
+curved face picked in the window gets an arrow too, and dragging it is a
+`cad.offset_face`.
 
 ## 9. task: STEP files in and out
 
@@ -972,6 +1037,17 @@ result line shows the degrees of freedom. Ctrl+Z takes back exactly one sketch
 edit. Tick **preview** to see the sketch itself, with its dimensions and the
 points that can still move marked.
 
+While a sketch is open in the view:
+
+- **Select** (S): drag any point and the sketch follows its relations and
+  dimensions as you drag (each step is a `cad.sketch_move`; letting go keeps it,
+  one Ctrl+Z puts it back). Points that are fully defined don't move.
+- **Dimension** (D): click a line for its length, a circle for its diameter (an
+  arc for its radius), or two points for the distance between them, then type
+  the value. A formula like `width/2` works too.
+- Every dimension is drawn on the sketch with its value. **Double-click** one to
+  change it in place.
+
 ### in the window: work right on the part
 
 You don't need the forms for everyday modelling. In the 3D view:
@@ -1210,6 +1286,38 @@ The one degree of freedom left is the peg spinning in its hole. Add an
   `.wwasm` file with `cad.assembly_open`, or double-click it.
 - Every edit is one undo step.
 
+### gears, racks, limits and dragging
+
+Mates can make things move, not just hold them:
+
+- **Limits.** A `distance` or `angle` mate takes `min` and `max` instead of a
+  value. It only holds at a limit: a peg in a slot that slides 0 to 5 mm, a lid
+  that opens 0 to 110 degrees. The result says which limits are holding
+  (`limits_hit`).
+- **Gears.** `type=gear a=gear1/bore b=gear2/bore value=2` turns b twice for
+  every turn of a, the other way (`flip=true` for the same way, like a belt).
+  The value is teeth of a over teeth of b.
+- **Racks.** `type=rack a=pinion/bore b=rack/x value=10` slides the rack 10 mm
+  per radian the pinion turns (the pinion's pitch radius).
+- **Dragging.** `cad.assembly_move component=gear1 rz=15 relative=true
+  drag=true` holds the component where you put it (turned about its own
+  origin, where a gear or wheel is usually modelled) and moves everything else to suit: the other gears turn, a linkage
+  swings, up to its limits. If its own mates can't take the move, it ends up as
+  close as they allow instead.
+
+Gears and racks only link the turning, so give each gear a `concentric` mate
+to its shaft and a `coincident` mate to keep it on the plate, as here:
+
+```
+cad.mate type=concentric a=plate/h1 b=g1/wheel
+cad.mate type=coincident a=plate/top b=g1/bottom
+cad.mate type=concentric a=plate/h2 b=g2/wheel
+cad.mate type=coincident a=plate/top b=g2/bottom
+cad.mate type=gear a=g1/wheel b=g2/wheel value=2
+cad.assembly_move component=g1 rz=10 relative=true drag=true   # g2 turns -20
+cad.mate type=angle a=plate/front b=lid/front min=0 max=110    # a hinge stop
+```
+
 ### asking Claude
 
 > Put the peg from peg.wwcad into the hole of plate.wwcad, sitting 5 mm deep.
@@ -1224,7 +1332,9 @@ own colour.
 ### in the window
 
 Ctrl+K, then *assembly* or *mate*. The assembly shows in the 3D view, with each
-component in its own colour. Ctrl+Z undoes one insert, mate or move.
+component in its own colour. Ctrl+Z undoes one insert, mate or move. The
+**Move** form has a **drag** box: tick it with **relative**, and with live
+preview on, the rz (or any) field turns the component while the rest follows.
 
 ## 16. task: a technical drawing
 
@@ -1251,6 +1361,17 @@ can add notes or more dimensions to it. With `path=`, it also writes `.pdf`,
 laser cutters) or `.png`. Drawings are made from the current model, so make a
 new one after a change.
 
+**Section and detail views.** `section=x=20` (or `y=` or `z=`) adds a view of
+the part cut by that plane, hatched where it cuts, labelled SECTION A-A, with
+the cut line A-A drawn across a view that sees the plane edge on.
+`detail=front:20,5,8` adds DETAIL B: a circle of radius 8 at 20,5 in the front
+view (across and up), enlarged `detail_scale` times (2 by default), with the
+circle marked B on the front view. Both go on the SECTION layer in DXF.
+
+```
+cad.drawing doc=$p section=y=15 detail=front:20,5,8 detail_scale=3 path=plate.pdf
+```
+
 ```sh
 wetwaresuite batch <<'EOF'
 cad.open path=plate.wwcad -> p
@@ -1270,7 +1391,42 @@ EOF
 Ctrl+K, then *drawing*. The drawing opens in its own blueprint tab, and the
 export path is optional.
 
-## 17. how sketch features fit the tree
+## 17. task: sheet metal and flat patterns
+
+Sheet metal parts are a base plate plus flanges bent off its edges, all one
+thickness. The flat pattern unrolls the bends so you can cut it on a laser or
+plasma cutter and bend it on a brake.
+
+```
+cad.new
+cad.sheet_base name=plate width=100 depth=60 thickness=2 radius=2 k_factor=0.44
+cad.sheet_flange name=lip target=plate edge=front length=20 angle=90
+cad.sheet_flange name=side target=lip edge=left length=15 angle=90 direction=down
+cad.sheet_flat path=bracket-flat.dxf
+```
+
+- **`sheet_base`** is a plate `width` x `depth` from the origin, or any
+  straight-edged outline with `points=x,y,x,y,...`. `thickness` is the sheet,
+  `radius` the default inside bend radius (the thickness if left out), and
+  `k_factor` where the neutral line sits in a bend (0.44 suits most mild steel,
+  0.33 for soft aluminium, 0.5 for thick stock).
+- **`sheet_flange`** bends a flange off one straight edge of the base: `edge`
+  is `front back left right` or a point `x,y` near the edge you want. It bends
+  `up` or `down` by `angle` through the inside `radius`, then runs straight on
+  for `length`. `target` is the base or the last flange, so flanges chain like
+  any feature and each can be edited or suppressed.
+- **`cad.sheet_flat`** makes the flat pattern as a blueprint drawing: the cut
+  outline (layer CUT), dashed bend lines at the start and end of each bend
+  (layer BEND) and a note on each (`UP 90° R2`, layer NOTES). Each bend adds
+  angle (in radians) x (radius + k_factor x thickness) of material, the bend
+  allowance. `path=` writes `.dxf` for the cutter, or `.svg`, `.pdf`, `.png`.
+  The result gives the blank's size, the number of bends and the cut length.
+
+Asking Claude: *"Make a 2 mm steel bracket, 100 by 60 with a 20 mm lip bent up
+on the front, and give me the flat pattern as DXF."* It calls `cad_new`,
+`cad_sheet_base`, `cad_sheet_flange` and `cad_sheet_flat`.
+
+## 18. how sketch features fit the tree
 
 - A sketch's own **output** is its solved geometry. Features that use it
   rebuild when that geometry changes, and not after an edit that leaves the
@@ -1284,7 +1440,7 @@ export path is optional.
 - Every new feature is saved in `.wwcad`, so sketches keep their
   constraints and dimensions when you reopen the file.
 
-## 18. command reference
+## 19. command reference
 
 Every edit command also takes `preview=true` (attach a PNG render) and
 `view=iso|front|back|left|right|top|bottom`. Primitive and sketch features take
@@ -1641,6 +1797,17 @@ Hollow a feature out, leaving walls of thickness. open removes the outermost fac
 | `open` |  |  | faces to remove: top, bottom, front, back, left, right, +x, -x, ... |
 | `name` |  |  | name for the feature (default: type + number, e.g. shell1) |
 
+
+#### `cad.offset_face`: Offset Face
+
+Move one face of a feature along its own normals by distance: out (positive) adds material, in (negative) cuts it. Works on curved faces too (a hole's wall, a boss's side, a fillet), which push/pull can't. face is a point x,y,z on the face (cad.pick gives one). Returns the feature name.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `target` | yes |  | feature whose face moves |
+| `face` |  |  | a point x,y,z on the face |
+| `distance` | yes |  | how far: positive out, negative in |
+| `name` |  |  | name for the feature (default: type + number, e.g. offset_face1) |
 #### `cad.transform`: Transform
 
 Move, rotate and scale an earlier feature's body: scale and rotate (rx, ry, rz degrees) about the pivot cx/cy/cz, then move by x/y/z. Returns the feature name.
@@ -1714,6 +1881,26 @@ loops as a count then x,y,z points, `area`, `centre`) and the body's `bounds`. P
 | `yaw` `pitch` `zoom` `pan_x` `pan_y` `width` `height` |  | iso, 800 x 600 | the view, as `app.view` |
 | `ray` |  |  | instead of the view: a ray start and direction x,y,z,dx,dy,dz |
 
+
+#### `cad.pick_edge`: Pick Edge
+
+Say which sharp edge is at a point of the 3D view (or nearest a ray), as clicking an edge does in SolidWorks or Onshape: its body, ends, midpoint and whether it is outer or inner, plus the chain of edges that carry on smoothly from it (all of a rounded corner's run, a whole circle). Pass near= (the chain's midpoints) and target= (the body) to cad.fillet or cad.chamfer. Hidden edges behind the part are not picked.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `u` |  | `0.5` | 0..1 across the view |
+| `v` |  | `0.5` | 0..1 down the view |
+| `yaw` |  | `45` | view yaw, degrees |
+| `pitch` |  | `35.26` | view pitch, degrees |
+| `zoom` |  | `1` | view zoom |
+| `pan_x` |  | `0` | view pan, model radii |
+| `pan_y` |  | `0` | view pan |
+| `width` |  | `800` | view width, px |
+| `height` |  | `600` | view height, px |
+| `ray` |  |  | instead of the view: a ray start and direction x,y,z,dx,dy,dz |
+| `pixels` |  | `8` | how close to the edge counts, px (view) |
+| `tolerance` |  | `0` | how close counts, model units (ray; default 1% of the part) |
+| `chain` |  | `true` | also take the edges that carry on smoothly from it |
 #### `cad.push_pull`: Push/Pull Face
 
 Pull a flat face out by `distance` (or push it in with a negative one): it sketches the face's outline
@@ -2136,6 +2323,86 @@ A reference axis for revolves, patterns and concentric mates: through cx/cy/cz a
 | `index` |  | `1` | which of its axes (patterns of holes have several) (whole number or expression) |
 | `name` |  |  | name for the feature (default: type + number, e.g. datum_axis1) |
 
+### Configurations
+
+#### `cad.config_add`: Add Configuration
+
+Add (or replace) a configuration: a name and parameter values, e.g. name=M4 values="hole_d=4; length=30". Parameters it names that don't exist yet are created when it's used. cad.config_use switches to it.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `name` | yes |  | configuration name, e.g. M4 or large |
+| `values` | yes |  | name=value pairs, separated by ; (or , when no value has a comma) |
+| `use` |  | `false` | switch to it straight away |
+
+#### `cad.config_use`: Use Configuration
+
+Switch the part to a configuration: its parameter values are set and the part rebuilds. If a value breaks a feature, nothing changes and the reason is given.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `name` | yes |  | configuration name (cad.config_list lists them) |
+
+#### `cad.config_delete`: Delete Configuration
+
+Remove a configuration (the parameters keep their values).
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `name` | yes |  | configuration name |
+
+#### `cad.config_list`: List Configurations
+
+List the part's configurations with their values, and which is in use.
+
+#### `cad.config_export`: Export Configurations
+
+Write one file per configuration: path has {name} where the configuration's name goes, e.g. bracket-{name}.stl or parts/{name}.step. The part is put back as it was afterwards.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `path` | yes |  | output path with {name} in it; the extension picks the format (stl, step, 3mf, obj, ...) |
+| `names` |  |  | only these configurations, comma-separated (default: all) |
+
+### Sheet metal
+
+#### `cad.sheet_base`: Sheet Metal Base
+
+A flat plate of sheet metal: width x depth from the origin (or an outline of points), thickness thick. Flanges bend off its edges; cad.sheet_flat unfolds the part for a laser cutter. Returns the feature name.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `width` |  | `100` | plate width (x) |
+| `depth` |  | `60` | plate depth (y) |
+| `points` |  |  | instead of width/depth: the outline x,y,x,y,... (a straight-edged shape) (comma-separated numbers or expressions) |
+| `thickness` |  | `1.5` | sheet thickness |
+| `radius` |  |  | default inside bend radius (default: the thickness) |
+| `k_factor` |  | `0.44` | where the neutral line sits in a bend, 0 (inside) to 1 (outside); 0.44 suits most steel |
+| `name` |  |  | name for the feature (default: type + number, e.g. sheet_base1) |
+
+#### `cad.sheet_flange`: Sheet Metal Flange
+
+Bend a flange off a straight edge of the sheet's base plate: up or down by angle, through an inside radius, then straight on for length. target is the base or another flange of the same part. Returns the feature name.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `target` | yes |  | the sheet_base (or a flange of it) |
+| `edge` |  | `front` | which edge: front, back, left, right, or a point x,y near it |
+| `length` |  | `20` | flange length past the bend |
+| `angle` |  | `90` | bend angle in degrees (90 = square) |
+| `direction` |  | `up` | bend up or down [up\|down] |
+| `radius` |  |  | inside bend radius (default: the base's) |
+| `name` |  |  | name for the feature (default: type + number, e.g. sheet_flange1) |
+
+#### `cad.sheet_flat`: Flat Pattern
+
+Unfold a sheet metal part (a sheet_base and its flanges) into its flat pattern: each bend is unrolled by the bend allowance angle x (radius + k_factor x thickness), with dashed bend lines and notes (UP 90 R2). Opens as a blueprint drawing; path= writes .dxf for a laser or plasma cutter (or .svg, .pdf, .png).
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `feature` |  |  | the last flange (or the base) of the sheet part (default: the last sheet feature) |
+| `path` |  |  | export to this file: .dxf, .svg, .pdf or .png (optional) |
+
 ### Assemblies
 
 #### `cad.assembly_new`: New Assembly
@@ -2172,25 +2439,29 @@ Insert a part as a component: an open cad document (part=cad1, its tree is copie
 
 #### `cad.mate`: Add Mate
 
-Hold two components together. a and b are component/reference: a face (bracket1/top, or bracket1/10,5,0 for the face nearest that point), a part plane (xy, xz, yz), axis (x, y, z), origin, a point (@x,y,z) or a feature of the part (datum plane or axis, sketch plane, hole or cylinder axis; hole1#2 = the second hole of a pattern). coincident: faces meet (facing each other; flip for the same way), axes line up, points meet. concentric: two axes line up. distance: planes face each other value apart (also points, axes). angle between planes or axes; parallel; perpendicular; fastened locks b to a where it is now.
+Hold two components together. a and b are component/reference: a face (bracket1/top, or bracket1/10,5,0 for the face nearest that point), a part plane (xy, xz, yz), axis (x, y, z), origin, a point (@x,y,z) or a feature of the part (datum plane or axis, sketch plane, hole or cylinder axis; hole1#2 = the second hole of a pattern). coincident: faces meet (facing each other; flip for the same way), axes line up, points meet. concentric: two axes line up. distance: planes face each other value apart (also points, axes). angle between planes or axes; parallel; perpendicular; fastened locks b to a where it is now. distance and angle take min/max limits instead of a value (a slot's travel, a hinge's stop): the mate only holds at a limit. gear: two axes turn together, b turning value turns per turn of a (teeth of a / teeth of b), opposite ways unless flip; rack: a's turning slides b along its axis or plane, value per radian (the pinion's pitch radius). Gears and racks only link the turning: mate each axis to its shaft too.
 
 | param | required | default | meaning |
 |---|---|---|---|
-| `type` | yes |  | kind of mate [coincident\|concentric\|distance\|angle\|parallel\|perpendicular\|fastened] |
+| `type` | yes |  | kind of mate [coincident\|concentric\|distance\|angle\|parallel\|perpendicular\|fastened\|gear\|rack] |
 | `a` | yes |  | first reference, e.g. base1/top |
 | `b` | yes |  | second reference, e.g. peg1/bottom |
-| `value` |  |  | distance or angle (degrees): number or expression |
+| `value` |  |  | distance or angle (degrees), gear ratio or rack radius: number or expression |
+| `min` |  |  | distance / angle: lower limit (instead of a value) |
+| `max` |  |  | distance / angle: upper limit |
 | `flip` |  | `false` | planes face the same way (or the other angle branch) |
 | `name` |  | `mate1, ...` | mate name |
 
 #### `cad.mate_set`: Edit Mate
 
-Change a mate's value (distance or angle) or flip it.
+Change a mate's value (distance, angle, gear ratio), its min/max limits, or flip it. An empty value clears it.
 
 | param | required | default | meaning |
 |---|---|---|---|
 | `mate` | yes |  | mate name |
 | `value` |  |  | new value or expression |
+| `min` |  |  | lower limit |
+| `max` |  |  | upper limit |
 | `flip` |  |  | flip it |
 
 #### `cad.mate_delete`: Delete Mate
@@ -2203,12 +2474,13 @@ Remove a mate; its components are free to move again.
 
 #### `cad.assembly_move`: Move Component
 
-Place a component (x y z rx ry rz; absolute, or relative=true to move it from where it is). Mates still hold: it ends up as close as they allow. fixed=true/false pins or frees it.
+Place a component (x y z rx ry rz; absolute, or relative=true to move it from where it is). Mates still hold: it ends up as close as they allow. drag=true holds it where you put it and moves the rest to suit, like dragging it in a CAD app (with relative=true it turns about its own centre): turn a gear and the other gears turn, swing a link and the linkage follows, up to its limits. fixed=true/false pins or frees it.
 
 | param | required | default | meaning |
 |---|---|---|---|
 | `component` | yes |  | component name |
 | `relative` |  | `false` | move from where it is |
+| `drag` |  | `false` | hold it where it's put and move the rest (falls back to as close as the mates allow) |
 | `fixed` |  |  | pin it in place (or free it) |
 | `x` |  |  | move along X |
 | `y` |  |  | Y |
@@ -2285,7 +2557,7 @@ Render the assembly (each component in its own colour) to a PNG.
 
 #### `cad.drawing`: Make Drawing
 
-Make an engineering drawing of a part or assembly: standard views projected from the model (views=front,top,right,iso; also left, back, bottom) with hidden lines dashed, laid out in third-angle (US) or first-angle (ISO) projection, overall dimensions, hole and circle diameters with centre marks, thread callouts, a parts list for assemblies and a title block, on a sheet at a standard scale. It opens as a blueprint drawing (edit it with blueprint.*) and path= exports .pdf, .svg, .dxf or .png.
+Make an engineering drawing of a part or assembly: standard views projected from the model (views=front,top,right,iso; also left, back, bottom) with hidden lines dashed, laid out in third-angle (US) or first-angle (ISO) projection, overall dimensions, hole and circle diameters with centre marks, thread callouts, a parts list for assemblies and a title block, on a sheet at a standard scale. It opens as a blueprint drawing (edit it with blueprint.*) and path= exports .pdf, .svg, .dxf or .png. section= adds a hatched section view (with its cutting line on another view) and detail= an enlarged detail circle.
 
 | param | required | default | meaning |
 |---|---|---|---|
@@ -2298,16 +2570,20 @@ Make an engineering drawing of a part or assembly: standard views projected from
 | `author` |  |  | drawn by |
 | `hidden` |  | `true` | draw hidden lines (dashed) |
 | `dims` |  | `true` | add dimensions, centre marks and callouts |
+| `section` |  |  | add a section view cut by a plane: x=20, y=0 or z=5 (model coordinates), hatched where it cuts |
+| `detail` |  |  | add an enlarged detail of a view: view:a,b,radius, e.g. front:20,5,8 (a, b along the view's right and up) |
+| `detail_scale` |  | `2` | how much the detail is enlarged |
 
-## 19. limits and troubleshooting
+## 20. limits and troubleshooting
 
-**Not there yet.** There is no sheet metal, no drill-point cone at the
-bottom of blind holes, and sketch points can't be dragged with the mouse in
-the window yet (use `cad.sketch_move`). Push/pull works on flat faces only, and
-the 3D view picks faces, not single edges (fillet edges by kind or `near=`). Drawings show projected views. There are no section
-views or detail views yet, and dimensions are the overall sizes and
-diameters; add more to the blueprint document by hand. Assemblies solve rigid
-mates only: no gears, cams or limits.
+**Not there yet.** There is no drill-point cone at the bottom of blind holes.
+Sheet metal flanges go on the base plate's straight edges only (no flanges on
+curved edges, hems, jogs or relief cuts; the flat pattern leaves the corners
+where two flanges meet square, so trim them in the blueprint if they'd
+overlap). Drawing dimensions are the overall sizes and diameters; add more to
+the blueprint document by hand. Gear and rack mates count turns from one solve
+to the next, so drag in steps of under half a turn. There are no cam or
+screw mates yet.
 
 **"the sketch can't be solved: constraints conflict: k2 (length), k4
 (vertical)"**: the new relation or dimension contradicts the ones listed.

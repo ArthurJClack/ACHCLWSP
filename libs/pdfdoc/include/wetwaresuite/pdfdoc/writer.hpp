@@ -4,6 +4,8 @@
 #pragma once
 
 #include <functional>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -59,22 +61,29 @@ std::string glyphText(const TrueType& font, const std::string& utf8);
 std::string infoText(const std::string& utf8);
 
 // Lets text set in the standard fonts carry any language: show() writes the operators for one
-// string, switching to the built-in Unicode font (resource /FU) for characters WinAnsi lacks and
-// back to `fontResource` (e.g. "F1") after. Put resource() in the page's /Font dictionary and call
-// finish() once before Writer::finish, which embeds just the characters used.
+// string, switching to a Unicode font for characters WinAnsi lacks (the built-in one as resource
+// /FU, system fallbacks for CJK, emoji... as /FU1, /FU2 ...) and back to `fontResource` (e.g. "F1")
+// after. Put resource() in the page's /Font dictionary and call finish() once before
+// Writer::finish, which embeds just the characters used.
 class UnicodeFallback {
 public:
     explicit UnicodeFallback(Writer& w) : w_(w) {}
     std::string show(const std::string& utf8, const std::string& fontResource, double size);
-    bool used() const { return id_ != 0; }
-    int id() const { return id_; }  // the font's object number, 0 when unused
-    std::string resource() const;  // " /FU n 0 R", or empty when nothing needed it
+    bool used() const { return !used_.empty(); }
+    int id() const;                // the built-in font's object number, 0 when unused
+    std::string resource() const;  // " /FU n 0 R /FU1 m 0 R ...", or empty when nothing needed it
+    std::vector<std::pair<std::string, int>> resources() const;  // the same as (name, object) pairs
     void finish();
+    static std::string resourceName(int font);  // "FU", "FU1", ...
 
 private:
+    struct Used {
+        int id = 0;
+        std::set<unsigned> chars;
+        bool finished = false;
+    };
     Writer& w_;
-    int id_ = 0;
-    std::set<unsigned> chars_;
+    mutable std::map<int, Used> used_;  // font index (see unicodeFontIndex) -> object and characters
 };
 
 }  // namespace wetwaresuite::pdfdoc

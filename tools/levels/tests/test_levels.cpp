@@ -576,7 +576,7 @@ void testFiles(const fs::path& dir) {
     CHECK(hc.layers.size() == 3 && hc.layers[2].objects.size() == 2 && hc.layers[2].objects[1].props["note"].value == "multi\nline");
     bool threw = false;
     try {
-        fromTmx("<map orientation=\"isometric\" width=\"2\" height=\"2\"/>", dir);
+        fromTmx("<map orientation=\"oblique\" width=\"2\" height=\"2\"/>", dir);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -820,6 +820,67 @@ void testTiledExtras(const fs::path& dir) {
     }
 }
 
+// isometric, staggered and hexagonal maps: placing cells, picking them, files in and out
+void testMapShapes(const fs::path& dir) {
+    fs::create_directories(dir);
+    Map iso = newMap(4, 4, 32, 16);
+    iso.orientation = "isometric";
+    CHECK(mapPixelSize(iso)[0] == 128 && mapPixelSize(iso)[1] == 64);
+    CHECK(cellOrigin(iso, 0, 0)[0] == 48 && cellOrigin(iso, 0, 0)[1] == 0);
+    CHECK(cellOrigin(iso, 1, 0)[0] == 64 && cellOrigin(iso, 1, 0)[1] == 8);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {  // every cell's middle picks that cell
+            const auto o = cellOrigin(iso, x, y);
+            const auto c = cellAt(iso, o[0] + 16, o[1] + 8);
+            CHECK(c[0] == x && c[1] == y);
+        }
+    Map hex = newMap(5, 4, 28, 32);
+    hex.orientation = "hexagonal";
+    hex.hexSideLength = 16;
+    CHECK(cellOrigin(hex, 0, 1)[0] == 14 && cellOrigin(hex, 0, 1)[1] == 24);  // odd rows shift half a tile
+    CHECK(cellOutline(hex, 0, 0).size() == 6);
+    CHECK(cellNeighbours(hex, 2, 2).size() == 6);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 5; ++x) {
+            const auto o = cellOrigin(hex, x, y);
+            const auto c = cellAt(hex, o[0] + 14, o[1] + 16);
+            CHECK(c[0] == x && c[1] == y);
+        }
+    Map flat = newMap(5, 4, 32, 28);
+    flat.orientation = "hexagonal";
+    flat.staggerAxis = "x";
+    flat.hexSideLength = 16;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 5; ++x) {
+            const auto o = cellOrigin(flat, x, y);
+            const auto c = cellAt(flat, o[0] + 16, o[1] + 14);
+            CHECK(c[0] == x && c[1] == y);
+        }
+
+    Session s;
+    registerCommands(s);
+    CHECK(run(s, "levels.new width=6 height=5 tile_width=28 tile_height=32 orientation=hexagonal stagger_index=even").ok);
+    CHECK(run(s, "levels.tileset_placeholder doc=lvl1 path=" + q(dir / "hex.png") + " style=colors tiles=4").ok);
+    CHECK(run(s, "levels.fill_rect doc=lvl1 x=0 y=0 width=6 height=5 tile=1").ok);
+    Result r = run(s, "levels.pick doc=lvl1 px=20 py=20");
+    CHECK(r.ok && intField(r, "x") >= 0);
+    CHECK(run(s, "levels.save doc=lvl1 path=" + q(dir / "hex.tmx")).ok);
+    CHECK(run(s, "levels.save doc=lvl1 path=" + q(dir / "hex.tmj")).ok);
+    CHECK(readAll(dir / "hex.tmx").find("orientation=\"hexagonal\"") != std::string::npos);
+    CHECK(readAll(dir / "hex.tmx").find("staggerindex=\"even\"") != std::string::npos);
+    for (const char* f : {"hex.tmx", "hex.tmj"}) {
+        const Map back = loadMap(dir / f);
+        CHECK(back.orientation == "hexagonal" && back.staggerIndex == "even" && back.hexSideLength == 16 && back.staggerAxis == "y");
+    }
+    // the picture is the hexagon layout's size, and Godot gets a hexagon TileSet
+    CHECK(render(mapOf(s, "lvl1")).width() == 6 * 28 + 14);
+    CHECK(run(s, "levels.save doc=lvl1 path=" + q(dir / "hex.tscn")).ok);
+    CHECK(readAll(dir / "hex.tscn").find("tile_shape = 3") != std::string::npos);
+    CHECK(run(s, "levels.new width=4 height=4 tile_width=32 tile_height=16 orientation=isometric").ok);
+    CHECK(run(s, "levels.save doc=lvl2 path=" + q(dir / "iso.tscn")).ok);
+    CHECK(readAll(dir / "iso.tscn").find("tile_layout = 5") != std::string::npos);
+}
+
 void testGodotAndWorld(const fs::path& dir) {
     fs::create_directories(dir);
     Session s;
@@ -840,6 +901,29 @@ void testGodotAndWorld(const fs::path& dir) {
     CHECK(run(s, "levels.layer_add doc=lvl1 name=deco").ok);
     CHECK(run(s, "levels.fill_rect doc=lvl1 layer=deco x=0 y=0 width=3 height=2 tile=0 tileset=blob").ok);
     CHECK(run(s, "levels.autotile doc=lvl1 layer=deco mode=blob tileset=blob edges=empty").ok);
+    // the terrain brush: paint and fix edges in one undoable step
+    {
+        Session t;
+        registerCommands(t);
+        CHECK(run(t, "levels.new width=8 height=6").ok);
+        CHECK(run(t, "levels.tileset_placeholder doc=lvl1 path=" + q(dir / "art" / "auto.png") + " style=autotile").ok);
+        CHECK(run(t, "levels.terrain doc=lvl1 cells=2,2,3,2,4,2").ok);
+        const Map& tm = mapOf(t, "lvl1");
+        const std::uint32_t first = tm.tilesets[0].firstGid;
+        CHECK(tm.at(tm.layers[0], 3, 2) == first + 2 + 8);  // east and west neighbours
+        CHECK(tm.at(tm.layers[0], 2, 2) == first + 2);       // east only
+        CHECK(run(t, "levels.terrain doc=lvl1 cells=4,2 erase=true").ok);
+        CHECK(mapOf(t, "lvl1").at(mapOf(t, "lvl1").layers[0], 4, 2) == 0);
+        CHECK(mapOf(t, "lvl1").at(mapOf(t, "lvl1").layers[0], 3, 2) == first + 8);  // its neighbour's edge followed
+        CHECK(run(t, "undo").ok);
+        CHECK(mapOf(t, "lvl1").at(mapOf(t, "lvl1").layers[0], 4, 2) != 0);
+        // objects report where they are, for clicking
+        CHECK(run(t, "levels.layer_add doc=lvl1 name=things kind=objects").ok);
+        CHECK(run(t, "levels.object_add doc=lvl1 layer=things name=spawn x=16 y=32 width=16 height=8").ok);
+        Result ol = run(t, "levels.object_list doc=lvl1");
+        CHECK(ol.field("boxes") && std::get<std::string>(*ol.field("boxes")) == "16,32,32,40");
+        CHECK(std::get<std::string>(*ol.field("names")) == "spawn");
+    }
     const std::string lvl1 = "lvl1";
     const Map& m1 = mapOf(s, lvl1);
     CHECK(m1.at(m1.layers[1], 0, 0) == m1.tilesets[1].firstGid + static_cast<std::uint32_t>(blobIndex(4 | 8 | 16)));
@@ -957,6 +1041,7 @@ int main() {
     testBlobAndWang();
     testTiledExtras(dir / "extras");
     testGodotAndWorld(dir / "godot");
+    testMapShapes(dir / "shapes");
     std::error_code ec;
     fs::remove_all(dir, ec);
     return check::summary("levels");
