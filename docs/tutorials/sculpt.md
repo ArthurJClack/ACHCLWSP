@@ -24,6 +24,11 @@ Every example below was run against the real binary; outputs are copied from tho
 
 - `space=world` (default): `x,y,z` triples. Each is snapped to the nearest spot on the surface, so a point roughly near the surface is fine.
 - `space=screen`: `u,v` pairs on a picture of the model rendered with the same `view`, `yaw` and `pitch` (u from 0 at the left edge to 1 at the right, v from 0 at the top to 1 at the bottom). Each point is cast onto the surface. This is how Claude aims strokes at what it sees in a preview. `sculpt.surface_point` converts one `u,v` into `x,y,z`.
+- `space=ray`: `x,y,z,dx,dy,dz` per point, a ray from the eye. Each is cast onto the surface; for `grab` the stroke stays on the plane through where it first hit, so the surface follows the mouse. This is what the window's brush sends.
+
+**Pen pressure.** `pressures=` gives one value from 0 to 1 per point; each dab's strength is scaled by the pressure where it falls (in between points it's blended). A tablet in the window fills it in for you.
+
+**In the window.** Pick a brush on the 3D view's toolbar (Draw, Inflate, Smooth, Flatten, Pinch, Grab, Crease) and paint on the model: a circle shows the brush, `[` and `]` change its size, the stroke previews live and letting go makes it one undo step. Pen pressure scales the strength. Alt+drag still turns the view and right-drag moves it; pick **Off** to go back to plain clicking.
 
 **Symmetry.** `symmetry=x` mirrors each dab across the plane x = 0 (also `y`, `z`, or combinations such as `xz`). The mirror planes go through the origin, so keep the model centred on them. `sculpt.symmetrize` copies one half over the other to make an existing model exactly symmetric.
 
@@ -452,7 +457,7 @@ All editing commands take `doc=` (or `input=`/`output=`) plus `preview=true` to 
 
 | Command | Parameters | What it does |
 | --- | --- | --- |
-| `sculpt.stroke` | `brush` (draw), `points`, `space` world/screen, `radius` (a tenth of the model's diagonal), `strength` 0..1 (0.5; grab 1), `falloff` (smooth), `spacing` (0.25 of the radius), `invert` (false), `symmetry` none/x/y/z/xy/... (none), `view`/`yaw`/`pitch` for screen points | One brush stroke. Returns `dabs`, `moved`, `max_offset`, `radius`, `start`, `end`. At most 4000 dabs. |
+| `sculpt.stroke` | `brush` (draw), `points`, `space` world/screen/ray, `pressures` (none), `radius` (a tenth of the model's diagonal), `strength` 0..1 (0.5; grab 1), `falloff` (smooth), `spacing` (0.25 of the radius), `invert` (false), `symmetry` none/x/y/z/xy/... (none), `view`/`yaw`/`pitch` for screen points | One brush stroke. Returns `dabs`, `moved`, `max_offset`, `radius`, `start`, `end`. At most 4000 dabs. |
 | `sculpt.surface_point` | `u`, `v`, `view`, `yaw`, `pitch` | The model point under a spot on a picture. Read-only. |
 | `sculpt.mask` | `shape` sphere/plane/all/clear/invert/grow/shrink/blur (sphere), `center`, `radius`, `point` (0,0,0), `normal` (0,0,1), `softness` (0), `mode` set/add/subtract/intersect (set), `steps` (1) | Sets the mask. Sphere: within `radius` of `center`. Plane: the side `normal` points to. Grow/shrink by `steps` edge rings; blur softens. Returns `masked`. Sculpt documents only. |
 
@@ -487,7 +492,7 @@ A good loop for Claude: preview from the angle it will work in, stroke with `spa
 ## Limitations
 
 - **Sizes are capped.** Results stop at 1 000 000 triangles (`sculpt.new`, `sculpt.subdivide`, `sculpt.remesh`, `sculpt.retopo`) and voxel grids at 160 cells along the longest side. For more detail, remesh at 160 and subdivide once.
-- **Brushes are simple.** No dynamic topology (triangles stretch under big grabs: remesh afterwards), no stroke pressure, no textured alphas, no layers. Every dab scans all vertices, so very dense meshes (several hundred thousand vertices) stroke slowly; a typical sculpt at 20 000 to 80 000 triangles is instant.
+- **Brushes are simple.** No dynamic topology (triangles stretch under big grabs: remesh afterwards), no textured alphas, no layers. Every dab scans all vertices, so very dense meshes (several hundred thousand vertices) stroke slowly; a typical sculpt at 20 000 to 80 000 triangles is instant.
 - **Symmetry is about the origin planes**, not the model's centre: centre the model first (`forge.mesh_transform center=true`). A dab closer to the mirror plane than its radius overlaps its own mirror image, so the area along the plane gets a double dose: use a lower strength there.
 - **Remesh and retopo lose detail smaller than a cell**, and features thinner than about two cells (ear tips, thin creases) come out lumpy. Retopology is automatic: its edge loops follow the voxel grid, not the face's features like hand retopology would. Open meshes remesh into a thin closed shell, and retopo on them is not projected back.
 - **Masks aren't shown in pictures**; `sculpt.stats` and `sculpt.mask` report how many vertices are masked. Topology changes (remesh, retopo, symmetrize) clear the mask.

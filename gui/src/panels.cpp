@@ -379,6 +379,18 @@ void Shell::documentView() {
         return;
     }
     canvasToolbar();
+    if (doc->kind() == "model" && find("model.keys")) {
+        // the 3D view on top, the dope sheet below (dopesheet.cpp)
+        const float avail = ImGui::GetContentRegionAvail().y;
+        const float ds = std::min(dopeSheetHeight(), avail * 0.45f);
+        ImGui::BeginChild("preview", {0, std::max(64.0f, avail - ds - ImGui::GetStyle().ItemSpacing.y)});
+        canvasView();
+        ImGui::EndChild();
+        ImGui::BeginChild("dopesheet", {0, 0});
+        dopeSheetView();
+        ImGui::EndChild();
+        return;
+    }
     TimelineLayout layout;
     if (doc->timeline(layout)) {
         // the preview on top, the timeline below

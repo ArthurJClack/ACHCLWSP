@@ -400,6 +400,8 @@ StrokeStats stroke(Mesh& m, const Mask& mask, const std::vector<Vec3>& path, con
         // Resample the polyline every `gap` along its length (dense input, e.g. from screen
         // strokes, doesn't pile up extra dabs), always ending on the last point.
         std::vector<Vec3> centres{pts.front()};
+        auto pressureAt = [&](std::size_t k) { return k < s.pressure.size() ? std::clamp(s.pressure[k], 0.0, 1.0) : 1.0; };
+        std::vector<double> centreP{pressureAt(0)};
         double carry = 0;  // distance since the last dab
         for (std::size_t k = 1; k < pts.size(); ++k) {
             const Vec3 a = pts[k - 1], d = pts[k] - a;
@@ -407,6 +409,7 @@ StrokeStats stroke(Mesh& m, const Mask& mask, const std::vector<Vec3>& path, con
             double t = gap - carry;
             while (t <= len) {
                 centres.push_back(a + d * (t / len));
+                centreP.push_back(pressureAt(k - 1) + (pressureAt(k) - pressureAt(k - 1)) * (len > 0 ? t / len : 1));
                 if (centres.size() > kMaxDabs) {
                     throw std::invalid_argument("that stroke needs more than " + std::to_string(kMaxDabs) +
                                                 " dabs; use a bigger spacing or radius, or split it into several strokes");
@@ -415,13 +418,16 @@ StrokeStats stroke(Mesh& m, const Mask& mask, const std::vector<Vec3>& path, con
             }
             carry = len - (t - gap);
         }
-        if (pts.size() > 1 && carry > gap * 0.25) centres.push_back(pts.back());
+        if (pts.size() > 1 && carry > gap * 0.25) centres.push_back(pts.back()), centreP.push_back(pressureAt(pts.size() - 1));
+        BrushSettings pressed = s;
         for (std::size_t k = 0; k < centres.size(); ++k) {
             const Vec3 c = k == 0 || k + 1 == centres.size() ? centres[k] : st.snap(centres[k], s.radius);
+            pressed.strength = s.strength * centreP[k];
+            if (pressed.strength <= 0) continue;
             for (int b : sets) {
                 const Vec3 mc = mirror(c, b);
                 if (b != 0 && mesh::length(mc - c) < s.radius * 1e-6) continue;
-                dab(st, m, mc, s);
+                dab(st, m, mc, pressed);
             }
             ++stats.dabs;
         }

@@ -28,6 +28,7 @@ std::vector<ParamSpec> withDoc(std::vector<ParamSpec> extra, bool preview) {
         out.push_back({"yaw", ParamType::Number, "preview orbit: degrees around the vertical axis (overrides view)", false});
         out.push_back({"pitch", ParamType::Number, "preview orbit: degrees up from the horizon", false});
         out.push_back({"zoom", ParamType::Number, "preview zoom (1 fits everything)", false, {}, 1.0});
+        out.push_back({"shading", ParamType::String, "preview shading, like Blender's viewport", false, mesh::shadingNames(), std::string("material")});
     }
     return out;
 }
@@ -137,6 +138,7 @@ OrbitView viewFrom(const Params& p) {
     if (has(p, "yaw")) v.yaw = numberParam(p, "yaw");
     if (has(p, "pitch")) v.pitch = numberParam(p, "pitch");
     if (has(p, "zoom")) v.zoom = numberParam(p, "zoom", 1);
+    if (has(p, "shading")) v.shading = stringParam(p, "shading");
     return v;
 }
 
@@ -209,7 +211,10 @@ std::string num(double v) {
     return buf;
 }
 
-std::string many(std::size_t n, const std::string& word) { return std::to_string(n) + " " + word + (n == 1 ? "" : "s"); }
+std::string many(std::size_t n, const std::string& word) {
+    if (n != 1 && word == "vertex") return std::to_string(n) + " vertices";
+    return std::to_string(n) + " " + word + (n == 1 ? "" : "s");
+}
 
 std::string hex(const Vec3& c) {
     char buf[16];
@@ -287,6 +292,9 @@ render::Material renderMaterial(const Material* m) {
     r.opacity = m->alpha;
     r.texture = m->texture;
     r.textureScale = m->textureScale;
+    r.normalMap = m->normalMap;
+    r.normalStrength = m->normalStrength;
+    r.roughnessMap = m->roughnessMap;
     return r;
 }
 
@@ -353,6 +361,24 @@ render::Scene toRenderScene(const ModelDoc& doc, const RenderSetup& setup) {
     }
     if (!lights.empty()) rs.lights = lights;
     if (setup.ground) render::addGround(rs);
+    {
+        const Scene& s = doc.scene;
+        render::Sky& k = rs.sky;
+        k.strength = s.worldStrength;
+        if (s.worldType == "hdri" && !s.hdri.empty()) {
+            k.type = "hdri";
+            k.hdri = s.hdri;
+            k.rotation = s.hdriRotation;
+        } else if (s.worldType == "color") {
+            k.type = "color";
+            k.zenith = k.horizon = linear(s.worldColor);
+        } else if (s.worldType == "none") {
+            k.type = "none";
+        } else if (s.worldType == "gradient") {
+            k.zenith = linear(s.worldColor);
+        }
+        if (s.worldVisible) k.visible = true;
+    }
 
     const Object* cam = nullptr;
     if (setup.camera != "view") {
@@ -396,6 +422,7 @@ void registerCommands(Session& session) {
     cmd::registerModifierCommands(session);
     cmd::registerMaterialCommands(session);
     cmd::registerRenderCommands(session);
+    cmd::registerRigCommands(session);
 }
 
 }  // namespace wetwaresuite::model

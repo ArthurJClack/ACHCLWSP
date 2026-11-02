@@ -47,6 +47,28 @@ void Shell::orbitToolbar() {
     }
     ImGui::SetItemTooltip("Show the whole model (or double-click it)");
     ImGui::SameLine();
+    {
+        // viewport shading, like Blender's: Alt+Z toggles see-through
+        static const char* names[] = {"material", "solid", "matcap", "wireframe", "xray"};
+        static const char* labels[] = {"Material", "Solid", "Clay", "Wireframe", "X-ray"};
+        int current = 0;
+        for (int i = 0; i < 5; ++i)
+            if (canvas_.orbit.shading == names[i]) current = i;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.5f);
+        if (ImGui::Combo("##shading", &current, labels, 5)) {
+            canvas_.orbit.shading = current == 0 ? std::string() : std::string(names[current]);
+            canvas_.orbitDirty = true;
+        }
+        ImGui::SetItemTooltip("How the model is drawn: its materials, one plain colour, studio clay, edges only, or see-through "
+                              "(X-ray, Alt+Z: hidden edges show and box select takes them too)");
+        if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && ImGui::GetIO().KeyAlt && !ImGui::GetIO().WantTextInput) {
+            canvas_.orbit.shading = canvas_.orbit.shading == "xray" ? std::string() : std::string("xray");
+            canvas_.orbitDirty = true;
+        }
+        ImGui::SameLine();
+    }
+    brush3dToolbar();
+    ImGui::SameLine();
     auto doc = session_.workspace().get(currentDoc_);
     if (doc && doc->kind() == "cad" && find("cad.sketch_geometry")) {
         // open the last sketch for drawing
@@ -78,7 +100,8 @@ void Shell::orbitToolbar() {
         ImGui::Text("%s%s%s: move the mouse, click to keep, Esc to undo; X Y Z lock an axis", what,
                     canvas_.grabAxis.empty() ? "" : " along ", canvas_.grabAxis.c_str());
     } else if (doc && doc->kind() == "model") {
-        ImGui::TextDisabled("drag to turn, right-drag to pan, scroll to zoom, click to select; drag the arrows or G move, R rotate, S scale");
+        ImGui::TextDisabled(canvas_.boxArmed ? "drag a box to select (Shift adds, Esc stops)"
+                                              : "drag to turn, right-drag to pan, click to select, B box select; arrows move, rings turn, boxes stretch (Ctrl snaps, Alt snaps to vertices)");
     } else if (!(doc && doc->kind() == "cad" && find("cad.pick"))) {  // cad's own row says it (handles.cpp)
         ImGui::TextDisabled("drag to turn, right-drag to move, scroll to zoom, double-click to fit");
     }
@@ -87,9 +110,40 @@ void Shell::orbitToolbar() {
 void Shell::orbitCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bool active) {
     ImGuiIO& io = ImGui::GetIO();
     OrbitView& o = canvas_.orbit;
-    // arrows on faces and selections take the mouse first (handles.cpp)
-    const bool onHandle = view3dInput(dl, v0, size, hovered, active);
-    const bool left = active && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !onHandle && view3d_.dragging < 0;
+    // a sculpt or weight brush, then arrows on faces and selections, take the mouse first (brush3d.cpp, handles.cpp)
+    const bool brushing = brush3dInput(dl, v0, size, hovered);
+    const bool onHandle = brushing || view3dInput(dl, v0, size, hovered, active);
+    // B (edit mode): the next left drag draws a box that selects; in X-ray it takes hidden elements too
+    {
+        auto bdoc = session_.workspace().get(currentDoc_);
+        const bool modelDoc = bdoc && bdoc->kind() == "model";
+        if (modelDoc && hovered && !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_B, false)) canvas_.boxArmed = true;
+        if (canvas_.boxArmed && ImGui::IsKeyPressed(ImGuiKey_Escape)) canvas_.boxArmed = canvas_.boxDragging = false;
+        if (canvas_.boxArmed && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            canvas_.boxDragging = true;
+            canvas_.boxFrom = io.MousePos;
+        }
+        if (canvas_.boxDragging) {
+            const ImVec2 a = canvas_.boxFrom, b = io.MousePos;
+            dl->AddRectFilled({std::min(a.x, b.x), std::min(a.y, b.y)}, {std::max(a.x, b.x), std::max(a.y, b.y)}, IM_COL32(255, 160, 40, 40));
+            dl->AddRect({std::min(a.x, b.x), std::min(a.y, b.y)}, {std::max(a.x, b.x), std::max(a.y, b.y)}, IM_COL32(255, 160, 40, 220), 0, 0, 1.5f);
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                canvas_.boxDragging = canvas_.boxArmed = false;
+                auto uv = [&](float x, float lo, float len) { return std::clamp((x - lo) / len, 0.0f, 1.0f); };
+                NumberList rect{uv(std::min(a.x, b.x), v0.x, size.x), uv(std::min(a.y, b.y), v0.y, size.y), uv(std::max(a.x, b.x), v0.x, size.x),
+                                uv(std::max(a.y, b.y), v0.y, size.y)};
+                Result r = run("model.select", {{"doc", currentDoc_}, {"type", std::string("rect")}, {"rect", rect},
+                                                {"xray", o.shading == "xray" || o.shading == "wireframe"}, {"extend", io.KeyShift},
+                                                {"yaw", o.yaw}, {"pitch", o.pitch}, {"zoom", o.zoom}, {"pan_x", o.panX}, {"pan_y", o.panY},
+                                                {"width", static_cast<std::int64_t>(size.x)}, {"height", static_cast<std::int64_t>(size.y)}});
+                resultFor_ = "Box select";
+                result_ = r.ok ? Result::success(sentence(r.message)) : Result::failure(friendlyError(r.message));
+                canvas_.orbitDirty = true;
+                canvas_.grabEndClick = true;  // the release isn't also a click to select
+            }
+        }
+    }
+    const bool left = active && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !onHandle && view3d_.dragging < 0 && !canvas_.boxArmed && !canvas_.boxDragging;
     const bool move = active && (ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
                                  (left && io.KeyShift));
     const float minSide = std::max(1.0f, std::min(size.x, size.y));
@@ -130,6 +184,7 @@ void Shell::orbitCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
                 canvas_.grabApplied = false;
                 canvas_.grabStart = io.MousePos;
                 canvas_.grabAxis.clear();
+                canvas_.grabExact = false;
             }
         }
     }
@@ -148,10 +203,14 @@ void Shell::orbitCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
         const bool keep = canvas_.grabByHandle ? !ImGui::IsMouseDown(ImGuiMouseButton_Left)
                                                : ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsKeyPressed(ImGuiKey_Enter) ||
                                                      ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+        if (io.KeyCtrl != canvas_.grabCtrl || io.KeyAlt != canvas_.grabAlt) changed = true;  // snapping turned on or off
+        canvas_.grabCtrl = io.KeyCtrl;
+        canvas_.grabAlt = io.KeyAlt;
         if (cancel) {
             if (canvas_.grabApplied) session_.history().undo();
             canvas_.grab = 0;
             canvas_.grabByHandle = false;
+            canvas_.grabExact = false;
             canvas_.orbitDirty = true;
             syncDocs();
         } else if (changed) {
@@ -163,6 +222,25 @@ void Shell::orbitCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
                      {"yaw", o.yaw}, {"pitch", o.pitch}, {"zoom", o.zoom}, {"pan_x", o.panX}, {"pan_y", o.panY},
                      {"width", static_cast<std::int64_t>(size.x)}, {"height", static_cast<std::int64_t>(size.y)}};
             if (!canvas_.grabAxis.empty()) p["axis"] = canvas_.grabAxis;
+            if (canvas_.grabExact && canvas_.grab == 'R') {
+                // the ring turns as far as the mouse went round the pivot
+                const float ax = canvas_.grabStart.x - canvas_.grabCentre.x, ay = canvas_.grabStart.y - canvas_.grabCentre.y;
+                const float bx = io.MousePos.x - canvas_.grabCentre.x, by = io.MousePos.y - canvas_.grabCentre.y;
+                const double turn = std::atan2(ax * by - ay * bx, ax * bx + ay * by) * 180 / 3.14159265358979323846;
+                p["angle"] = -turn * canvas_.grabFacing;  // screen y is down
+            } else if (canvas_.grabExact && canvas_.grab == 'S') {
+                // the box stretches by how far it went along the axis, against its distance from the pivot
+                const double along = (io.MousePos.x - canvas_.grabCentre.x) * canvas_.grabDir.x + (io.MousePos.y - canvas_.grabCentre.y) * canvas_.grabDir.y;
+                const double from = (canvas_.grabStart.x - canvas_.grabCentre.x) * canvas_.grabDir.x + (canvas_.grabStart.y - canvas_.grabCentre.y) * canvas_.grabDir.y;
+                p["factor"] = std::abs(from) > 1 ? std::max(0.01, along / from) : 1.0;
+            }
+            // Ctrl snaps to the grid (and 5 degree / 0.1 steps); Alt snaps a move onto the nearest vertex
+            if (io.KeyCtrl) p["snap"] = std::string("grid");
+            else if (io.KeyAlt && canvas_.grab == 'G') {
+                p["snap"] = std::string("vertex");
+                p["mouse_x"] = static_cast<double>(io.MousePos.x - v0.x);
+                p["mouse_y"] = static_cast<double>(io.MousePos.y - v0.y);
+            }
             Result r = run("model.drag", p);
             canvas_.grabApplied = r.ok;
             if (!r.ok) {
@@ -176,6 +254,7 @@ void Shell::orbitCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
             canvas_.grab = 0;
             canvas_.grabEndClick = canvas_.grabByHandle || ImGui::IsMouseClicked(ImGuiMouseButton_Left);
             canvas_.grabByHandle = false;
+            canvas_.grabExact = false;
             resultFor_ = "Move";
             result_ = Result::success(canvas_.grabApplied ? "Done. Undo puts it back." : "Nothing moved.");
         }
@@ -185,7 +264,7 @@ void Shell::orbitCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bo
     // vertices/edges/faces in edit mode (ctrl adds to the selection)
     if (canvas_.grabEndClick && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         canvas_.grabEndClick = false;
-    } else if (!canvas_.grab && hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16 &&
+    } else if (!canvas_.grab && !brushing && brush3d_.tool.empty() && hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16 &&
         !io.KeyShift && size.x >= 8 && size.y >= 8) {
         auto doc = session_.workspace().get(currentDoc_);
         if (doc && doc->kind() == "model") {

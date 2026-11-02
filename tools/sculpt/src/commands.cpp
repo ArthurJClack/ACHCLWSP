@@ -1,5 +1,6 @@
 // sculpt.* commands.
 #include <algorithm>
+#include <optional>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -339,6 +340,58 @@ Result saveTo(MeshDoc& doc, const fs::path& path, const Params& p) {
 // ---- stroke points ----
 
 // World points from the "points" param: x,y,z triples, or u,v pairs on a preview when space=screen.
+// First hit of a ray on the mesh (Moller-Trumbore over every triangle).
+std::optional<Vec3> rayHit(const Mesh& m, const Vec3& o, const Vec3& dir) {
+    double best = 1e300;
+    for (std::size_t t = 0; t < m.triangleCount(); ++t) {
+        const Vec3 a = m.corner(t, 0), b = m.corner(t, 1), c = m.corner(t, 2);
+        const Vec3 e1 = b - a, e2 = c - a, pv = mesh::cross(dir, e2);
+        const double det = mesh::dot(e1, pv);
+        if (std::fabs(det) < 1e-18) continue;
+        const Vec3 tv = o - a;
+        const double u = mesh::dot(tv, pv) / det;
+        if (u < 0 || u > 1) continue;
+        const Vec3 qv = mesh::cross(tv, e1);
+        const double v = mesh::dot(dir, qv) / det, d = mesh::dot(e2, qv) / det;
+        if (v < 0 || u + v > 1 || d < 0 || d >= best) continue;
+        best = d;
+    }
+    if (best == 1e300) return std::nullopt;
+    return o + dir * best;
+}
+
+// space=ray: x,y,z,dx,dy,dz per point, as a window casts them from the mouse. Misses are dropped
+// (with their pressure); grab moves along the plane through where it picked up, facing the view.
+std::vector<Vec3> rayStroke(const Mesh& m, const NumberList& r, Brush brush, std::vector<double>& pressure, std::string& error) {
+    std::vector<Vec3> out;
+    std::vector<double> keptPressure;
+    if (r.empty() || r.size() % 6 != 0) {
+        error = "with space=ray, points takes x,y,z,dx,dy,dz per point";
+        return {};
+    }
+    std::optional<Vec3> anchor;
+    for (std::size_t i = 0; i + 5 < r.size(); i += 6) {
+        const Vec3 o{r[i], r[i + 1], r[i + 2]};
+        Vec3 d{r[i + 3], r[i + 4], r[i + 5]};
+        if (mesh::length(d) < 1e-18) continue;
+        d = mesh::normalize(d);
+        std::optional<Vec3> q;
+        if (brush == Brush::Grab && anchor) {
+            const double den = mesh::dot(d, d);
+            q = o + d * (mesh::dot(*anchor - o, d) / den);  // the point on the ray at the anchor's depth
+        } else {
+            q = rayHit(m, o, d);
+            if (brush == Brush::Grab && q) anchor = q;
+        }
+        if (!q) continue;
+        out.push_back(*q);
+        if (i / 6 < pressure.size()) keptPressure.push_back(pressure[i / 6]);
+    }
+    if (out.empty()) error = "the stroke doesn't touch the model";
+    if (!pressure.empty()) pressure = keptPressure;
+    return out;
+}
+
 std::vector<Vec3> strokePoints(const Mesh& m, const Params& p, Brush brush, std::string& error) {
     const NumberList pts = listParam(p, "points");
     const bool screen = stringParam(p, "space", "world") == "screen";
@@ -509,13 +562,14 @@ void registerBrushCommands(Session& session) {
              "protected. symmetry mirrors the stroke across the origin planes.",
              docPreview({{"brush", ParamType::String, "brush", false, brushNames(), std::string("draw")},
                           {"points", ParamType::NumberList, "x,y,z,x,y,z,... (or u,v,u,v,... with space=screen)", true},
-                          {"space", ParamType::String, "how points are given", false, {"world", "screen"}, std::string("world")},
+                          {"space", ParamType::String, "how points are given: world x,y,z; screen u,v; ray x,y,z,dx,dy,dz (cast onto the surface, as a window does from the mouse)", false, {"world", "screen", "ray"}, std::string("world")},
                           {"radius", ParamType::Number, "brush radius in model units (default: a tenth of the model's size)", false},
                           {"strength", ParamType::Number, "0..1; draw/inflate/crease move up to radius x strength x 0.15 per dab (default 0.5; grab 1)", false},
                           {"falloff", ParamType::String, "how the effect fades toward the edge", false, falloffNames(), std::string("smooth")},
                           {"spacing", ParamType::Number, "distance between dabs, as a fraction of the radius", false, {}, 0.25},
                           {"invert", ParamType::Bool, "dig in instead of raising (draw, inflate, crease; pinch pushes apart)", false, {}, false},
-                          {"symmetry", ParamType::String, "mirror the stroke: none, x, y, z, xy, xz, yz, xyz", false, {}, std::string("none")}}),
+                          {"symmetry", ParamType::String, "mirror the stroke: none, x, y, z, xy, xz, yz, xyz", false, {}, std::string("none")},
+                          {"pressures", ParamType::NumberList, "a pen's pressure per point, 0..1: scales the strength along the stroke", false}}),
              true},
             command(session, [](MeshDoc& doc, const Params& p) {
                 const auto brush = parseBrush(stringParam(p, "brush", "draw"));
@@ -534,13 +588,15 @@ void registerBrushCommands(Session& session) {
                 bs.strength = p.count("strength") ? numberParam(p, "strength") : (*brush == Brush::Grab ? 1.0 : 0.5);
                 bs.spacing = numberParam(p, "spacing", 0.25);
                 bs.invert = boolParam(p, "invert", false);
+                if (p.count("pressures")) bs.pressure = std::get<NumberList>(p.at("pressures"));
                 if (!(bs.radius > 0)) return failed("radius must be positive");
                 if (bs.strength < 0 || bs.strength > 1) return failed("strength runs from 0 to 1 (use invert=true to dig)");
                 if (!(bs.spacing >= 0.02)) return failed("spacing must be at least 0.02");
                 Params q = p;
                 q["radius"] = bs.radius;
                 std::string error;
-                const std::vector<Vec3> path = strokePoints(doc.mesh, q, *brush, error);
+                const std::vector<Vec3> path = stringParam(p, "space", "world") == "ray" ? rayStroke(doc.mesh, listParam(p, "points"), *brush, bs.pressure, error)
+                                                                                         : strokePoints(doc.mesh, q, *brush, error);
                 if (!error.empty()) return failed(error);
                 const StrokeStats st = stroke(doc.mesh, maskOf(doc), path, bs);
                 if (st.moved == 0) return failed("the stroke didn't move anything: it's off the model, fully masked, or too weak");

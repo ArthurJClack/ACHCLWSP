@@ -17,7 +17,7 @@ namespace wetwaresuite::model {
 
 const std::vector<std::string>& modifierTypes() {
     static const std::vector<std::string> types{"mirror", "array",  "subsurf", "solidify", "bevel",      "boolean",
-                                                "decimate", "smooth", "displace", "weld",   "triangulate"};
+                                                "decimate", "smooth", "displace", "weld",   "triangulate", "armature"};
     return types;
 }
 
@@ -62,6 +62,8 @@ Modifier makeModifier(const std::string& type) {
         m.text = {{"texture", ""}, {"direction", "normal"}};
     } else if (type == "weld") {
         m.num = {{"distance", 0.001}};
+    } else if (type == "armature") {
+        m.text = {{"object", ""}};
     }
     return m;
 }
@@ -352,6 +354,8 @@ PolyMesh applyModifier(const ModelDoc& doc, const Object& o, const PolyMesh& bas
         merge(m, MergeMode::Distance, std::max(mod.get("distance", 0.001), 0.0), {}, true);
     } else if (type == "triangulate") {
         triangulateFaces(m, false);
+    } else if (type == "armature") {
+        m = applyArmature(doc, o, m, mod);
     } else {
         throw std::runtime_error("unknown modifier type '" + type + "'");
     }

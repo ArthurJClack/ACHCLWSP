@@ -1,6 +1,8 @@
 #include "wetwaresuite/mesh/render.hpp"
 
 #include <algorithm>
+#include <array>
+#include <map>
 #include <cctype>
 #include <cmath>
 #include <limits>
@@ -23,6 +25,22 @@ std::optional<View> parseView(const std::string& in) {
     if (s == "right" || s == "side") return View::Right;
     if (s == "top") return View::Top;
     if (s == "bottom") return View::Bottom;
+    return std::nullopt;
+}
+
+const std::vector<std::string>& shadingNames() {
+    static const std::vector<std::string> v = {"material", "solid", "matcap", "wireframe", "xray"};
+    return v;
+}
+
+std::optional<Shading> parseShading(const std::string& in) {
+    std::string s;
+    for (char c : in) s += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (s == "material" || s.empty()) return Shading::Material;
+    if (s == "solid") return Shading::Solid;
+    if (s == "matcap" || s == "clay") return Shading::Matcap;
+    if (s == "wireframe" || s == "wire") return Shading::Wireframe;
+    if (s == "xray" || s == "x-ray") return Shading::XRay;
     return std::nullopt;
 }
 
@@ -147,8 +165,17 @@ raster::Image render(const Mesh& input, int width, int height, const RenderOptio
     const Vec3 key = normalize(toEye * 1.0 + cam.up * 0.75 - cam.right * 0.45);
     const Vec3 fill = normalize(toEye * 0.6 - cam.up * 0.3 + cam.right * 0.7);
     const Vec3 half = normalize(key + toEye);
+    const bool matcap = o.shading == Shading::Matcap;
     auto shade = [&](Vec3 n) {
         if (dot(n, toEye) < 0) n = -n;  // two-sided
+        if (matcap) {
+            // a clay ball lit from the top left in view space, with a soft rim: the same on every model
+            const double u = dot(n, cam.right), v = dot(n, cam.up), z = std::max(0.0, dot(n, toEye));
+            const double lightN = std::max(0.0, -0.45 * u + 0.6 * v + 0.66 * z);
+            const double rim = std::pow(1.0 - z, 3.0);
+            const double spec = std::pow(std::max(0.0, -0.3 * u + 0.45 * v + 0.84 * z), 60.0);
+            return Vec3{0.22 + 0.78 * lightN + 0.35 * rim, spec * 0.35, 0};
+        }
         const double diff = std::max(0.0, dot(n, key)), f = std::max(0.0, dot(n, fill));
         const double spec = std::pow(std::max(0.0, dot(n, half)), 40.0);
         return Vec3{0.34 + 0.58 * diff + 0.22 * f, spec * 0.22, 0};  // (diffuse factor, specular)
@@ -263,7 +290,41 @@ raster::Image render(const Mesh& input, int width, int height, const RenderOptio
         }
     }
 
-    const bool perFace = o.faceColors.size() == m.triangleCount();
+    // wireframe and x-ray: the mesh's edges (not the diagonals of flat quads), drawn over everything
+    const bool wire = o.shading == Shading::Wireframe || o.shading == Shading::XRay;
+    std::vector<std::uint8_t> wireHit(wire ? npx : 0, 0);
+    if (wire) {
+        std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::size_t>> edges;
+        // weld by position so split normals don't turn every edge into a boundary
+        std::map<std::array<double, 3>, std::uint32_t> weld;
+        std::vector<std::uint32_t> id(m.positions.size());
+        for (std::size_t i = 0; i < m.positions.size(); ++i)
+            id[i] = weld.try_emplace({m.positions[i].x, m.positions[i].y, m.positions[i].z}, static_cast<std::uint32_t>(weld.size())).first->second;
+        std::vector<std::uint32_t> rep(weld.size());
+        for (std::size_t i = 0; i < m.positions.size(); ++i) rep[id[i]] = static_cast<std::uint32_t>(i);
+        for (std::size_t t = 0; t < m.triangleCount(); ++t)
+            for (int k = 0; k < 3; ++k) {
+                std::uint32_t a = id[m.indices[t * 3 + static_cast<std::size_t>(k)]], b = id[m.indices[t * 3 + static_cast<std::size_t>((k + 1) % 3)]];
+                if (b < a) std::swap(a, b);
+                edges[{a, b}].push_back(t);
+            }
+        for (const auto& [e, tris] : edges) {
+            if (tris.size() == 2 && dot(faceN[tris[0]], faceN[tris[1]]) > 0.9999) continue;  // inside a flat polygon
+            const Vec3 &a = scr[rep[e.first]], &b = scr[rep[e.second]];
+            const double len = std::max(std::fabs(b.x - a.x), std::fabs(b.y - a.y));
+            const int steps = std::max(1, static_cast<int>(std::ceil(len)));
+            for (int k = 0; k <= steps; ++k) {
+                const double t = static_cast<double>(k) / steps;
+                const int x = static_cast<int>(a.x + (b.x - a.x) * t), y = static_cast<int>(a.y + (b.y - a.y) * t);
+                if (x < 0 || y < 0 || x >= W || y >= H) continue;
+                const std::size_t q = static_cast<std::size_t>(y) * static_cast<std::size_t>(W) + static_cast<std::size_t>(x);
+                const float d = static_cast<float>(a.z + (b.z - a.z) * t);
+                // wireframe: hidden edges fainter; x-ray: every edge the same
+                wireHit[q] = std::max<std::uint8_t>(wireHit[q], (o.shading == Shading::XRay || d <= depth[q] + (maxD - minD) * 0.002 + 1e-9) ? 2 : 1);
+            }
+        }
+    }
+    const bool perFace = o.faceColors.size() == m.triangleCount() && o.shading != Shading::Solid && o.shading != Shading::Matcap;
     const double ink = 0.25;
     const double ss2 = static_cast<double>(ss * ss);
     for (int y = 0; y < height; ++y) {
@@ -279,14 +340,30 @@ raster::Image render(const Mesh& input, int width, int height, const RenderOptio
                         pg = lc.g;
                         pb = lc.b;
                         pa = 1.0;
-                    } else if (faceId[k] < 0) {
+                    } else if (wire && wireHit[k]) {
+                        const double strength = wireHit[k] == 2 ? 1.0 : 0.35;
+                        const double base = faceId[k] >= 0 && o.shading == Shading::XRay ? 200 : o.background.r;
+                        pr = base + (40 - base) * strength;
+                        pg = base + (44 - base) * strength;
+                        pb = base + (56 - base) * strength;
+                        pa = 1.0;
+                    } else if (faceId[k] < 0 || o.shading == Shading::Wireframe) {
                         pa = o.background.a / 255.0;
                         pr = o.background.r * pa;
                         pg = o.background.g * pa;
                         pb = o.background.b * pa;
+                    } else if (o.shading == Shading::XRay) {
+                        // see-through: the surface tinted lightly over the background
+                        const raster::Color& fc = perFace ? o.faceColors[static_cast<std::size_t>(faceId[k])] : o.color;
+                        const double t = 0.3 * lit[k * 2];
+                        pr = o.background.r * (1 - t) + fc.r * t;
+                        pg = o.background.g * (1 - t) + fc.g * t;
+                        pb = o.background.b * (1 - t) + fc.b * t;
+                        pa = 1.0;
                     } else {
                         const double diff = lit[k * 2], spec = lit[k * 2 + 1] * 255.0;
-                        const raster::Color& fc = perFace ? o.faceColors[static_cast<std::size_t>(faceId[k])] : o.color;
+                        const raster::Color clay{196, 188, 178, 255};
+                        const raster::Color& fc = perFace ? o.faceColors[static_cast<std::size_t>(faceId[k])] : matcap ? clay : o.color;
                         const double br = fc.r, bg = fc.g, bb = fc.b;
                         pr = br * diff + spec;
                         pg = bg * diff + spec;

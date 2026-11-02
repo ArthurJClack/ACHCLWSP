@@ -22,6 +22,7 @@ Open a part in the cad app (`wetwaresuite-cad bracket.wwcad`, or double-click it
 - **Drag** to turn it. Left-right turns around the vertical axis, up-down tilts.
 - **Right-drag** or **middle-drag** (or **Shift+drag**) moves it. **Scroll** zooms.
 - **Iso**, **Front**, **Right**, **Top** jump to those angles. **Fit** or a **double-click** shows the whole thing.
+- In the model app the **shading** combo picks Material, Solid, Clay (matcap), Wireframe or X-ray (see-through, Alt+Z), like Blender's viewport shading. Commands take the same choice as `shading=` for their previews, and `app.view shading=` sets it from a script.
 - The bottom-left corner shows the yaw, pitch and zoom, so you can ask for the same picture with `app.view`.
 
 Edits keep the angle, so you can watch a fillet or a hole appear from the side you're working on.
@@ -71,7 +72,7 @@ Works on: cad parts, meshes (model app, asset forge), sculpts, scan fits and pri
 
 ## Limitations
 
-- **Orthographic only** (no perspective), and plain shading: it's for seeing shape, not for pretty pictures. Use the render tool for those.
+- **Orthographic only** (no perspective), and simple shading: it's for seeing shape, not for pretty pictures. Use the render tool for those.
 - **Big meshes are slower to turn.** Cad parts (a few thousand triangles) turn instantly. A 330,000-triangle mesh redraws about 15 times a second while you drag (about 60 ms a frame on a 4-core cloud machine), and a million-triangle scan a few times a second. Decimate it in forge or fit first if that bothers you.
 - No section views or measuring in the 3D view yet; use the `*.measure*` and section commands of each tool. Cad parts pick faces (`cad.pick`) and models pick objects and elements (`model.pick`); other 3D files only turn around.
 - Render scenes (the render tool) and level layouts keep their own previews and camera commands.

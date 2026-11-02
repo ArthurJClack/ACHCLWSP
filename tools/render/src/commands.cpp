@@ -148,6 +148,9 @@ std::vector<ParamSpec> materialParams() {
         {"opacity", ParamType::Number, "1 = solid .. 0 = invisible (cut-out transparency)", false},
         {"texture", ParamType::String, "image file multiplied into the colour; empty string removes it", false},
         {"texture_scale", ParamType::Number, "how many times the texture repeats across the UVs", false},
+        {"normal_map", ParamType::String, "tangent-space normal map image (green up, like Blender/glTF) for fine bumps; empty removes it", false},
+        {"normal_strength", ParamType::Number, "how strong the normal map is: 0 flat .. 1 as painted .. 4 (default 1)", false},
+        {"roughness_map", ParamType::String, "grey image multiplied into roughness (glTF maps: the green channel); empty removes it", false},
     };
 }
 
@@ -180,18 +183,20 @@ std::string applyMaterial(Material& m, const Params& p) {
     };
     if (!unit("roughness", m.roughness, 0, 1) || !unit("metallic", m.metallic, 0, 1) ||
         !unit("emission_strength", m.emissionStrength, 0, 1e6) || !unit("transmission", m.transmission, 0, 1) ||
-        !unit("ior", m.ior, 1, 3) || !unit("opacity", m.opacity, 0, 1) || !unit("texture_scale", m.textureScale, 1e-6, 1e6)) {
+        !unit("ior", m.ior, 1, 3) || !unit("opacity", m.opacity, 0, 1) || !unit("texture_scale", m.textureScale, 1e-6, 1e6) ||
+        !unit("normal_strength", m.normalStrength, 0, 4)) {
         return err;
     }
-    if (p.count("texture")) {
-        const std::string t = stringParam(p, "texture");
+    for (auto [key, field] : {std::pair<const char*, std::string*>{"texture", &m.texture}, {"normal_map", &m.normalMap}, {"roughness_map", &m.roughnessMap}}) {
+        if (!p.count(key)) continue;
+        const std::string t = stringParam(p, key);
         if (!t.empty()) {
             std::error_code ec;
-            if (!fs::exists(t, ec)) return "texture file not found: " + t;
-            if (!raster::canRead(t)) return "can't read ." + lowerExt(t) + " textures; use one of " + joinList(raster::readableExtensions());
-            m.texture = fs::absolute(t, ec).lexically_normal().string();
+            if (!fs::exists(t, ec)) return std::string(key) + " file not found: " + t;
+            if (!raster::canRead(t)) return "can't read ." + lowerExt(t) + " images; use one of " + joinList(raster::readableExtensions());
+            *field = fs::absolute(t, ec).lexically_normal().string();
         } else {
-            m.texture.clear();
+            field->clear();
         }
     }
     return {};
@@ -204,6 +209,8 @@ std::string describeMaterial(const Material& m) {
     if (m.opacity < 1) s += ", opacity " + num(m.opacity);
     if (m.emissionStrength > 0) s += ", glows " + hexColor(m.emission) + " x" + num(m.emissionStrength);
     if (!m.texture.empty()) s += ", texture " + fs::path(m.texture).filename().string();
+    if (!m.normalMap.empty()) s += ", normal map " + fs::path(m.normalMap).filename().string();
+    if (!m.roughnessMap.empty()) s += ", roughness map " + fs::path(m.roughnessMap).filename().string();
     return s;
 }
 
@@ -219,7 +226,12 @@ std::string describeObject(const Object& o) {
     if (o.rotation.x != 0 || o.rotation.y != 0 || o.rotation.z != 0) s += " rot " + vtext(o.rotation);
     if (o.scale.x != 1 || o.scale.y != 1 || o.scale.z != 1) s += " scale " + vtext(o.scale);
     if (!o.visible) s += " (hidden)";
-    s += "; " + describeMaterial(o.material);
+    if (o.parts.empty()) {
+        s += "; " + describeMaterial(o.material);
+    } else {
+        s += "; " + std::to_string(o.parts.size()) + " materials:";
+        for (std::size_t i = 0; i < o.parts.size(); ++i) s += (i ? ", " : " ") + std::to_string(i + 1) + " " + o.parts[i].name;
+    }
     return s;
 }
 
@@ -502,7 +514,9 @@ void registerSceneCommands(Session& session) {
                     } else if (p.count("path")) {
                         o.path = stringParam(p, "path");
                         if (!mesh::canRead(o.path)) return failed("can't read ." + lowerExt(o.path) + " models; use one of " + joinList(mesh::readableExtensions()));
-                        m = mesh::load(o.path);
+                        std::vector<int> partOf;
+                        m = loadMeshFile(o.path, o.parts, partOf);
+                        if (!o.parts.empty()) o.partOf = std::make_shared<const std::vector<int>>(std::move(partOf));
                         std::error_code ec;
                         o.path = fs::absolute(o.path, ec).lexically_normal().string();
                     } else {
@@ -614,9 +628,12 @@ void registerLookCommands(Session& session) {
     reg.add({"render.material",
              "Set material",
              "Change how an object looks: colour, roughness, metallic, glow, glass, transparency and an image "
-             "texture. Start from a preset (" + joinList(materialPresets()) + ") and adjust. name=* changes every "
-             "object.",
-             concat({docParam(), nameParam("object to change, or * for all")}, concat(materialParams(), {previewParam()})),
+             "texture, plus normal and roughness maps. Start from a preset (" + joinList(materialPresets()) + ") and "
+             "adjust. name=* changes every object. Models loaded from an OBJ with several materials keep each one as a "
+             "part: part= changes just that one (by name or number from render.info), otherwise every part changes.",
+             concat({docParam(), nameParam("object to change, or * for all"),
+                     {"part", ParamType::String, "only this material of a multi-material model (name or 1-based number)", false}},
+                    concat(materialParams(), {previewParam()})),
              true},
             sceneCommand(session, [](SceneDoc& doc, const Params& p) {
                 const std::string name = stringParam(p, "name");
@@ -625,8 +642,33 @@ void registerLookCommands(Session& session) {
                     if (name == "*" || o.name == name) targets.push_back(&o);
                 }
                 if (targets.empty()) return failed("no object called '" + name + "'");
+                const std::string part = stringParam(p, "part", "");
+                if (!part.empty()) {
+                    if (targets.size() != 1 || targets[0]->parts.empty()) return failed("part= needs one object with several materials");
+                    auto& parts = targets[0]->parts;
+                    Material* m = nullptr;
+                    for (auto& pm : parts) {
+                        if (pm.name == part) m = &pm;
+                    }
+                    if (!m && !part.empty() && std::all_of(part.begin(), part.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+                        const std::size_t i = static_cast<std::size_t>(std::stoul(part));
+                        if (i >= 1 && i <= parts.size()) m = &parts[i - 1];
+                    }
+                    if (!m) {
+                        std::vector<std::string> names;
+                        for (const auto& pm : parts) names.push_back(pm.name);
+                        return failed("no part '" + part + "': " + joinList(names));
+                    }
+                    const std::string err = applyMaterial(*m, p);
+                    if (!err.empty()) return failed(err);
+                    Result r = sceneResult(targets[0]->name + " / " + m->name + ": " + describeMaterial(*m), doc, p);
+                    return r.with("color", hexColor(m->color)).with("roughness", m->roughness).with("metallic", m->metallic);
+                }
                 for (Object* o : targets) {
-                    const std::string err = applyMaterial(o->material, p);
+                    std::string err = applyMaterial(o->material, p);
+                    for (auto& pm : o->parts) {
+                        if (err.empty()) err = applyMaterial(pm, p);
+                    }
                     if (!err.empty()) return failed(err);
                 }
                 Result r = sceneResult(name == "*" ? "set the material of " + std::to_string(targets.size()) + " objects"
@@ -719,11 +761,14 @@ void registerLookCommands(Session& session) {
 
     reg.add({"render.sky",
              "Sky",
-             "Set the environment: a gradient sky (zenith, horizon and ground colours), one flat colour, or none "
-             "(black, only your lights). The sky lights the scene; visible=false shows `background` behind the "
+             "Set the environment: a gradient sky (zenith, horizon and ground colours), one flat colour, none "
+             "(black, only your lights), or an HDRI: hdri= a 2:1 panorama photo that lights the scene and shows "
+             "behind it (rotation turns it). The sky lights the scene; visible=false shows `background` behind the "
              "objects instead, and transparent=true gives a PNG with a see-through background.",
              {docParam(),
-              {"type", ParamType::String, "kind of sky", false, {"gradient", "color", "none"}},
+              {"type", ParamType::String, "kind of sky", false, {"gradient", "color", "none", "hdri"}},
+              {"hdri", ParamType::String, "equirectangular panorama image for type hdri (implies it)", false},
+              {"rotation", ParamType::Number, "degrees to turn the hdri about the up axis", false},
               {"color", ParamType::String, "one colour for type color (sets zenith and horizon)", false},
               {"zenith", ParamType::String, "colour straight up", false},
               {"horizon", ParamType::String, "colour at the horizon", false},
@@ -739,6 +784,17 @@ void registerLookCommands(Session& session) {
                 std::string err;
                 Vec3 v;
                 if (p.count("type")) k.type = stringParam(p, "type");
+                if (p.count("hdri")) {
+                    const std::string f = stringParam(p, "hdri");
+                    std::error_code ec;
+                    if (!fs::exists(f, ec)) return failed("hdri file not found: " + f);
+                    if (!raster::canRead(f)) return failed("can't read ." + lowerExt(f) + " images; use one of " + joinList(raster::readableExtensions()));
+                    k.hdri = fs::absolute(f, ec).lexically_normal().string();
+                    if (!p.count("type")) k.type = "hdri";
+                    if (!p.count("visible") && !p.count("background")) k.visible = true;
+                }
+                if (p.count("rotation")) k.rotation = numberParam(p, "rotation");
+                if (k.type == "hdri" && k.hdri.empty()) return failed("type hdri needs hdri= (a panorama image)");
                 if (colorArg(p, "color", v, err)) {
                     k.zenith = k.horizon = v;
                     if (!p.count("type")) k.type = "color";
@@ -760,6 +816,7 @@ void registerLookCommands(Session& session) {
                 std::string msg = "sky: " + k.type;
                 if (k.type == "gradient") msg += " " + hexColor(k.zenith) + " to " + hexColor(k.horizon);
                 if (k.type == "color") msg += " " + hexColor(k.zenith);
+                if (k.type == "hdri") msg += " " + fs::path(k.hdri).filename().string() + (k.rotation != 0 ? " turned " + num(k.rotation) + " deg" : "");
                 msg += ", strength " + num(k.strength);
                 if (!k.visible) msg += ", background " + hexColor(k.background);
                 if (k.transparent) msg += ", transparent";

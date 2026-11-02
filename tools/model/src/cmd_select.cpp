@@ -2,7 +2,9 @@
 // select_linked, and model.pick (click in the viewport).
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <optional>
 
 #include "cmd.hpp"
 #include "wetwaresuite/model/ops.hpp"
@@ -257,11 +259,20 @@ void registerSelectCommands(Session& session) {
              "Move (G), rotate (R) or scale (S) what's selected by a mouse drag of dx,dy pixels in a view (the same "
              "view params as model.pick): the selected objects in object mode, the selected vertices in edit mode. "
              "axis=x, y or z locks it to that axis; moving follows the mouse exactly, rotating turns half a degree "
-             "per pixel (about the axis, or the vertical), scaling doubles every 100 px to the right.",
+             "per pixel (about the axis, or the vertical), scaling doubles every 100 px to the right. angle= or factor= "
+             "give the turn or the scale exactly (rotate rings, scale boxes); snap=grid or vertex snaps it, like holding Ctrl in Blender.",
              withDoc(join({{"dx", ParamType::Number, "pixels right", false, {}, 0.0},
                            {"dy", ParamType::Number, "pixels down", false, {}, 0.0},
                            {"mode", ParamType::String, "what the drag does", false, {"move", "rotate", "scale"}, std::string("move")},
-                           {"axis", ParamType::String, "lock to one axis", false, {"x", "y", "z"}}},
+                           {"axis", ParamType::String, "lock to one axis", false, {"x", "y", "z"}},
+                           {"angle", ParamType::Number, "rotate: degrees to turn (instead of dx), e.g. from a rotate ring", false},
+                           {"factor", ParamType::Number, "scale: how much bigger (instead of dx), e.g. from a scale box", false},
+                           {"snap", ParamType::String, "grid: move in steps of `step`, rotate in 5 degree steps, scale in 0.1 steps; vertex: the "
+                            "selection's centre jumps to the nearest vertex of another object (or unselected vertex) under the mouse",
+                            false, {"none", "grid", "vertex"}, std::string("none")},
+                           {"step", ParamType::Number, "snap=grid: the move step", false, {}, 0.1},
+                           {"mouse_x", ParamType::Number, "snap=vertex: the mouse, px from the view's left (default: where the drag started + dx)", false},
+                           {"mouse_y", ParamType::Number, "snap=vertex: px from the top", false}},
                           screenParams())),
              true},
             edit(session, [](ModelDoc& d, const Params& p) {
@@ -283,12 +294,42 @@ void registerSelectCommands(Session& session) {
                 } else {
                     move = (proj.right * dx - proj.up * dy) / proj.scale;
                 }
-                const double angle = dx * 0.5;
+                const std::string snap = stringParam(p, "snap", "none");
+                double angle = has(p, "angle") ? numberParam(p, "angle") : dx * 0.5;
                 const Vec3 turnAxis = axis.value_or(Vec3{0, 0, 1});
-                const double factor = std::pow(2.0, dx / 100.0);
+                double factor = has(p, "factor") ? numberParam(p, "factor") : std::pow(2.0, dx / 100.0);
+                if (!(factor > 1e-6)) factor = 1e-6;
+                if (snap == "grid") {
+                    const double step = std::max(1e-9, numberParam(p, "step", 0.1));
+                    move = {std::round(move.x / step) * step, std::round(move.y / step) * step, std::round(move.z / step) * step};
+                    angle = std::round(angle / 5) * 5;
+                    factor = std::max(0.1, std::round(factor * 10) / 10);
+                }
                 Vec3 grow{factor, factor, factor};
                 if (axis) grow = {axisName == "x" ? factor : 1, axisName == "y" ? factor : 1, axisName == "z" ? factor : 1};
                 Object* a = d.activeObject();
+                // snap=vertex: the nearest vertex on screen to the mouse that isn't being moved
+                auto snapTarget = [&](const std::function<bool(int object, std::size_t vert)>& moving) -> std::optional<Vec3> {
+                    if (snap != "vertex" || mode != "move") return std::nullopt;
+                    const ViewBuffer vb = viewBuffer(d, screenView(p), W, H, false);
+                    const double mx = has(p, "mouse_x") ? numberParam(p, "mouse_x") : dx, my = has(p, "mouse_y") ? numberParam(p, "mouse_y") : dy;
+                    std::optional<Vec3> best;
+                    double bd = 20 * 20;  // within 20 px
+                    for (std::size_t oi = 0; oi < d.scene.objects.size(); ++oi) {
+                        const Object& o = d.scene.objects[oi];
+                        const PolyMesh* pm = d.meshOf(o);
+                        if (!pm || !d.shown(o)) continue;
+                        const Mat4 w = d.world(o);
+                        for (std::size_t v = 0; v < pm->verts.size(); ++v) {
+                            if (moving(static_cast<int>(oi), v)) continue;
+                            const Vec3 q = w.point(pm->verts[v].p);
+                            const Vec2 sc = proj.toScreen(q);
+                            const double dd = (sc.x - mx) * (sc.x - mx) + (sc.y - my) * (sc.y - my);
+                            if (dd < bd && vb.visible(q)) bd = dd, best = q;
+                        }
+                    }
+                    return best;
+                };
                 if (d.scene.editMode && a && d.meshOf(*a)) {
                     PolyMesh& m = d.editMesh(*a);
                     const auto sel = selectedVerts(m);
@@ -297,6 +338,8 @@ void registerSelectCommands(Session& session) {
                     Vec3 pivot{0, 0, 0};
                     for (auto v : sel) pivot = pivot + w.point(m.verts[v].p);
                     pivot = pivot / static_cast<double>(sel.size());
+                    const int ai = static_cast<int>(a - d.scene.objects.data());
+                    if (auto target = snapTarget([&](int o, std::size_t v) { return o == ai && m.verts[v].sel; })) move = *target - pivot;
                     Mat4 t = Mat4::translate(move);
                     if (mode == "rotate") t = Mat4::translate(pivot) * Mat4::rotateAxis(turnAxis, angle) * Mat4::translate(-pivot);
                     if (mode == "scale") t = Mat4::translate(pivot) * Mat4::scale(grow) * Mat4::translate(-pivot);
@@ -307,6 +350,12 @@ void registerSelectCommands(Session& session) {
                 for (auto& o : d.scene.objects)
                     if (o.selected) objs.push_back(&o);
                 if (objs.empty()) return Result::failure("nothing selected: click an object first");
+                if (mode == "move") {
+                    Vec3 pivot{0, 0, 0};
+                    for (Object* o : objs) pivot = pivot + d.world(*o).point({0, 0, 0});
+                    pivot = pivot / static_cast<double>(objs.size());
+                    if (auto target = snapTarget([&](int o, std::size_t) { return d.scene.objects[static_cast<std::size_t>(o)].selected; })) move = *target - pivot;
+                }
                 for (Object* o : objs) {
                     if (mode == "move") {
                         setWorld(d, *o, Mat4::translate(move) * d.world(*o));

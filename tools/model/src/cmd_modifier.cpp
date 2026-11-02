@@ -1,11 +1,14 @@
 // The modifier stack (model.modifier_*), UVs and materials.
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 
 #include "cmd.hpp"
 #include "wetwaresuite/raster/codec.hpp"
 
 namespace wetwaresuite::model::cmd {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -315,6 +318,9 @@ void registerMaterialCommands(Session& session) {
                       {"alpha", ParamType::Number, "opacity", false},
                       {"texture", ParamType::String, "image file for the colour", false},
                       {"texture_scale", ParamType::Number, "texture repeats", false},
+                      {"normal_map", ParamType::String, "normal map image (green up) for fine bumps in renders", false},
+                      {"normal_strength", ParamType::Number, "normal map strength 0..4 (default 1)", false},
+                      {"roughness_map", ParamType::String, "grey image multiplied into roughness in renders", false},
                       {"assign", ParamType::Bool, "put it on the object", false, {}, true}}),
              true},
             edit(session, [](ModelDoc& d, const Params& p) {
@@ -351,6 +357,9 @@ void registerMaterialCommands(Session& session) {
                 mat->alpha = std::clamp(numberParam(p, "alpha", mat->alpha), 0.0, 1.0);
                 if (has(p, "texture")) mat->texture = stringParam(p, "texture");
                 mat->textureScale = numberParam(p, "texture_scale", mat->textureScale);
+                if (has(p, "normal_map")) mat->normalMap = stringParam(p, "normal_map");
+                mat->normalStrength = std::clamp(numberParam(p, "normal_strength", mat->normalStrength), 0.0, 4.0);
+                if (has(p, "roughness_map")) mat->roughnessMap = stringParam(p, "roughness_map");
                 const Material copy = *mat;
                 std::string where;
                 if (boolParam(p, "assign", true) && (has(p, "object") || !d.scene.active.empty())) {
@@ -410,6 +419,46 @@ void registerMaterialCommands(Session& session) {
                         ++n;
                     }
                 return done("assigned " + name + " to " + std::to_string(n) + " faces of " + o.name, d, p);
+            }));
+
+    reg.add({"model.world",
+             "World",
+             "Set what lights renders from all around (Blender's World): a gradient sky, one colour, none, or an HDRI "
+             "panorama photo (hdri= a 2:1 equirectangular image; rotation turns it). strength scales the light; "
+             "visible=true shows it behind the objects in renders.",
+             withDoc({{"type", ParamType::String, "kind of world (hdri= implies hdri)", false, {"gradient", "color", "hdri", "none"}},
+                      {"hdri", ParamType::String, "panorama image file", false},
+                      {"rotation", ParamType::Number, "degrees to turn the hdri", false},
+                      {"color", ParamType::String, "sky colour (gradient: straight up; color: everywhere)", false},
+                      {"strength", ParamType::Number, "how much light it gives (default 0.5)", false},
+                      {"visible", ParamType::Bool, "show it behind objects in renders", false}}),
+             true},
+            edit(session, [](ModelDoc& d, const Params& p) {
+                Scene& s = d.scene;
+                if (has(p, "hdri")) {
+                    const std::string f = stringParam(p, "hdri");
+                    std::error_code ec;
+                    if (!f.empty() && !fs::exists(f, ec)) return Result::failure("hdri file not found: " + f);
+                    s.hdri = f.empty() ? std::string() : fs::absolute(f, ec).lexically_normal().string();
+                    if (!has(p, "type")) s.worldType = f.empty() ? "gradient" : "hdri";
+                    if (!has(p, "visible") && !f.empty()) s.worldVisible = true;
+                }
+                if (has(p, "type")) s.worldType = stringParam(p, "type");
+                if (s.worldType == "hdri" && s.hdri.empty()) return Result::failure("type hdri needs hdri= (a panorama image)");
+                if (has(p, "rotation")) s.hdriRotation = numberParam(p, "rotation");
+                if (has(p, "color")) {
+                    s.worldColor = color(p, "color", s.worldColor);
+                    if (!has(p, "type") && s.worldType == "hdri") s.worldType = "color";
+                }
+                if (has(p, "strength")) {
+                    if (numberParam(p, "strength") < 0) return Result::failure("strength can't be negative");
+                    s.worldStrength = numberParam(p, "strength");
+                }
+                if (has(p, "visible")) s.worldVisible = boolParam(p, "visible");
+                std::string msg = "world: " + s.worldType;
+                if (s.worldType == "hdri") msg += " " + fs::path(s.hdri).filename().string();
+                msg += ", strength " + num(s.worldStrength);
+                return done(msg, d, p);
             }));
 }
 

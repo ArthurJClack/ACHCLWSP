@@ -1,6 +1,6 @@
 # Model: polygon modeling like Blender
 
-`model` builds 3D models out of boxes, loops and faces, the way Blender does. A model is a **scene** of objects (meshes, lights, cameras and empties) that you place, parent and group into collections. Each mesh is made of quads and n-gons (not just triangles), and you change it in **edit mode** by selecting vertices, edges or faces and running operators: extrude, inset, bevel, loop cut, knife, bisect, subdivide, merge, dissolve, delete, bridge, fill, spin, mirror, symmetrize and more. On top of the mesh sits a **modifier stack**: mirror, array, subdivision surface, solidify, bevel, boolean, decimate, smooth, displace, weld and triangulate, which you can tweak, reorder, apply or remove at any time. Models get UVs (smart, cube, cylinder and sphere projection, seams), materials per face with image textures, vertex colours, and keyframed animation. They render with the [render](render.md) path tracer and export to OBJ, glTF/GLB, FBX and STL.
+`model` builds 3D models out of boxes, loops and faces, the way Blender does. A model is a **scene** of objects (meshes, lights, cameras and empties) that you place, parent and group into collections. Each mesh is made of quads and n-gons (not just triangles), and you change it in **edit mode** by selecting vertices, edges or faces and running operators: extrude, inset, bevel, loop cut, knife, bisect, subdivide, merge, dissolve, delete, bridge, fill, spin, mirror, symmetrize and more. On top of the mesh sits a **modifier stack**: mirror, array, subdivision surface, solidify, bevel, boolean, decimate, smooth, displace, weld and triangulate, which you can tweak, reorder, apply or remove at any time. Models get UVs (smart, cube, cylinder and sphere projection, seams), materials per face with image textures and normal/roughness maps, vertex colours, keyframed animation with a dope sheet, and **armatures**: bones you pose, skinning with automatic weights, weight painting, and skinned glTF export for game engines. They render with the [render](render.md) path tracer (with an HDRI world if you like) and export to OBJ, glTF/GLB, FBX and STL.
 
 It is in the **model** app (`wetwaresuite-model`) together with [sculpt](sculpt.md), [render](render.md) and [animate](animate.md), and in the all-in-one `wetwaresuite`.
 
@@ -54,17 +54,18 @@ usage: model.bevel [doc=<string>] [object=<string>] [width=<number>] [segments=<
   ...
 ```
 
-There are 67 commands:
+There are 82 commands:
 
 | What | Commands |
 | --- | --- |
 | Files | `new`, `open`, `import`, `save`, `export`, `close`, `info`, `elements` |
-| Objects | `add`, `object_set`, `select_object`, `duplicate_object`, `delete_object`, `parent`, `join`, `separate`, `origin`, `apply_transform`, `collection`, `shade`, `cursor`, `mode` |
+| Objects | `add`, `object_set`, `select_object`, `duplicate_object`, `delete_object`, `parent`, `join`, `separate`, `origin`, `apply_transform`, `collection`, `shade`, `cursor`, `mode`, `drag`, `pivot` |
 | Selecting | `select`, `select_loop`, `select_grow`, `select_linked`, `pick`, `mark` (seams, sharp edges) |
 | Editing | `transform`, `extrude`, `inset`, `bevel`, `loop_cut`, `bisect`, `knife`, `subdivide`, `merge`, `dissolve`, `delete`, `bridge`, `fill`, `spin`, `mirror`, `symmetrize`, `duplicate`, `normals`, `triangulate`, `tris_to_quads`, `smooth_vertices`, `shrink_fatten`, `vertex_color` |
 | Modifiers | `modifier_add`, `modifier_set`, `modifier_move`, `modifier_remove`, `modifier_apply` |
 | UVs and materials | `uv_unwrap`, `uv_pack`, `uv_export`, `material`, `material_assign` |
-| Render and animation | `render`, `to_render`, `keyframe`, `frame`, `render_animation` |
+| Rigging | `armature_add`, `bone_add`, `bone_set`, `bone_delete`, `pose`, `skin`, `weight_paint`, `weight_show`, `rig_info` |
+| Render and animation | `render`, `to_render`, `world`, `keyframe`, `keys`, `key_move`, `key_delete`, `frame`, `scrub`, `render_animation` |
 
 A one-shot conversion is one batch line per step:
 
@@ -352,10 +353,70 @@ rendered 3 frames to out/frames/bounce.png
 
 - `keyframe` keys whatever you pass (`location=`, `rotation=`, `scale=` set the values first; `channels=location.z` keys just one) and eases between keys, or `interp=linear|constant`. `delete=true` removes the keys at a frame. `model.frame frame=7` moves the scene to that frame, so `info`, `render` and exports show the object where it is then.
 - `render_animation` writes a GIF, or numbered PNGs (`bounce_0001.png` ...) for any other name. With `camera=view` (or no camera object) the camera is fitted once over all frames, so the cube moves inside a still shot. Use [cut](cut.md) to turn PNG frames into an MP4.
+- Retiming is the dope sheet's job: `model.keys` lists which frames hold keys (a row per object and per channel group), `model.key_move object=Cube frame=13 to=10` slides the keys at frame 13 to frame 10 (`row=location` for just one group, `copy=true` to duplicate), and `model.key_delete object=Cube frame=25` removes them. `model.scrub frame=7` shows a frame without making an undo step, which is what playback and dragging the playhead use. In the window all of this is the dope sheet under the 3D view (see below).
+
+## Task 6: rig and pose a bendy column
+
+Bones bend a mesh: an armature object holds bones, `model.skin` binds a mesh to it with automatic weights (Blender's Ctrl+P, With Automatic Weights), and posing a bone bends the mesh around it. Poses key like anything else, and a GLB export carries the skeleton, the weights and the animation into Godot, Unity or Unreal.
+
+**Batch.**
+
+```text
+# rig.txt: a bendy column with two bones, posed, keyed and exported for a game engine
+model.new -> m
+model.object_set doc=$m object=Cube location=0,0,2 scale=0.5,0.5,2
+model.apply_transform doc=$m object=Cube
+model.mode doc=$m mode=edit
+model.loop_cut doc=$m cuts=7 edge=0,4
+model.mode doc=$m mode=object
+model.armature_add doc=$m location=0,0,0 bone=Lower length=2
+model.bone_add doc=$m from=Lower name=Upper
+model.skin doc=$m object=Cube armature=Armature
+model.weight_paint doc=$m object=Cube bone=Upper at=0.5,0.5,2.2 radius=0.6 strength=0.6
+model.weight_show doc=$m bone=
+model.pose doc=$m bone=Upper rotation=0,0,0 key=true frame=1
+model.pose doc=$m bone=Upper rotation=50,0,0 key=true frame=24
+model.keys doc=$m
+model.key_move doc=$m object=Armature frame=24 to=30
+model.render doc=$m path=out/bend.png frame=30 width=320 height=240 camera=view yaw=90 pitch=10 ground=true mode=preview
+model.export doc=$m path=out/column.glb
+```
+
+```text
+...
+loop cut: 28 new edges
+object mode
+added armature Armature
+added 1 bone to Armature
+skinned Cube to Armature (2 bones)
+painted Upper on 2 vertices
+showing materials
+posed Upper, keyed at frame 1
+posed Upper, keyed at frame 24
+Armature: frames 1,24
+  pose.Upper.location: 1,24
+  pose.Upper.rotation: 1,24
+moved 6 keys of Armature from frame 24 to 30
+rendered 320x240, 70 triangles in 0.02894 s
+wrote out/column.glb: 1 skinned and 0 plain meshes, 2 bones, 1 animations
+```
+
+- **Bones.** `armature_add` makes an armature with one bone standing up from `location` (`length=`). `bone_add` adds more: `from=Lower` starts at that bone's tail as its child, `head=`/`tail=` place it exactly (in the armature's space), `chain=x,y,z,...` adds several end to end (a spine or a tail in one go). `bone_set` renames, re-parents, moves or rolls one; `bone_delete` removes it. Like Blender, a bone's Y axis runs from head to tail.
+- **Skinning.** `skin` puts an `armature` modifier first on the mesh's stack and gives every vertex weights from its distance to the bones (up to four bones each). `weights=empty` starts blank for painting by hand, `weights=keep` reuses weights you already painted. `rig_info` lists bones, parents, poses and how many vertices each bone moves.
+- **Weight paint.** `weight_paint bone=Upper at=x,y,z` paints that bone's influence around a point (several `x,y,z` triples make a stroke, or `ray=` from a view). `mode=add|subtract|replace|smooth`, `radius`, `strength`, `weight`. The viewport shows that bone's weights in blue (0) to red (1) until `weight_show bone=` (empty) goes back to materials.
+- **Posing.** `pose bone=Upper rotation=50,0,0` turns a bone about its own X, Y, Z (Y twists it); children follow and skinned meshes bend. `location=` moves it, `relative=true` adds to the current pose, `reset=true` puts every bone back. `key=true frame=24` keys the bone; pose keys are dope sheet rows (`pose.Upper.rotation`) you can move like any others.
+- **Export.** `export path=x.glb` (or `.gltf`) writes skinned meshes with their skeleton, inverse bind matrices, weights and the pose keys as an animation (sampled every frame). Meshes without a skin export as before. OBJ, STL and FBX get the mesh as posed now.
 
 ## Rendering
 
-`model.render path=out.png` renders with the path tracer: `width`, `height`, `samples`, `ground=true`, `denoise=`, `frame=`, or `mode=preview` for a fast rasterized picture. It looks through the scene's `Camera` object unless you pass `camera=view` (with `yaw`/`pitch`/`zoom`), and uses the scene's lights, or a sun when there are none. `model.to_render` copies the scene into a [render](render.md) document for staging with more lights and materials. `model.export path=view.png` is the fast viewport picture instead (no lighting, edit overlay included).
+`model.render path=out.png` renders with the path tracer: `width`, `height`, `samples`, `ground=true`, `denoise=`, `frame=`, or `mode=preview` for a fast rasterized picture. It looks through the scene's `Camera` object unless you pass `camera=view` (with `yaw`/`pitch`/`zoom`), and uses the scene's lights, or a sun when there are none. Every material slot renders with its own material, including `normal_map`, `normal_strength` and `roughness_map` (set with `model.material`, read from and written to OBJ `.mtl` files as `norm` and `map_Pr`).
+
+`model.world` is Blender's World: what lights the render from all around. `model.world hdri=studio.jpg` uses a 2:1 panorama photo (it shows behind the model, `visible=false` hides it again; `rotation=` turns it), `type=color color=#202020` a flat colour, `type=gradient` the default sky, `type=none` only your lights; `strength=` scales it. The world is saved in `.wwmodel` files.
+
+```text
+model.world doc=$m hdri=sky.png rotation=30 strength=1
+model.material doc=$m name=Material normal_map=bumps.png roughness_map=scuffs.png
+``` `model.to_render` copies the scene into a [render](render.md) document for staging with more lights and materials. `model.export path=view.png` is the fast viewport picture instead (no lighting, edit overlay included).
 
 ## Sending a model to other apps
 
@@ -369,7 +430,12 @@ Open the model app (or a `.wwmodel`, `.obj` or `.fbx` file) and the model shows 
 2. **Click to select**: in object mode a click selects the object under the mouse; in edit mode it selects the vertex, edge or face under it, depending on the select mode. Hold **Ctrl** to toggle what you click in or out of the selection. Clicking empty space clears it.
 3. **Move it**: whatever is selected gets red, green and blue arrows. Drag one to slide the selection along X, Y or Z, or press **G** (move), **R** (rotate) or **S** (scale) and move the mouse; X, Y or Z then locks an axis, a click keeps it and Esc puts it back. Both run `model.drag`; `model.pivot` says where the arrows go.
 4. **Run an operator**: press **Ctrl+K** and type what you want: "extrude", "loop cut", "bevel", "add modifier", "edit mode". The form shows the same parameters as `help model.extrude`, and the model shows the result live while you change them (untick **Live preview** to stop); the button keeps it. Selected faces show in orange.
-5. **Undo** with Ctrl+Z as usual: every operator is one step.
+5. **Rotate and scale by hand**: around the arrows sit three rotate rings and three small scale boxes. Drag a ring to turn about that axis, a box to scale along it (S scales evenly). Hold **Ctrl** while dragging (arrows, rings, boxes or G/R/S) to snap to the grid (0.1 steps, 5 degrees, 0.1 scale steps), or **Alt** to snap to the nearest vertex under the mouse.
+6. **Box select**: press **B** and drag a rectangle; Shift adds to the selection. In X-ray or wireframe shading it selects through the model too.
+7. **Shading**: the combo on the view's toolbar switches between Material, Solid, Clay (matcap), Wireframe and X-ray; **Alt+Z** toggles X-ray, as in Blender.
+8. **Sculpt and paint weights in the view**: pick a sculpt brush on the toolbar (Draw, Inflate, Smooth, Flatten, Pinch, Grab, Crease) and paint on a mesh; a circle shows the brush, `[` and `]` resize it and pen pressure scales the strength. On a skinned model tick **Weights**, pick a bone and paint its influence (add, subtract, replace, smooth) while the model shows blue-to-red weights. Each stroke previews live and is one undo step; Alt+drag still turns the view.
+9. **Animate in the dope sheet**: under the 3D view sits a strip with a frame ruler and a row of diamonds per keyed object and channel group. Drag the playhead (or click a lane) to scrub, **Play** (Alt+A) loops the frame range, **Key** (I) keys the selected objects at the playhead, drag a diamond to retime those keys (Alt+drag copies), and Delete or X removes the picked one. The arrow at its left folds it away.
+10. **Undo** with Ctrl+Z as usual: every operator is one step.
 
 ## Claude
 
@@ -382,5 +448,7 @@ Connect `wetwaresuite-model mcp` (see [mcp.md](mcp.md)). Claude calls `model_new
 > In the open model, select the top face of the cube, inset it by 0.1, extrude it up by 0.5 and show me a preview.
 
 > Unwrap the wall with smart UVs, export the layout as wall_uv.png so I can paint it, then use it as the texture.
+
+> Rig the open character with a spine of three bones and two arms, skin it, make a 24-frame wave animation and export it as hero.glb for Godot.
 
 Claude finds faces by direction (`model_select type=normal`), by screen position on a preview (`type=rect`, `model_pick`), or by number from `model_elements`.

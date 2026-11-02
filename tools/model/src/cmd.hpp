@@ -74,5 +74,6 @@ void registerEditCommands2(Session& s);
 void registerModifierCommands(Session& s);
 void registerMaterialCommands(Session& s);
 void registerRenderCommands(Session& s);
+void registerRigCommands(Session& s);
 
 }  // namespace wetwaresuite::model::cmd

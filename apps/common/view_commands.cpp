@@ -43,7 +43,7 @@ void registerViewCommands(Session& session) {
          "Look around in 3D",
          "Draw a 3D document (cad part, mesh, sculpt, scan fit, print) from any angle: yaw turns around the "
          "vertical axis, pitch tilts up or down (degrees), zoom and pan move in. view= starts from a fixed angle "
-         "(iso, front, top...) and yaw/pitch are added to it. Attaches a PNG; output= also saves it.",
+         "(iso, front, top...) and yaw/pitch are added to it. shading= draws it like Blender's viewport modes. Attaches a PNG; output= also saves it.",
          {{"doc", ParamType::String, "an open 3D document, e.g. mesh1 or cad1", true},
           {"view", ParamType::String, "start from this angle", false, views, std::string("iso")},
           {"yaw", ParamType::Number, "degrees to turn around the vertical axis (positive = the model turns left)", false, {}, 0.0},
@@ -53,6 +53,8 @@ void registerViewCommands(Session& session) {
           {"pan_y", ParamType::Number, "shift up, in model radii", false, {}, 0.0},
           {"width", ParamType::Int, "image width in px", false, {}, std::int64_t{800}},
           {"height", ParamType::Int, "image height in px", false, {}, std::int64_t{600}},
+          {"shading", ParamType::String, "how surfaces are drawn: material, solid, matcap (clay), wireframe or xray (see-through)", false,
+           {"material", "solid", "matcap", "wireframe", "xray"}, std::string("material")},
           {"output", ParamType::String, "also save the PNG here", false}},
          false, true},
         [s](const Params& p) {
@@ -68,6 +70,7 @@ void registerViewCommands(Session& session) {
                 if (!(v.zoom > 0.01 && v.zoom < 1000)) return Result::failure("zoom must be between 0.01 and 1000");
                 v.panX = numberParam(p, "pan_x", 0.0);
                 v.panY = numberParam(p, "pan_y", 0.0);
+                v.shading = stringParam(p, "shading", "material");
                 const auto w = intParam(p, "width", 800), h = intParam(p, "height", 600);
                 if (w < 16 || h < 16 || w > 4096 || h > 4096) return Result::failure("width and height must be 16..4096");
                 std::vector<std::uint8_t> rgba;

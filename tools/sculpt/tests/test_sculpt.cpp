@@ -135,6 +135,30 @@ int main() {
     }
     CHECK(s.history().labels().empty());  // new and stats are not undo steps
 
+    // ---- strokes cast from the view (space=ray) and pen pressure ----
+    {
+        Session ps;
+        sculpt::registerCommands(ps);
+        auto rise = [&](const NumberList& pressures) {
+            Result nn = ps.run("sculpt.new", {{"shape", std::string("sphere")}, {"level", std::int64_t{3}}, {"size", 2.0}});
+            auto d = docIn(ps, docOf(nn));
+            const double top = maxZ(d->mesh);
+            Params p{{"doc", docOf(nn)}, {"brush", std::string("draw")}, {"space", std::string("ray")},
+                     {"points", NumberList{-0.2, 0, 5, 0, 0, -1, 0.2, 0, 5, 0, 0, -1}}, {"radius", 0.5}, {"strength", 1.0}};
+            if (!pressures.empty()) p["pressures"] = pressures;
+            Result r = ps.run("sculpt.stroke", p);
+            CHECK(r.ok && finite(d->mesh));
+            return maxZ(d->mesh) - top;
+        };
+        const double full = rise({});
+        const double light = rise({0.2, 0.2});
+        CHECK(full > 0.03);
+        CHECK(light > 0 && light < full * 0.6);
+        // a ray that misses the model is an error, not a silent no-op
+        Result miss = ps.run("sculpt.stroke", {{"doc", std::string("sculpt1")}, {"space", std::string("ray")}, {"points", NumberList{5, 5, 5, 0, 0, 1}}});
+        CHECK(!miss.ok || intField(miss, "moved") <= 0);
+    }
+
     // ---- strokes ----
     {
         auto doc = docIn(s, "sculpt1");

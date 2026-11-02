@@ -40,6 +40,7 @@ struct OrbitView {
     double panX = 0;
     double panY = 0;
     bool antialias = true;  // off while dragging, for speed
+    std::string shading;    // material (default), solid, matcap, wireframe or xray
     // set: draw with exactly this camera instead (looking straight at a sketch, or holding the
     // view still while a handle is dragged and the part changes size)
     std::optional<ViewCamera> camera;

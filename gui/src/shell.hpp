@@ -151,7 +151,8 @@ struct P3 {
 
 // An arrow drawn on the 3D view: drag it to slide something along dir (handles.cpp).
 struct Handle {
-    enum class Kind { PushPull, Move, Field, Blend } kind = Kind::PushPull;  // Blend: fillet/chamfer size on picked edges
+    // Blend: fillet/chamfer size on picked edges; Ring / Scale: a model selection's rotate rings and scale boxes
+    enum class Kind { PushPull, Move, Field, Blend, Ring, Scale } kind = Kind::PushPull;
     P3 base, dir;           // world: where it starts, which way it points (unit length)
     ImU32 colour = 0;
     std::string axis;       // Move: x, y or z
@@ -319,6 +320,14 @@ struct Canvas {
     std::string grabAxis;      // "", "x", "y" or "z"
     bool grabEndClick = false; // the click that kept it isn't also a click to select
     bool grabByHandle = false; // started by dragging an arrow: letting go keeps it
+    // started from a rotate ring or a scale box: the pivot and the axis's direction on screen
+    bool grabExact = false;
+    ImVec2 grabCentre{0, 0}, grabDir{1, 0};
+    float grabFacing = 1;      // rings: +1 when the axis points at the viewer
+    bool grabCtrl = false, grabAlt = false;  // snapping keys last frame
+    // B in a model's edit mode: the next drag draws a box that selects
+    bool boxArmed = false, boxDragging = false;
+    ImVec2 boxFrom{0, 0};
     int orbitW = 0, orbitH = 0;
 
     // selecting (selection_view.cpp)
@@ -871,6 +880,42 @@ private:
     void docCanvas(ImDrawList* dl, ImVec2 p0, bool hovered);
     // the 3D view's arrows and picking (handles.cpp)
     View3d view3d_;
+    // brushing in the 3D view (brush3d.cpp): sculpting a mesh, or painting a bone's weights on a model
+    struct Brush3d {
+        std::string tool;  // "" off; a sculpt brush (draw, inflate, smooth, ...); "weight" in a model
+        float radiusPx = 40, strength = 0.5f;
+        bool invert = false;
+        std::string symmetry = "none";
+        std::string bone, weightMode = "add";
+        bool stroking = false;
+        NumberList rays;
+        std::vector<double> pressures;
+        double lastTry = 0;
+        std::size_t tried = 0;  // rays in the stroke the last trial ran
+    } brush3d_;
+    // the dope sheet under a model's 3D view (dopesheet.cpp)
+    struct DopeSheet {
+        std::string doc;
+        bool open = true, playing = false, hovered = false;
+        struct Row {
+            std::string object, group;  // group "all" = the object's summary row
+            std::vector<int> frames;
+        };
+        std::vector<Row> rows;
+        int frame = 1, start = 1, end = 48;
+        double fps = 24, lastQuery = -1, lastStep = 0;
+        std::string selObject, selGroup;
+        int selFrame = -1;
+        bool dragging = false, dragCopy = false, scrubbing = false;
+        int dragRow = -1, dragTo = 0;
+    } dope_;
+    void dopeSheetView();
+    float dopeSheetHeight() const;
+    void dopeSheetRefresh(bool force);
+    void dopeSheetScrub(int frame, bool wrap);
+    void brush3dToolbar();
+    bool brush3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered);
+    Params brush3dParams() const;
     void view3dCamera();  // read the camera the picture was drawn with
     bool view3dInput(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bool active);  // true: the mouse is on an arrow
     void view3dDraw(ImDrawList* dl, ImVec2 v0, ImVec2 size);

@@ -71,6 +71,7 @@ bool renderOrbit(const Mesh& mesh, const OrbitView& view, int width, int height,
     o.orbit = Orbit{view.yaw, view.pitch, view.zoom, view.panX, view.panY};
     if (view.camera) o.projection = toProjection(*view.camera);
     o.antialias = view.antialias;
+    if (auto sh = parseShading(view.shading)) o.shading = *sh;
     o.outline = o.outline && view.antialias;  // outlines and smooth normals cost extra passes; skip them mid-drag
     o.smooth = o.smooth && view.antialias;
     const raster::Image img = render(mesh, width, height, o);
