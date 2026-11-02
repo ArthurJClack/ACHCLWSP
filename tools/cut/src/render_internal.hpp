@@ -47,6 +47,7 @@ private:
     std::string path_;
     int w_, h_;
     double rate_;
+    bool big_ = false;  // HD or bigger frames: decoded on the graphics card when there is one
     std::unique_ptr<Proc> proc_;
     double t0_ = 0;
     long next_ = 0;  // index of the frame the process gives next

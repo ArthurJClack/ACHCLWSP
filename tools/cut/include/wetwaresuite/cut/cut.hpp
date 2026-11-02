@@ -318,6 +318,10 @@ struct EncodePlan {
 // each is tried once on a tiny clip and remembered. WETWARESUITE_HW_ENCODER=none turns them off,
 // or names one to use without trying it.
 std::vector<std::string> hardwareEncoders();
+// ffmpeg arguments that decode on the graphics card when this machine has a hardware decoder ffmpeg
+// knows (VideoToolbox, D3D11VA/DXVA2, CUDA, VA-API): {"-hwaccel", "auto"}, which falls back to the
+// CPU by itself if the card can't take a file. Empty otherwise, or with WETWARESUITE_HW_DECODE=off.
+const std::vector<std::string>& hardwareDecodeArgs();
 // "TikTok: up to 10:00, 287 MB, 30 fps" (empty when the preset has no limits).
 std::string presetLimits(const Preset& preset);
 // Plans an export. Pure: touches no files. Throws std::runtime_error with a readable reason.

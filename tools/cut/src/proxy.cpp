@@ -100,9 +100,17 @@ std::string makeProxy(const std::string& source) {
     fs::path part = out;
     part += ".part.mp4";
     // small, all short GOPs (quick to seek), no sound: the mixer reads sound from the original
-    const std::string err = runFfmpeg({"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", source, "-map", "0:v:0", "-an", "-sn", "-dn",
-                                       "-vf", "scale=-2:" + std::to_string(kProxyHeight) + ":flags=fast_bilinear", "-c:v", "libx264", "-preset", "ultrafast",
-                                       "-tune", "fastdecode", "-crf", "26", "-g", "12", "-pix_fmt", "yuv420p", part.string()});
+    std::vector<std::string> args = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y"};
+    const auto& hw = hardwareDecodeArgs();  // the sources are big: the card decodes them faster
+    args.insert(args.end(), hw.begin(), hw.end());
+    for (const std::string& a : {std::string("-i"), source, std::string("-map"), std::string("0:v:0"), std::string("-an"), std::string("-sn"),
+                                 std::string("-dn"), std::string("-vf"), "scale=-2:" + std::to_string(kProxyHeight) + ":flags=fast_bilinear",
+                                 std::string("-c:v"), std::string("libx264"), std::string("-preset"), std::string("ultrafast"), std::string("-tune"),
+                                 std::string("fastdecode"), std::string("-crf"), std::string("26"), std::string("-g"), std::string("12"),
+                                 std::string("-pix_fmt"), std::string("yuv420p"), part.string()}) {
+        args.push_back(a);
+    }
+    const std::string err = runFfmpeg(args);
     if (!err.empty()) {
         fs::remove(part, ec);
         return err;

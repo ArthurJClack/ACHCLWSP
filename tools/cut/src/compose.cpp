@@ -199,7 +199,8 @@ struct VideoReader::Proc {
 };
 
 VideoReader::VideoReader(std::string path, int width, int height, double rate)
-    : path_(std::move(path)), w_(width), h_(height), rate_(rate > 0 && rate <= 240 ? rate : 30) {}
+    : path_(std::move(path)), w_(width), h_(height), rate_(rate > 0 && rate <= 240 ? rate : 30),
+      big_(static_cast<long>(width) * height >= 1280L * 720L) {}
 
 VideoReader::~VideoReader() = default;
 
@@ -207,6 +208,11 @@ bool VideoReader::restart(double at, std::string& error) {
     proc_ = std::make_unique<Proc>();
     const std::string vf = "fps=" + tnum(rate_) + ",scale=" + std::to_string(w_) + ":" + std::to_string(h_) + ":flags=bilinear,format=rgba";
     std::vector<std::string> args = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"};
+    // big sources decode on the graphics card when there is one (small ones start faster on the CPU)
+    if (big_) {
+        const auto& hw = hardwareDecodeArgs();
+        args.insert(args.end(), hw.begin(), hw.end());
+    }
     if (at > 0) args.insert(args.end(), {"-ss", tnum(at)});
     args.insert(args.end(), {"-i", path_, "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"});
     if (!proc_->stream.start(args, false, true, error)) {

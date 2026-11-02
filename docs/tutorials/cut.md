@@ -1116,6 +1116,8 @@ Big sources (taller than 1080 or wider than 1920 px) get **proxies**: small 540p
 
 Exports to H.264 (.mp4, .mov, .mkv) use the **graphics card's encoder** when ffmpeg can drive it: NVIDIA (NVENC), Intel (Quick Sync), AMD (AMF) or Apple (VideoToolbox). Each is tried once on a tiny clip the first time, so a build that lists NVENC on a PC without an NVIDIA card isn't picked. If the card's encoder fails mid-export it starts again on the CPU and says so (`hw_fallback`). `quality=best` always uses the CPU (libx264 makes smaller, cleaner files when time doesn't matter).
 
+Decoding uses the card too: HD and bigger sources, and the proxies made from them, are read with ffmpeg's hardware decoder (VideoToolbox on a Mac, D3D11VA on Windows, CUDA or VA-API on Linux) when the machine has one, and ffmpeg drops back to the CPU by itself for a file the card can't take. The export result says `hw_decode: true` when it was on. `WETWARESUITE_HW_DECODE=off` turns it off, `=on` forces it on.
+
 ```text
 # 4k.txt: proxies for a 4K edit, then a quick export on the graphics card
 cut.open path=drone_4k.mp4 -> d

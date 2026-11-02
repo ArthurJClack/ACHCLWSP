@@ -193,6 +193,29 @@ std::vector<std::string> h264Args(const std::string& enc, int crf, bool draft, c
 
 }  // namespace
 
+const std::vector<std::string>& hardwareDecodeArgs() {
+    static const std::vector<std::string> args = [] {
+        const char* env = std::getenv("WETWARESUITE_HW_DECODE");
+        const std::string v = env ? lower(env) : "";
+        if (v == "off" || v == "none" || v == "cpu" || v == "0") return std::vector<std::string>{};
+        auto ffmpeg = ffmpegPath();
+        if (!ffmpeg) return std::vector<std::string>{};
+        const std::string listed = runProgram({*ffmpeg, "-hide_banner", "-hwaccels"}).output;
+        auto has = [&](const char* name) { return listed.find(std::string("\n") + name) != std::string::npos; };
+        std::error_code ec;
+#if defined(__APPLE__)
+        const bool card = has("videotoolbox");
+#elif defined(_WIN32)
+        const bool card = has("d3d11va") || has("dxva2");
+#else
+        const bool card = (has("cuda") && fs::exists("/dev/nvidia0", ec)) || (has("vaapi") && fs::exists("/dev/dri/renderD128", ec));
+#endif
+        if (!card && v != "on") return std::vector<std::string>{};
+        return std::vector<std::string>{"-hwaccel", "auto"};
+    }();
+    return args;
+}
+
 std::vector<std::string> hardwareEncoders() {
     static std::once_flag once;
     static std::vector<std::string> found;

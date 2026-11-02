@@ -210,6 +210,7 @@ Result exportTimeline(const Timeline& tl, const fs::path& output, const Params& 
         if (plan.encoder.rfind("h264_", 0) == 0) r.message += " (encoded on the graphics card: " + plan.encoder + ")";
     }
     if (!hwFallback.empty()) r.with("hw_fallback", hwFallback);
+    if (plan.video && !plan.streamCopy) r.with("hw_decode", !hardwareDecodeArgs().empty());
     if (plan.video) r.with("frames", static_cast<std::int64_t>(plan.frames)).with("fps", plan.fps);
     if (plan.maxBytes > 0) r.with("limit_mb", plan.maxBytes / 1e6);
     return r;
