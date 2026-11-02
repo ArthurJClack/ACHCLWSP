@@ -11,7 +11,7 @@ namespace wetwaresuite::layout {
 // ---- faces ---------------------------------------------------------------------
 
 double Face::advance(unsigned cp) const {
-    if (pdfdoc::winAnsi(cp) < 0 && pdfdoc::needsUnicode(cp)) return pdfdoc::builtinSans()->advance(cp);  // set in the built-in font
+    if (pdfdoc::winAnsi(cp) < 0 && pdfdoc::needsUnicode(cp)) return pdfdoc::unicodeFontFor(cp)->advance(cp);  // set in a Unicode font
     if (ttf) return ttf->advance(cp);
     const double w = pdfdoc::standardWidth(font, pdfdoc::winAnsi(cp));
     return w > 0 ? w : 500;

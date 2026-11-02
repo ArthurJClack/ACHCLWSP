@@ -630,7 +630,7 @@ A ```` ```mermaid ```` fence and `---` front matter around the text are skipped.
 ## 13. Limitations
 
 - No rotation: shapes are axis-aligned. Excalidraw elements with an angle open unrotated.
-- Text uses the standard PDF font metrics (Helvetica, Times, Courier) with FreeSans/FreeSerif/FreeMono glyphs in pictures. There is no handwriting font, so the sketchy theme's text is clean; Excalidraw files use its hand font (Virgil) for sketchy boards, so text there is a little wider. Greek and Cyrillic are drawn and embedded with the built-in font (Roboto); other scripts (CJK, Arabic, ...) and emoji come out as `?`.
+- Text uses the standard PDF font metrics (Helvetica, Times, Courier) with FreeSans/FreeSerif/FreeMono glyphs in pictures. There is no handwriting font, so the sketchy theme's text is clean; Excalidraw files use its hand font (Virgil) for sketchy boards, so text there is a little wider. Greek and Cyrillic are embedded with the built-in font (Roboto); in PDFs, other scripts and emoji use a font already on the computer (see the office tutorial's "Scripts in PDFs").
 - Layout doesn't know about frames: nodes in a Mermaid subgraph are laid out with everything else and the frame is fitted around them afterwards; outside nodes that end up under a frame are pushed aside, but two subgraphs can still overlap on dense charts.
 - Elbow routes avoid shapes but not other connectors; parallel links can share segments. Connectors don't route around frames.
 - Sequence diagrams are placed once: moving a participant doesn't move its messages, and activation bars, `create`/`destroy` and `box` groups are ignored.

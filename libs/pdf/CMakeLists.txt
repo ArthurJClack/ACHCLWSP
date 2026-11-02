@@ -5,6 +5,6 @@ target_link_libraries(wetwaresuite_pdf PUBLIC wetwaresuite::core wetwaresuite::r
 
 if(WETWARESUITE_BUILD_TESTS)
   add_executable(test_pdf tests/test_pdf.cpp)
-  target_link_libraries(test_pdf PRIVATE wetwaresuite::pdf wetwaresuite_check)
+  target_link_libraries(test_pdf PRIVATE wetwaresuite::pdf wetwaresuite_check wetwaresuite::pdfdoc)
   add_test(NAME pdf COMMAND test_pdf)
 endif()

@@ -176,20 +176,22 @@ std::string writePdf(const std::vector<Page>& pages, const DocInfo& info) {
     std::map<const ImageData*, int> images;       // image -> object
     std::vector<int> pageIds;
 
-    // one embedded Unicode font for every character the standard fonts lack
-    std::set<unsigned> unicodeChars;
+    // embedded Unicode fonts (built in, then system fallbacks) for every character the standard fonts lack
+    std::map<int, std::set<unsigned>> unicodeChars;
     for (const auto& page : pages) {
         for (const auto& op : page.ops) {
             if (auto t = std::get_if<TextOp>(&op)) {
                 for (unsigned cp : utf8Decode(t->text)) {
-                    if (detail::needsUnicode(cp)) unicodeChars.insert(cp);
+                    if (detail::needsUnicode(cp)) unicodeChars[pdfdoc::unicodeFontIndex(cp)].insert(cp);
                 }
             }
         }
     }
-    const int unicodeFontId = unicodeChars.empty() ? 0
-                                                   : pdfdoc::addUnicodeFont([&b](std::string body) { return b.add(std::move(body)); },
-                                                                            detail::unicodeFont(), unicodeChars);
+    std::map<int, int> unicodeFontIds;
+    for (const auto& [font, chars] : unicodeChars) {
+        unicodeFontIds[font] = pdfdoc::addUnicodeFont([&b](std::string body) { return b.add(std::move(body)); }, *pdfdoc::unicodeFontAt(font), chars,
+                                                      font ? "F" + std::to_string(font) : std::string());
+    }
 
     for (const auto& page : pages) {
         const double H = page.height;
@@ -197,7 +199,7 @@ std::string writePdf(const std::vector<Page>& pages, const DocInfo& info) {
         std::vector<std::string> annots;
         std::map<int, bool> usedFonts;
         std::map<int, bool> usedImages;
-        bool usedUnicode = false;
+        std::set<int> usedUnicode;
         for (const auto& op : page.ops) {
             if (auto t = std::get_if<TextOp>(&op)) {
                 if (t->text.empty() || t->color.a == 0) continue;
@@ -210,8 +212,9 @@ std::string writePdf(const std::vector<Page>& pages, const DocInfo& info) {
                 c += "BT " + rgb(t->color) + " rg " + num(t->x) + " " + num(H - t->y) + " Td";
                 for (const auto& run : detail::splitRuns(t->text)) {
                     if (run.unicode) {
-                        usedUnicode = true;
-                        c += " /FU " + num(t->size) + " Tf " + pdfdoc::glyphText(detail::unicodeFont(), run.text) + " Tj";
+                        usedUnicode.insert(run.font);
+                        c += " /FU" + (run.font ? std::to_string(run.font) : std::string()) + " " + num(t->size) + " Tf " +
+                             pdfdoc::glyphText(*pdfdoc::unicodeFontAt(run.font), run.text) + " Tj";
                     } else {
                         c += " /F" + std::to_string(fi) + " " + num(t->size) + " Tf " + pdfString(run.text) + " Tj";
                     }
@@ -296,7 +299,7 @@ std::string writePdf(const std::vector<Page>& pages, const DocInfo& info) {
         if (!usedFonts.empty()) {
             res += " /Font <<";
             for (const auto& [fi, used] : usedFonts) res += " /F" + std::to_string(fi) + " " + ref(fonts[fi]);
-            if (usedUnicode) res += " /FU " + ref(unicodeFontId);
+            for (int f : usedUnicode) res += " /FU" + (f ? std::to_string(f) : std::string()) + " " + ref(unicodeFontIds[f]);
             res += " >>";
         }
         if (!usedImages.empty()) {

@@ -1210,10 +1210,7 @@ Render a page to PNG so you can see it, with margins (magenta), column gutters (
 
 - Western European text uses the frame's font. Greek and Cyrillic letters
   are set in wetwaresuite's built-in font (Roboto) and embedded, so they
-  print and copy correctly but don't match a serif or bold face. Chinese,
-  Japanese, Korean, Arabic, Hebrew, Indic scripts and emoji still print as
-  `?`. No right-to-left or complex scripts, no kerning pairs, ligatures or
-  OpenType features.
+  print and copy correctly but don't match a serif or bold face. Chinese, Japanese, Korean, other scripts, symbols and emoji are set in a font already on the computer (Microsoft YaHei, MS Gothic or Malgun Gothic on Windows, PingFang or Arial Unicode on a Mac, WenQuanYi, Droid Sans Fallback or Noto on Linux; Segoe UI Emoji, Noto Emoji or Symbola for emoji, which print in one colour) and only the characters used are embedded, so files stay small. `WETWARESUITE_FALLBACK_FONT=/path/font.ttf` picks your own. A character no installed font has still prints as `?`. Arabic, Hebrew and Indic text gets its letters but not right-to-left order or joined shapes. No kerning pairs, ligatures or OpenType features.
 - No hyphenation; justified lines stretch word spaces only. Very long words
   are broken where they hit the frame edge.
 - No text wrap around pictures, no tab stops, drop caps, footnotes, tables,

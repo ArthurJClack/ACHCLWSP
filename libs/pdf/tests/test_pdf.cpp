@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <stdexcept>
 
+#include "wetwaresuite/pdfdoc/fonts.hpp"
 #include "wetwaresuite/pdf/crypt.hpp"
 #include "wetwaresuite/pdf/ocr.hpp"
 #include "wetwaresuite/pdf/page.hpp"
@@ -170,8 +171,10 @@ void testUnicode() {
     for (int y = 5; y < 45; ++y)
         for (int x = 10; x < 110; ++x) dark += img.at(x, y).r < 100 ? 1 : 0;
     CHECK(dark > 300);
-    // characters no font has still become '?'
-    CHECK(textWidth({}, "\xE4\xB8\xAD", 10) == textWidth({}, "?", 10));
+    // characters no font has still become '?' (a private-use code point nothing draws)
+    CHECK(textWidth({}, "\xF4\x8F\xBF\xBD", 10) == textWidth({}, "?", 10));
+    // Chinese comes from a system font when there is one
+    if (wetwaresuite::pdfdoc::unicodeFontIndex(0x4E2D) > 0) CHECK(textWidth({}, "\xE4\xB8\xAD", 10) > textWidth({}, "?", 10));
 }
 
 

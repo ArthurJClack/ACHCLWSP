@@ -39,7 +39,7 @@ double sample(const detail::Glyph& g, double sx, double sy) {
 
 // A glyph from the built-in Unicode font, filled from its outline. Returns the advance in px.
 double drawUnicodeGlyph(raster::Image& img, double x, double y, unsigned cp, double sizePx, double shear, Color color) {
-    const pdfdoc::TrueType& font = detail::unicodeFont();
+    const pdfdoc::TrueType& font = detail::unicodeFont(cp);
     const double k = sizePx / 1000.0;
     // all contours in one point list, each joined back to a common start so the joins cancel out (even-odd)
     std::vector<raster::Point> pts;

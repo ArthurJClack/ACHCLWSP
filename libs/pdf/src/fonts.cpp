@@ -112,18 +112,21 @@ double textWidth(Font font, const std::string& utf8, double size) {
     double em = 0;
     for (unsigned cp : utf8Decode(utf8)) {
         if (cp == '\n' || cp == '\r') continue;
-        em += detail::needsUnicode(cp) ? detail::unicodeFont().advance(cp) : charWidth(font, toWinAnsi(cp));
+        em += detail::needsUnicode(cp) ? detail::unicodeFont(cp).advance(cp) : charWidth(font, toWinAnsi(cp));
     }
     return em / 1000.0 * size;
 }
 
 namespace detail {
 
-const pdfdoc::TrueType& unicodeFont() { return *pdfdoc::builtinSans(); }
+const pdfdoc::TrueType& unicodeFont(unsigned cp) {
+    auto f = pdfdoc::unicodeFontFor(cp);
+    return f ? *f : *pdfdoc::builtinSans();
+}
 
 bool needsUnicode(unsigned cp) {
     if (cp < 0x100 || toWinAnsi(cp) != '?') return false;
-    return unicodeFont().glyphIndex(cp) != 0;
+    return pdfdoc::unicodeFontIndex(cp) >= 0;
 }
 
 std::vector<Run> splitRuns(const std::string& utf8) {
@@ -131,7 +134,8 @@ std::vector<Run> splitRuns(const std::string& utf8) {
     for (unsigned cp : utf8Decode(utf8)) {
         if (cp == '\n' || cp == '\r') continue;
         const bool u = needsUnicode(cp);
-        if (runs.empty() || runs.back().unicode != u) runs.push_back({u, {}});
+        const int f = u ? pdfdoc::unicodeFontIndex(cp) : -1;
+        if (runs.empty() || runs.back().unicode != u || runs.back().font != f) runs.push_back({u, f, {}});
         runs.back().text += utf8Encode(cp);
     }
     return runs;

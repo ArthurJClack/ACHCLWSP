@@ -19,11 +19,13 @@ int glyphEm();
 // rasterFont: 0 sans, 1 sans bold, 2 serif, 3 serif bold, 4 mono, 5 mono bold
 Glyph glyph(int rasterFont, unsigned char winAnsiByte);
 
-// Text the standard fonts can't show (Greek, Cyrillic, ...) uses the built-in Unicode font.
-const pdfdoc::TrueType& unicodeFont();
+// Text the standard fonts can't show (Greek, Cyrillic, CJK, emoji...) uses a Unicode font: the
+// built-in one, else a system fallback (see pdfdoc::unicodeFontIndex).
+const pdfdoc::TrueType& unicodeFont(unsigned codepoint);
 bool needsUnicode(unsigned codepoint);
 struct Run {
     bool unicode = false;
+    int font = -1;     // pdfdoc::unicodeFontIndex of a unicode run
     std::string text;  // UTF-8
 };
 // The text cut where it switches between the standard font and the Unicode one.

@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -399,15 +401,37 @@ std::uint32_t checksum(const std::string& t) {
 
 }  // namespace
 
-std::string TrueType::subset(const std::set<int>& wanted) const {
+std::string TrueType::subset(const std::set<int>& wanted) const { return subsetImpl(wanted, nullptr); }
+
+std::string TrueType::subsetCompact(const std::set<int>& wanted, std::vector<int>& oldOf) const {
+    oldOf.clear();
+    return subsetImpl(wanted, &oldOf);
+}
+
+std::string TrueType::subsetImpl(const std::set<int>& wanted, std::vector<int>* compact) const {
     const std::string& b = impl_->bytes;
     const std::size_t start = static_cast<std::size_t>(impl_->info.fontstart);
     const int numGlyphs = impl_->info.numGlyphs;
     const std::size_t glyf = impl_->table("glyf"), loca = impl_->table("loca"), head = impl_->table("head");
-    if (!glyf || !loca || !head || numGlyphs <= 0) return b;
+    const std::size_t hhea = impl_->table("hhea"), hmtx = impl_->table("hmtx");
+    if (!glyf || !loca || !head || numGlyphs <= 0 || (compact && (!hhea || !hmtx))) return b;
     const bool longLoca = be16(b, head + 50) != 0;
     auto offset = [&](int g) -> std::size_t {
         return longLoca ? be32(b, loca + static_cast<std::size_t>(g) * 4) : be16(b, loca + static_cast<std::size_t>(g) * 2) * 2u;
+    };
+    // walks a composite glyph's components: fn(offset of the component's glyph index)
+    auto components = [&](std::size_t a, std::size_t e, const std::function<void(std::size_t)>& fn) {
+        std::size_t p = a + 10;
+        for (;;) {
+            if (p + 4 > e) break;
+            const std::uint32_t flags = be16(b, p);
+            fn(p + 2);
+            p += 4 + ((flags & 1) ? 4 : 2);
+            if (flags & 8) p += 2;
+            else if (flags & 0x40) p += 4;
+            else if (flags & 0x80) p += 8;
+            if (!(flags & 0x20)) break;
+        }
     };
 
     // glyph 0, the wanted glyphs and every component of a composite glyph
@@ -420,31 +444,58 @@ std::string TrueType::subset(const std::set<int>& wanted) const {
         const std::size_t a = glyf + offset(g), e = glyf + offset(g + 1);
         if (e <= a + 10 || e > b.size()) continue;
         if (static_cast<std::int16_t>(be16(b, a)) >= 0) continue;  // simple glyph
-        std::size_t p = a + 10;
-        for (;;) {
-            if (p + 4 > e) break;
-            const std::uint32_t flags = be16(b, p);
-            todo.push_back(static_cast<int>(be16(b, p + 2)));
-            p += 4 + ((flags & 1) ? 4 : 2);
-            if (flags & 8) p += 2;
-            else if (flags & 0x40) p += 4;
-            else if (flags & 0x80) p += 8;
-            if (!(flags & 0x20)) break;
+        components(a, e, [&](std::size_t at) { todo.push_back(static_cast<int>(be16(b, at))); });
+    }
+    // compact: the kept glyphs renumbered 0..n-1 (composites point at the new numbers)
+    std::map<int, int> newOf;
+    if (compact) {
+        for (int g : keep) {
+            newOf[g] = static_cast<int>(compact->size());
+            compact->push_back(g);
         }
     }
     // a composite's component may come before it in numbering: the loop above already
     // added them all before any is copied, so one pass is enough
-    std::string newGlyf, newLoca;
-    for (int g = 0; g < numGlyphs; ++g) {
+    std::string newGlyf, newLoca, newHmtx;
+    const std::uint32_t oldMetrics = hhea ? be16(b, hhea + 34) : 0;
+    auto copyGlyph = [&](int g) {
         put32(newLoca, static_cast<std::uint32_t>(newGlyf.size()));
-        if (!keep.count(g)) continue;
         const std::size_t a = glyf + offset(g), e = glyf + offset(g + 1);
-        if (e > a && e <= b.size()) newGlyf.append(b, a, e - a);
+        if (e > a && e <= b.size()) {
+            const std::size_t at = newGlyf.size();
+            newGlyf.append(b, a, e - a);
+            if (compact && e > a + 10 && static_cast<std::int16_t>(be16(b, a)) < 0) {
+                components(a, e, [&](std::size_t pos) {
+                    const int n = newOf.count(static_cast<int>(be16(b, pos))) ? newOf[static_cast<int>(be16(b, pos))] : 0;
+                    newGlyf[at + (pos - a)] = static_cast<char>((n >> 8) & 0xFF);
+                    newGlyf[at + (pos - a) + 1] = static_cast<char>(n & 0xFF);
+                });
+            }
+        }
         while (newGlyf.size() % 4) newGlyf += '\0';
+        if (compact && oldMetrics) {
+            const std::uint32_t m = std::min<std::uint32_t>(static_cast<std::uint32_t>(g), oldMetrics - 1);
+            put16(newHmtx, be16(b, hmtx + m * 4));  // advance
+            const std::size_t lsbAt = static_cast<std::uint32_t>(g) < oldMetrics ? hmtx + m * 4 + 2 : hmtx + oldMetrics * 4 + (static_cast<std::size_t>(g) - oldMetrics) * 2;
+            put16(newHmtx, be16(b, lsbAt));
+        }
+    };
+    if (compact) {
+        for (int g : *compact) copyGlyph(g);
+    } else {
+        for (int g = 0; g < numGlyphs; ++g) {
+            if (keep.count(g)) {
+                copyGlyph(g);
+            } else {
+                put32(newLoca, static_cast<std::uint32_t>(newGlyf.size()));
+            }
+        }
     }
     put32(newLoca, static_cast<std::uint32_t>(newGlyf.size()));
+    const std::uint32_t count = compact ? static_cast<std::uint32_t>(compact->size()) : static_cast<std::uint32_t>(numGlyphs);
 
     // copy the tables a PDF viewer needs, with the new glyf/loca and long loca offsets
+    // (compact subsets get an empty cmap: PDF picks glyphs by number, and the numbers changed)
     const char* tags[] = {"OS/2", "cmap", "cvt ", "fpgm", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "prep"};
     std::vector<std::pair<std::string, std::string>> tables;
     for (const char* tag : tags) {
@@ -453,6 +504,13 @@ std::string TrueType::subset(const std::set<int>& wanted) const {
             data = newGlyf;
         } else if (std::strcmp(tag, "loca") == 0) {
             data = newLoca;
+        } else if (compact && std::strcmp(tag, "hmtx") == 0) {
+            data = newHmtx;
+        } else if (compact && std::strcmp(tag, "cmap") == 0) {
+            // an empty Unicode cmap: the glyph numbers changed, and readers want the table there
+            for (std::uint32_t v : {0u, 1u, 3u, 1u}) put16(data, v);
+            put32(data, 12);
+            for (std::uint32_t v : {4u, 24u, 0u, 2u, 2u, 0u, 0u, 0xFFFFu, 0u, 0xFFFFu, 1u, 0u}) put16(data, v);
         } else {
             const std::size_t numTables = be16(b, start + 4);
             for (std::size_t i = 0; i < numTables; ++i) {
@@ -466,6 +524,14 @@ std::string TrueType::subset(const std::set<int>& wanted) const {
                 data[8] = data[9] = data[10] = data[11] = 0;  // checkSumAdjustment, filled in below
                 data[50] = 0;
                 data[51] = 1;  // long loca
+            }
+            if (compact && std::strcmp(tag, "hhea") == 0 && data.size() >= 36) {
+                data[34] = static_cast<char>((count >> 8) & 0xFF);  // numberOfHMetrics: one per glyph now
+                data[35] = static_cast<char>(count & 0xFF);
+            }
+            if (compact && std::strcmp(tag, "maxp") == 0 && data.size() >= 6) {
+                data[4] = static_cast<char>((count >> 8) & 0xFF);
+                data[5] = static_cast<char>(count & 0xFF);
             }
         }
         tables.emplace_back(tag, std::move(data));
@@ -577,6 +643,30 @@ const std::map<std::string, std::filesystem::path>& fontFiles() {
     return files;
 }
 
+// The same with .ttc collections too (fallback fonts are often collections).
+const std::map<std::string, std::filesystem::path>& allFontFiles() {
+    static const std::map<std::string, std::filesystem::path> files = [] {
+        std::map<std::string, std::filesystem::path> out = fontFiles();
+        for (const auto& dir : fontDirs()) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(dir, ec)) continue;
+            std::filesystem::recursive_directory_iterator it(dir, std::filesystem::directory_options::skip_permission_denied, ec), end;
+            for (; !ec && it != end; it.increment(ec)) {
+                if (it.depth() > 4) {
+                    it.disable_recursion_pending();
+                    continue;
+                }
+                std::error_code fe;
+                if (!it->is_regular_file(fe)) continue;
+                const std::string name = lower(it->path().filename().string());
+                if (name.size() > 4 && name.compare(name.size() - 4, 4, ".ttc") == 0) out.emplace(name, it->path());
+            }
+        }
+        return out;
+    }();
+    return files;
+}
+
 std::vector<std::string> candidates(const std::string& family, int style) {
     // style: 0 regular, 1 bold, 2 italic, 3 bold italic
     static const char* sfx[4] = {"regular", "bold", "italic", "bolditalic"};
@@ -609,7 +699,111 @@ std::vector<std::string> candidates(const std::string& family, int style) {
     return c;
 }
 
+// Fonts with wide coverage, best first. Names are lowercase file names.
+const std::vector<std::string>& fallbackNames() {
+    static const std::vector<std::string> names = {
+        // Chinese, Japanese, Korean
+        "msyh.ttc", "msyh.ttf", "msgothic.ttc", "malgun.ttf", "simsun.ttc", "meiryo.ttc", "yugothr.ttc", "msjh.ttc",
+        "pingfang.ttc", "arial unicode.ttf", "arialuni.ttf", "applegothic.ttf", "applesdgothicneo.ttc",
+        "notosanssc-regular.ttf", "notosansjp-regular.ttf", "notosanskr-regular.ttf", "notosanstc-regular.ttf",
+        "notosanscjksc-regular.ttf", "wqy-zenhei.ttc", "wqy-microhei.ttc", "droidsansfallbackfull.ttf", "droidsansfallback.ttf",
+        "ukai.ttc", "uming.ttc", "nanumgothic.ttf", "takaopgothic.ttf", "ipagp.ttf", "ipag.ttf",
+        // other scripts
+        "arial.ttf", "tahoma.ttf", "nirmala.ttf", "nirmalaui.ttf", "leelawui.ttf", "ebrima.ttf", "gadugi.ttf", "segoeui.ttf",
+        "notosans-regular.ttf", "notosansarabic-regular.ttf", "notosanshebrew-regular.ttf", "notosansdevanagari-regular.ttf",
+        "notosansthai-regular.ttf", "notosansbengali-regular.ttf", "notosanstamil-regular.ttf", "notosansarmenian-regular.ttf",
+        "notosansgeorgian-regular.ttf", "notosansethiopic-regular.ttf", "dejavusans.ttf", "freesans.ttf", "freeserif.ttf",
+        // symbols and emoji (outlines: printed in one colour)
+        "seguiemj.ttf", "seguisym.ttf", "notoemoji-regular.ttf", "notoemoji.ttf", "symbola.ttf", "notosanssymbols2-regular.ttf",
+        "notosanssymbols-regular.ttf", "notosansmath-regular.ttf", "apple symbols.ttf", "unifont.ttf",
+    };
+    return names;
+}
+
+struct Fallbacks {
+    std::mutex mutex;
+    std::vector<std::filesystem::path> todo;              // not loaded yet, in order
+    std::vector<std::shared_ptr<TrueType>> fonts;         // [0] = built in
+    std::map<unsigned, int> found;                        // codepoint -> index or -1
+    bool started = false;
+
+    void start() {
+        if (started) return;
+        started = true;
+        fonts.push_back(builtinSans());
+        std::set<std::string> seen;
+        auto addPath = [&](const std::filesystem::path& p) {
+            const std::string key = lower(p.generic_string());
+            if (seen.insert(key).second) todo.push_back(p);
+        };
+        // the user's own picks first: a list split on ';' (or ':' outside Windows)
+        {
+            const std::string list = env("WETWARESUITE_FALLBACK_FONT");
+#ifdef _WIN32
+            const char sep = ';';
+#else
+            const char sep = list.find(';') != std::string::npos ? ';' : ':';
+#endif
+            std::stringstream ss(list);
+            for (std::string item; std::getline(ss, item, sep);) {
+                if (!item.empty()) addPath(item);
+            }
+        }
+        if (const auto d = env("WETWARESUITE_FONT_DIR"); !d.empty()) {
+            std::error_code ec;
+            for (const auto& e : std::filesystem::directory_iterator(d, ec)) {
+                const std::string n = lower(e.path().filename().string());
+                if (n.size() > 4 && (n.compare(n.size() - 4, 4, ".ttf") == 0 || n.compare(n.size() - 4, 4, ".ttc") == 0)) addPath(e.path());
+            }
+        }
+        const auto& files = allFontFiles();
+        for (const auto& name : fallbackNames()) {
+            auto f = files.find(name);
+            if (f != files.end()) addPath(f->second);
+        }
+    }
+
+    int indexFor(unsigned cp) {
+        std::lock_guard<std::mutex> lock(mutex);
+        start();
+        if (auto it = found.find(cp); it != found.end()) return it->second;
+        int at = -1;
+        for (std::size_t i = 0; i < fonts.size() && at < 0; ++i) {
+            if (fonts[i]->glyphIndex(cp) != 0) at = static_cast<int>(i);
+        }
+        // load more fonts only when the ones we have can't draw it
+        while (at < 0 && !todo.empty()) {
+            const auto path = todo.front();
+            todo.erase(todo.begin());
+            try {
+                auto f = TrueType::load(path);
+                if (!f->embeddable()) continue;
+                fonts.push_back(f);
+                if (f->glyphIndex(cp) != 0) at = static_cast<int>(fonts.size()) - 1;
+            } catch (const std::exception&) {
+            }
+        }
+        found[cp] = at;
+        return at;
+    }
+
+    std::shared_ptr<TrueType> at(int i) {
+        std::lock_guard<std::mutex> lock(mutex);
+        start();
+        return i >= 0 && i < static_cast<int>(fonts.size()) ? fonts[static_cast<std::size_t>(i)] : nullptr;
+    }
+};
+
+Fallbacks& fallbacks() {
+    static Fallbacks f;
+    return f;
+}
+
 }  // namespace
+
+int unicodeFontIndex(unsigned cp) { return fallbacks().indexFor(cp); }
+std::shared_ptr<TrueType> unicodeFontAt(int index) { return fallbacks().at(index); }
+std::shared_ptr<TrueType> unicodeFontFor(unsigned cp) { return unicodeFontAt(unicodeFontIndex(cp)); }
 
 std::shared_ptr<TrueType> systemFont(const std::string& family, bool bold, bool italic) {
     static std::mutex mutex;

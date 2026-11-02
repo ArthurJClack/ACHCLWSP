@@ -725,7 +725,7 @@ The Markdown renderer handles ATX and setext headings (with anchor ids), paragra
 ## Limitations
 
 - **Markdown.** The renderer is CommonMark-ish, not a full CommonMark implementation: unusual emphasis nesting, link reference definitions (`[x][ref]`), footnotes, HTML blocks that contain blank lines and lazy continuation in nested quotes can render differently from Obsidian. Math is passed through for a client-side library, not typeset.
-- **PDF.** PDFs use the standard PDF fonts plus the built-in font for Greek and Cyrillic; other scripts and emoji can't be shown (the 📅 and ✅ task markers are written as "due" and "done"); wikilinks become plain text; image sizes from `|300` are ignored; callouts become bold-titled quotes.
+- **PDF.** PDFs use the standard PDF fonts, the built-in font for Greek and Cyrillic, and a font already on the computer for other scripts and emoji (see the office tutorial's "Scripts in PDFs"); the 📅 and ✅ task markers are written as "due" and "done"; wikilinks become plain text; image sizes from `|300` are ignored; callouts become bold-titled quotes.
 - **Search** tokenises on letters and digits, so it has no stemming (budget does not find budgets; use `budget*`), no fuzzy matching, and no OR operator. CJK text without spaces is indexed as long runs.
 - **Links.** Renaming a heading does not update `[[Note#Heading]]` links; renaming or moving whole folders is not a command (move notes one by one). Links inside frontmatter values are found and followed but `rename` only rewrites them when they are plain `[[...]]` text.
 - **YAML.** Frontmatter is read with a small YAML subset (scalars, quoted strings, flow and block lists, block scalars); nested maps are kept as raw text and shown as such.

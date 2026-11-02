@@ -81,9 +81,13 @@ public:
     // A copy of the font that keeps only these glyphs' outlines (plus glyph 0 and the parts of
     // composite glyphs); glyph numbers stay the same. Much smaller for embedding.
     std::string subset(const std::set<int>& glyphs) const;
+    // The same, renumbered 0..n-1 so tables sized per glyph shrink too (big CJK fonts): oldOf[new]
+    // is each glyph's old number, glyph 0 first. Its cmap is empty: pick glyphs by their new numbers.
+    std::string subsetCompact(const std::set<int>& glyphs, std::vector<int>& oldOf) const;
 
 private:
     TrueType();
+    std::string subsetImpl(const std::set<int>& glyphs, std::vector<int>* compact) const;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
@@ -96,8 +100,21 @@ std::shared_ptr<TrueType> systemFont(const std::string& family, bool bold, bool 
 // Roboto Medium (Apache 2.0), built in so text looks the same on every machine. It covers
 // Latin, Greek and Cyrillic.
 std::shared_ptr<TrueType> builtinSans();
-// True when WinAnsi has no byte for the character but the built-in font has a glyph, so PDF
-// writers set it in the built-in font (see UnicodeFallback in writer.hpp).
+// True when WinAnsi has no byte for the character but a Unicode font has a glyph for it, so PDF
+// writers set it in that font (see UnicodeFallback in writer.hpp).
 bool needsUnicode(unsigned codepoint);
+
+// The fonts behind needsUnicode, in the order they are tried: 0 is the built-in sans; 1.. are
+// system fonts found when a character needs them: Chinese, Japanese and Korean (Microsoft YaHei,
+// MS Gothic, Malgun Gothic, PingFang, Arial Unicode, WenQuanYi, Droid Sans Fallback, Noto Sans
+// SC/JP/KR...), other scripts (Arial, Tahoma, Nirmala, DejaVu, FreeSans...), symbols and
+// black-and-white emoji (Segoe UI Emoji, Noto Emoji, Symbola). Only fonts with TrueType outlines,
+// since those embed as small subsets. WETWARESUITE_FALLBACK_FONT (font files separated by ; or :)
+// and the fonts in $WETWARESUITE_FONT_DIR come first.
+//   unicodeFontIndex  the index for a character, -1 when no font has it
+//   unicodeFontAt     the font at an index (null past the end)
+int unicodeFontIndex(unsigned codepoint);
+std::shared_ptr<TrueType> unicodeFontAt(int index);
+std::shared_ptr<TrueType> unicodeFontFor(unsigned codepoint);  // null when none
 
 }  // namespace wetwaresuite::pdfdoc
