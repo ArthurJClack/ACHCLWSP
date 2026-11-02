@@ -47,6 +47,10 @@ bool parseHex(const std::string& text, float out[4]) {
     return true;
 }
 
+// PICO-8's 16 colours: the swatches (and shading ramp) of a sprite with no palette yet
+constexpr const char* kStarter =
+    "#000000,#1d2b53,#7e2553,#008751,#ab5236,#5f574f,#c2c3c7,#fff1e8,#ff004d,#ffa300,#ffec27,#00e436,#29adff,#83769c,#ff77a8,#ffccaa";
+
 bool isLevelTool(GameTool t) {
     return t == GameTool::Paint || t == GameTool::Rect || t == GameTool::Erase || t == GameTool::Fill || t == GameTool::Object ||
            t == GameTool::Pick || t == GameTool::Move || t == GameTool::Terrain || t == GameTool::Stamp || t == GameTool::ObjSelect;
@@ -54,7 +58,7 @@ bool isLevelTool(GameTool t) {
 
 bool isSpriteTool(GameTool t) {
     return t == GameTool::Pencil || t == GameTool::Eraser || t == GameTool::Line || t == GameTool::Box || t == GameTool::Ellipse ||
-           t == GameTool::Bucket || t == GameTool::Pick || t == GameTool::Move;
+           t == GameTool::Bucket || t == GameTool::Pick || t == GameTool::Move || t == GameTool::Shade;
 }
 
 // Drag tools act on the rectangle between press and release; the others on each point.
@@ -169,6 +173,9 @@ void Shell::gameSync() {
     g.palette = splitComma(tp::text(r, "palette"));
     g.tags = splitComma(tp::text(r, "tags"));
     g.tagRanges = splitComma(tp::text(r, "tag_ranges"));
+    g.tagDirections = splitComma(tp::text(r, "tag_directions"));
+    g.tagRepeats = splitComma(tp::text(r, "tag_repeats"));
+    if (g.playTag >= static_cast<int>(g.tags.size())) g.playTag = -1;
     if (newDoc) {
         g.tool = GameTool::Pencil;
         // start on a solid palette colour so the first stroke shows
@@ -243,6 +250,7 @@ void Shell::gameTools() {
         {"Box", GameTool::Box, "U", "Drag a rectangle"},
         {"Ellipse", GameTool::Ellipse, "O", "Drag an ellipse"},
         {"Bucket", GameTool::Bucket, "G", "Click to fill the touching pixels of one colour"},
+        {"Shade", GameTool::Shade, "D", "Drag to step pixels lighter along the palette (Shift: darker)"},
         {"Pick", GameTool::Pick, "I", "Click a pixel to take its colour"}};
     const bool isLevel = g.kind == "level";
     const Item* items = isLevel ? level : sprite;
@@ -338,7 +346,8 @@ void Shell::gameInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) 
     if (g.dragging) {
         const int ex = std::clamp(cx, 0, std::max(0, cols - 1)), ey = std::clamp(cy, 0, std::max(0, rows - 1));
         g.dragTo = {static_cast<float>(ex), static_cast<float>(ey)};
-        const bool path = g.tool == GameTool::Paint || g.tool == GameTool::Pencil || g.tool == GameTool::Eraser || g.tool == GameTool::Terrain;
+        const bool path = g.tool == GameTool::Paint || g.tool == GameTool::Pencil || g.tool == GameTool::Eraser || g.tool == GameTool::Terrain ||
+                          g.tool == GameTool::Shade;
         if (path && inside && (g.points.size() < 2 || g.points[g.points.size() - 2] != cx || g.points.back() != cy)) {
             // tiles: fill in the cells a fast drag jumped over (the pencil joins its dots itself)
             if (isLevel && g.points.size() >= 2) {
@@ -523,6 +532,13 @@ void Shell::gameSpriteRelease() {
         case GameTool::Box: p["tool"] = std::string(g.filled ? "fill_rect" : "rect"); p["points"] = corners; break;
         case GameTool::Ellipse: p["tool"] = std::string(g.filled ? "fill_ellipse" : "ellipse"); p["points"] = corners; break;
         case GameTool::Bucket: p["tool"] = std::string("bucket"); p["points"] = NumberList{g.dragFrom.x, g.dragFrom.y}; break;
+        case GameTool::Shade:
+            p["tool"] = std::string("shade");
+            p["points"] = g.points;
+            p["step"] = std::int64_t{ImGui::GetIO().KeyShift ? -1 : 1};
+            if (g.palette.size() < 2) p["ramp"] = std::string(kStarter);
+            gameRun("forge.draw", p, "Shade");
+            return;
         case GameTool::Pick: {
             const int x = static_cast<int>(g.dragFrom.x), y = static_cast<int>(g.dragFrom.y);
             if (x < g.pictureW && y < g.pictureH && !g.picture.empty()) {
@@ -657,12 +673,43 @@ void Shell::gameSpriteSide() {
     GameCanvas& g = canvas_.game;
     const float unit = ImGui::GetFontSize();
     // playback: advance by each frame's own duration
+    // a playing tag follows its direction (forward, reverse, ping-pong) and stops after its repeats
+    auto tagOrder = [&](int t) {
+        std::vector<int> fw;
+        const std::string range = t < static_cast<int>(g.tagRanges.size()) ? g.tagRanges[static_cast<std::size_t>(t)] : std::string();
+        const auto dash = range.find('-');
+        const int a = std::clamp(std::atoi(range.c_str()), 0, g.frames - 1);
+        const int b = std::clamp(dash == std::string::npos ? a : std::atoi(range.c_str() + dash + 1), a, g.frames - 1);
+        for (int f = a; f <= b; ++f) fw.push_back(f);
+        const std::string dir = t < static_cast<int>(g.tagDirections.size()) ? g.tagDirections[static_cast<std::size_t>(t)] : "forward";
+        if (dir == "reverse") return std::vector<int>(fw.rbegin(), fw.rend());
+        if (dir == "pingpong" || dir == "pingpong_reverse") {
+            std::vector<int> out = fw;
+            for (int k = static_cast<int>(fw.size()) - 2; k > 0; --k) out.push_back(fw[static_cast<std::size_t>(k)]);
+            if (dir == "pingpong_reverse") std::rotate(out.begin(), out.begin() + static_cast<long>(fw.size()) - 1, out.end());
+            return out;
+        }
+        return fw;
+    };
     if (g.playing) {
         const double now = tp::seconds();
         const int ms = g.frame < static_cast<int>(g.durations.size()) ? g.durations[static_cast<std::size_t>(g.frame)] : 100;
         if (now - g.playClock >= ms / 1000.0) {
             g.playClock = now;
-            g.frame = (g.frame + 1) % std::max(1, g.frames);
+            if (g.playTag >= 0) {
+                const std::vector<int> order = tagOrder(g.playTag);
+                const int repeats = g.playTag < static_cast<int>(g.tagRepeats.size()) ? std::atoi(g.tagRepeats[static_cast<std::size_t>(g.playTag)].c_str()) : 0;
+                if (++g.playStep >= static_cast<int>(order.size())) {
+                    g.playStep = 0;
+                    if (repeats > 0 && ++g.playLoops >= repeats) {
+                        g.playing = false;
+                        g.playStep = static_cast<int>(order.size()) - 1;  // rest on the last frame shown
+                    }
+                }
+                if (!order.empty()) g.frame = order[static_cast<std::size_t>(std::clamp(g.playStep, 0, static_cast<int>(order.size()) - 1))];
+            } else {
+                g.frame = (g.frame + 1) % std::max(1, g.frames);
+            }
             canvas_.dirty = true;
         }
     }
@@ -679,9 +726,11 @@ void Shell::gameSpriteSide() {
     ImGui::SameLine();
     if (ImGui::SmallButton(g.playing ? "Stop" : "Play")) {
         g.playing = !g.playing;
+        g.playTag = -1;
         g.playClock = tp::seconds();
         canvas_.dirty = true;
     }
+    ImGui::SetItemTooltip("Loop every frame (the play button on a tag plays just that tag)");
     if (ImGui::Checkbox("Onion skin", &g.onion)) canvas_.dirty = true;
     ImGui::SetItemTooltip("Show the frames before (red) and after (blue) faintly under this one");
     if (ImGui::SmallButton("+ Frame")) {
@@ -707,9 +756,26 @@ void Shell::gameSpriteSide() {
     }
     ImGui::SetItemTooltip("How long this frame shows (Enter to set)");
     for (std::size_t t = 0; t < g.tags.size(); ++t) {
+        ImGui::PushID(static_cast<int>(t));
+        const bool on = g.playing && g.playTag == static_cast<int>(t);
+        if (ImGui::SmallButton(on ? "Stop" : "Play")) {
+            g.playing = !on;
+            g.playTag = on ? -1 : static_cast<int>(t);
+            g.playStep = 0;
+            g.playLoops = 0;
+            g.playClock = tp::seconds();
+            const std::vector<int> order = tagOrder(static_cast<int>(t));
+            if (!on && !order.empty()) g.frame = order.front();
+            canvas_.dirty = true;
+        }
+        const std::string dir = t < g.tagDirections.size() ? g.tagDirections[t] : std::string("forward");
+        const std::string reps = t < g.tagRepeats.size() && g.tagRepeats[t] != "0" ? ", " + g.tagRepeats[t] + "x" : std::string();
+        ImGui::SetItemTooltip("Play this tag %s%s", dir.c_str(), reps.empty() ? " on a loop" : (" " + g.tagRepeats[t] + " times").c_str());
+        ImGui::SameLine();
         const std::string range = t < g.tagRanges.size() ? g.tagRanges[t] : std::string();
-        const std::string label = g.tags[t] + "  " + range + "##tag" + std::to_string(t);
-        if (ImGui::Selectable(label.c_str(), false)) show(std::atoi(range.c_str()));
+        const std::string label = g.tags[t] + "  " + range + "  " + dir + reps;
+        if (ImGui::Selectable(label.c_str(), on)) show(std::atoi(range.c_str()));
+        ImGui::PopID();
     }
 
     ImGui::Spacing();
@@ -743,8 +809,7 @@ void Shell::gameSpriteSide() {
     const int perRow = std::max(1, static_cast<int>(ImGui::GetContentRegionAvail().x / (swatch + ImGui::GetStyle().ItemSpacing.x)));
     int shownCount = 0;
     // no palette of its own yet: PICO-8's 16 colours to pick from, as Aseprite starts with one
-    static const std::vector<std::string> starter = {"#000000", "#1d2b53", "#7e2553", "#008751", "#ab5236", "#5f574f", "#c2c3c7", "#fff1e8",
-                                                     "#ff004d", "#ffa300", "#ffec27", "#00e436", "#29adff", "#83769c", "#ff77a8", "#ffccaa"};
+    static const std::vector<std::string> starter = splitComma(kStarter);
     const std::vector<std::string>& colours = g.palette.empty() ? starter : g.palette;
     for (std::size_t i = 0; i < colours.size(); ++i) {
         float c[4];
@@ -752,7 +817,15 @@ void Shell::gameSpriteSide() {
         if (shownCount++ % perRow) ImGui::SameLine();
         ImGui::PushID(static_cast<int>(i));
         if (ImGui::ColorButton("##swatch", {c[0], c[1], c[2], c[3]}, ImGuiColorEditFlags_AlphaPreviewHalf, {swatch, swatch})) std::copy(c, c + 4, g.color);
-        ImGui::SetItemTooltip("%zu: %s", i, colours[i].c_str());
+        ImGui::SetItemTooltip(g.palette.empty() ? "%zu: %s" : "%zu: %s (right-click to swap)", i, colours[i].c_str());
+        if (!g.palette.empty() && ImGui::BeginPopupContextItem("##swap")) {
+            if (ImGui::MenuItem(("Swap to " + hexOf(g.color)).c_str())) {
+                gameRun("forge.sprite_palette", {{"action", std::string("swap")}, {"index", static_cast<std::int64_t>(i)}, {"color", hexOf(g.color)}},
+                        "Palette swap");
+            }
+            ImGui::SetItemTooltip("This entry becomes the current colour, and so does every pixel of it in every frame");
+            ImGui::EndPopup();
+        }
         ImGui::PopID();
     }
     if (g.palette.empty()) tp::muted("Sprite palette (ribbon) loads others: db16, db32, gameboy...");

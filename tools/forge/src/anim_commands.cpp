@@ -521,10 +521,12 @@ void registerAnimFileCommands(Session& session) {
                                      (t.repeat ? ", " + std::to_string(t.repeat) + " times" : "");
                     }
                     if (!sp.palette.empty()) r.message += "\npalette: " + colorsText(sp.palette);
-                    std::string tags, ranges, names, shown;
+                    std::string tags, ranges, names, shown, dirs, repeats;
                     for (const auto& t : sp.tags) {
                         tags += (tags.empty() ? "" : ",") + t.name;
                         ranges += (ranges.empty() ? "" : ",") + std::to_string(t.from) + "-" + std::to_string(t.to);
+                        dirs += (dirs.empty() ? "" : ",") + t.direction;
+                        repeats += (repeats.empty() ? "" : ",") + std::to_string(t.repeat);
                     }
                     for (const auto& l : sp.layers) {
                         names += (names.empty() ? "" : ",") + l.name;
@@ -540,7 +542,9 @@ void registerAnimFileCommands(Session& session) {
                         .with("indexed", sp.indexed)
                         .with("layer_names", names)
                         .with("layer_visible", shown)
-                        .with("tag_ranges", ranges);
+                        .with("tag_ranges", ranges)
+                        .with("tag_directions", dirs)
+                        .with("tag_repeats", repeats);
                     return r;
                 },
                 false));
@@ -802,15 +806,19 @@ void registerAnimDrawCommands(Session& session) {
              "Draw on one cel (a layer in a frame) with pixel-exact tools: pencil (dots joined by lines: points="
              "x1,y1,x2,y2,... e.g. a mouse drag), line, rect, fill_rect, ellipse, fill_ellipse (two corners), bucket "
              "(fill the same-coloured area at the first point), erase (pencil with transparency), replace (every "
-             "pixel of from_color becomes color; all_frames=true for the whole animation). color=#rrggbb or "
-             "index= (palette entry); indexed sprites snap to their palette.",
+             "pixel of from_color becomes color; all_frames=true for the whole animation), shade (a pencil stroke "
+             "that moves each pixel step= entries along a colour ramp, default the palette: 1 lighter/next, -1 "
+             "back; each pixel once per stroke, pixels off the ramp stay). color=#rrggbb or index= (palette "
+             "entry); indexed sprites snap to their palette.",
              {spriteParam(), frameParam(), layerParam(),
               {"tool", ParamType::String, "what to draw", false,
-               {"pencil", "line", "rect", "fill_rect", "ellipse", "fill_ellipse", "bucket", "erase", "replace"}, std::string("pencil")},
+               {"pencil", "line", "rect", "fill_rect", "ellipse", "fill_ellipse", "bucket", "erase", "replace", "shade"}, std::string("pencil")},
               {"points", ParamType::NumberList, "x,y pairs in px", false}, {"color", ParamType::String, "#rrggbb or #rrggbbaa", false},
               {"index", ParamType::Int, "palette entry instead of color", false},
               {"from_color", ParamType::String, "replace: the colour to change", false},
-              {"all_frames", ParamType::Bool, "replace: in every frame of the layer", false, {}, false}, previewParam()},
+              {"all_frames", ParamType::Bool, "replace: in every frame of the layer", false, {}, false},
+              {"step", ParamType::Int, "shade: entries to move along the ramp (negative goes back)", false, {}, std::int64_t{1}},
+              {"ramp", ParamType::String, "shade: comma-separated colours in order (default: the palette)", false}, previewParam()},
              true},
             spriteCommand(session, [](SpriteDoc& d, const Params& p) {
                 Sprite& sp = d.sprite;
@@ -819,12 +827,12 @@ void registerAnimDrawCommands(Session& session) {
                 if (!frameArg(sp, p, f, error) || !layerArg(sp, p, l, error)) return Result::failure(error);
                 const std::string tool = stringParam(p, "tool", "pencil");
                 Color c{0, 0, 0, 0};
-                if (tool != "erase" && !colorArg(sp, p, c, error)) return Result::failure(error);
+                if (tool != "erase" && tool != "shade" && !colorArg(sp, p, c, error)) return Result::failure(error);
                 const NumberList pts = listParam(p, "points");
                 if (pts.size() % 2) return Result::failure("points are x,y pairs");
                 std::vector<std::pair<int, int>> xy;
                 for (std::size_t i = 0; i + 1 < pts.size(); i += 2) xy.push_back({static_cast<int>(std::floor(pts[i])), static_cast<int>(std::floor(pts[i + 1]))});
-                const std::size_t need = tool == "replace" ? 0 : (tool == "pencil" || tool == "erase" || tool == "bucket") ? 1 : 2;
+                const std::size_t need = tool == "replace" ? 0 : (tool == "pencil" || tool == "erase" || tool == "bucket" || tool == "shade") ? 1 : 2;
                 if (xy.size() < need) return Result::failure(tool + " needs points=" + (need == 1 ? "x,y" : "x1,y1,x2,y2"));
                 int changed = 0;
                 auto count = [&](const Image& before, const Image& after) {
@@ -845,6 +853,40 @@ void registerAnimDrawCommands(Session& session) {
                                     img.set(x, y, c);
                                     ++changed;
                                 }
+                            }
+                        }
+                    }
+                } else if (tool == "shade") {
+                    std::vector<Color> ramp;
+                    if (p.count("ramp")) {
+                        ramp = parseColors(stringParam(p, "ramp"), error);
+                        if (ramp.empty()) return Result::failure(error.empty() ? "give ramp=#a,#b,..." : error);
+                    } else {
+                        for (std::size_t i = 0; i < sp.palette.size(); ++i) {
+                            if (!(sp.indexed && static_cast<int>(i) == sp.transparentIndex) && sp.palette[i].a > 0) ramp.push_back(sp.palette[i]);
+                        }
+                    }
+                    if (ramp.size() < 2) return Result::failure("shade needs a ramp of 2+ colours: give ramp= or a palette");
+                    const int step = static_cast<int>(intParam(p, "step", 1));
+                    Image& img = sp.cel(l, f);
+                    // the stroke's pixels, each once: drawn as a mask first
+                    Image mask(img.width(), img.height());
+                    const Color on{255, 255, 255, 255};
+                    if (xy.size() == 1) drawPixelLine(mask, xy[0].first, xy[0].second, xy[0].first, xy[0].second, on);
+                    for (std::size_t i = 1; i < xy.size(); ++i) drawPixelLine(mask, xy[i - 1].first, xy[i - 1].second, xy[i].first, xy[i].second, on);
+                    for (int y = 0; y < img.height(); ++y) {
+                        for (int x = 0; x < img.width(); ++x) {
+                            if (mask.at(x, y).a == 0) continue;
+                            const Color px = img.at(x, y);
+                            if (px.a == 0) continue;
+                            for (std::size_t i = 0; i < ramp.size(); ++i) {
+                                if (ramp[i].r != px.r || ramp[i].g != px.g || ramp[i].b != px.b) continue;
+                                const int j = std::clamp(static_cast<int>(i) + step, 0, static_cast<int>(ramp.size()) - 1);
+                                if (j != static_cast<int>(i)) {
+                                    img.set(x, y, Color{ramp[static_cast<std::size_t>(j)].r, ramp[static_cast<std::size_t>(j)].g, ramp[static_cast<std::size_t>(j)].b, px.a});
+                                    ++changed;
+                                }
+                                break;
                             }
                         }
                     }
@@ -1030,12 +1072,17 @@ void registerAnimPaletteCommands(Session& session) {
              "Edit a sprite's palette. action=preset (pico8, db16, db32, gameboy, grayscale4: name=), load (a .gpl/.pal "
              "file: path=), set (colors=#a,#b,...), from_sprite (the colours it uses), quantize (reduce the sprite to "
              "count= colours and use them), set_color (entry index= becomes color=; in an indexed sprite every pixel "
-             "of the old colour changes too: a palette swap), add (color=), remove (index=), save (path= .gpl).",
+             "of the old colour changes too), swap (a palette swap: colors=#a,#b,... replaces the palette entry for "
+             "entry and recolours every pixel of each old entry in every cel, RGBA sprites too, e.g. an enemy's "
+             "alternate skin; index= and color= recolours one entry and its pixels; index= and with= trade two "
+             "entries and their pixels), add (color=), remove "
+             "(index=), save (path= .gpl).",
              {spriteParam(),
-              {"action", ParamType::String, "what to do", true, {"preset", "load", "set", "from_sprite", "quantize", "set_color", "add", "remove", "save"}},
+              {"action", ParamType::String, "what to do", true, {"preset", "load", "set", "from_sprite", "quantize", "set_color", "swap", "add", "remove", "save"}},
               {"name", ParamType::String, "preset name", false}, {"path", ParamType::String, "palette file", false},
               {"colors", ParamType::String, "comma-separated colours", false}, {"index", ParamType::Int, "palette entry", false},
               {"color", ParamType::String, "a colour", false}, {"count", ParamType::Int, "quantize: number of colours", false, {}, std::int64_t{16}},
+              {"with", ParamType::Int, "swap: the entry to trade places with index=", false},
               {"remap", ParamType::Bool, "snap the pixels to the new palette (indexed sprites always do)", false, {}, false}, previewParam()},
              true},
             spriteCommand(session, [](SpriteDoc& d, const Params& p) {
@@ -1103,6 +1150,57 @@ void registerAnimPaletteCommands(Session& session) {
                                       (changed ? " (" + plural(static_cast<std::size_t>(changed), "pixel") + " recoloured)" : ""),
                                   p)
                         .with("changed", static_cast<std::int64_t>(changed));
+                } else if (action == "swap") {
+                    std::vector<Color> to = sp.palette;
+                    if (p.count("colors")) {
+                        auto given = parseColors(stringParam(p, "colors"), error);
+                        if (given.empty()) return Result::failure(error.empty() ? "give colors=#a,#b,..." : error);
+                        // indexed sprites keep their transparent entry: the list covers the others in order
+                        std::size_t k = 0;
+                        for (std::size_t i = 0; i < to.size() && k < given.size(); ++i) {
+                            if (sp.indexed && static_cast<int>(i) == sp.transparentIndex) continue;
+                            to[i] = given[k++];
+                        }
+                    } else if (p.count("index") && p.count("color")) {
+                        const int i = static_cast<int>(intParam(p, "index"));
+                        auto c = Color::parse(stringParam(p, "color"));
+                        if (i < 0 || i >= static_cast<int>(to.size())) return Result::failure("give index= of an existing entry");
+                        if (!c) return Result::failure("give color=#rrggbb");
+                        to[static_cast<std::size_t>(i)] = *c;
+                    } else if (p.count("index") && p.count("with")) {
+                        const int a = static_cast<int>(intParam(p, "index")), b = static_cast<int>(intParam(p, "with"));
+                        const int n = static_cast<int>(to.size());
+                        if (a < 0 || b < 0 || a >= n || b >= n) return Result::failure("index= and with= must be existing entries");
+                        std::swap(to[static_cast<std::size_t>(a)], to[static_cast<std::size_t>(b)]);
+                    } else {
+                        return Result::failure("give colors=#a,#b,... (the new palette) or index= and with=");
+                    }
+                    int changed = 0;
+                    for (auto& layer : sp.cels) {
+                        for (auto& img : layer) {
+                            if (img.empty()) continue;
+                            for (int y = 0; y < img.height(); ++y) {
+                                for (int x = 0; x < img.width(); ++x) {
+                                    const Color px = img.at(x, y);
+                                    if (px.a == 0) continue;
+                                    for (std::size_t i = 0; i < sp.palette.size(); ++i) {
+                                        const Color& o = sp.palette[i];
+                                        if (sp.indexed && static_cast<int>(i) == sp.transparentIndex) continue;
+                                        if (o.r != px.r || o.g != px.g || o.b != px.b) continue;
+                                        if (!(to[i] == o)) {
+                                            img.set(x, y, Color{to[i].r, to[i].g, to[i].b, px.a});
+                                            ++changed;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sp.palette = to;
+                    return edited("palette swapped: " + plural(static_cast<std::size_t>(changed), "pixel") + " recoloured", p)
+                        .with("changed", static_cast<std::int64_t>(changed))
+                        .with("palette", colorsText(sp.palette));
                 } else if (action == "add") {
                     auto c = Color::parse(stringParam(p, "color"));
                     if (!c) return Result::failure("give color=#rrggbb");

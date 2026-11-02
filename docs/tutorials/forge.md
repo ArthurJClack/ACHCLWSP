@@ -8,7 +8,7 @@
 
 Sprites and meshes made here go straight into Godot scenes with [scenes](scene.md) (`scene.add type=Sprite2D props="texture=..."`, `mesh=model.glb`).
 
-In the window, an open sprite gets pixel tools on the canvas (Pencil, Eraser, Line, Box, Ellipse, Bucket, Pick) with frames, onion skin, playback, layers and palette swatches beside it; every click runs the same commands shown here. Meshes and textures have no canvas tools yet. Each task below is shown three ways:
+In the window, an open sprite gets pixel tools on the canvas (Pencil, Eraser, Line, Box, Ellipse, Bucket, Shade, Pick) with frames, onion skin, playback (each tag plays in its own direction and repeat count), layers and palette swatches (right-click one to swap it) beside it; every click runs the same commands shown here. Meshes and textures have no canvas tools yet. Each task below is shown three ways:
 
 - **CLI**: single `wetwaresuite` commands that read files and write files.
 - **Batch**: a script for multi-step work with `-> name` captures and `$name` reuse (see [headless and batch](headless-and-batch.md)).
@@ -534,6 +534,22 @@ exported 4 frames to 12x36 export/slime.png + export/slime.json
 saved export/hit.gif
 ...
 ```
+
+**Shading, palette swaps and tag loops.** Three Aseprite habits, the same in the window and in batch:
+
+```
+# the shading ink: each pixel under the stroke steps one entry along a ramp (once per stroke)
+forge.draw doc=$s tool=shade points=3,9,12,9 ramp=#1d2b53,#29adff,#c2c3c7,#fff1e8
+forge.draw doc=$s tool=shade points=3,12,12,12 step=-1          # darker, along the palette when no ramp=
+# a palette swap: every pixel of each old entry takes the new colour, in every frame (RGBA sprites too)
+forge.sprite_palette doc=$s action=swap colors=#000000,#2b1d53,#53257e,#518700
+forge.sprite_palette doc=$s action=swap index=12 color=#ff77a8    # one entry
+forge.sprite_palette doc=$s action=swap index=3 with=9            # trade two entries and their pixels
+# tags keep a direction and repeat count; sprite_info lists them (tag_directions, tag_repeats)
+forge.tag_add doc=$s name=wobble from=0 to=3 direction=pingpong repeat=2
+```
+
+In the window, the **Shade** tool (D) does the first (hold Shift for darker), right-clicking a swatch offers **Swap to** the current colour, and each tag row has its own **Play** button that runs the tag forward, reversed or ping-pong and stops after its repeats (0 loops forever).
 
 `forge.sprite_open` also reads a sprite sheet (`path=sheet.png columns=6`, or `cell_width=`/`cell_height=`), a folder of frame images (`input_dir=`) or a list (`files=`), so loose frames from another tool become one animation to tag and export.
 

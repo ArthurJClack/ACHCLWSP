@@ -302,6 +302,45 @@ void testSprites(const fs::path& dir) {
 
 }  // namespace
 
+// tag directions for playback, palette swaps and the shading ink
+void testSpriteNiceties(Session& s) {
+    Result made = s.run("forge.sprite_new", {{"width", std::int64_t{8}}, {"height", std::int64_t{8}}, {"frames", std::int64_t{4}}});
+    CHECK(made.ok);
+    const std::string id = docOf(made);
+    CHECK(s.run("forge.sprite_palette", {{"doc", id}, {"action", std::string("set")}, {"colors", std::string("#200000,#600000,#a00000,#ff0000,#00ff00")}}).ok);
+    CHECK(s.run("forge.tag_add", {{"doc", id}, {"name", std::string("walk")}, {"from", std::int64_t{0}}, {"to", std::int64_t{3}},
+                                  {"direction", std::string("pingpong")}, {"repeat", std::int64_t{2}}}).ok);
+    Result info = s.run("forge.sprite_info", {{"doc", id}});
+    auto text = [](const Result& r, const std::string& k) {
+        for (const auto& [key, v] : r.data)
+            if (key == k) return std::get<std::string>(v);
+        return std::string();
+    };
+    CHECK(text(info, "tag_directions") == "pingpong" && text(info, "tag_repeats") == "2");
+    auto doc = s.workspace().getAs<forge::SpriteDoc>(id);
+    // a 4-pixel row of the second ramp colour, shaded lighter by a stroke over 3 of them
+    CHECK(s.run("forge.draw", {{"doc", id}, {"tool", std::string("line")}, {"points", NumberList{0, 0, 3, 0}}, {"color", std::string("#600000")}}).ok);
+    Result sh = s.run("forge.draw", {{"doc", id}, {"tool", std::string("shade")}, {"points", NumberList{0, 0, 1, 0, 2, 0, 1, 0, 0, 0}}});
+    CHECK(sh.ok && intField(sh, "changed") == 3);  // each pixel once even though the stroke doubles back
+    CHECK(doc->sprite.cel(0, 0).at(1, 0) == (raster::Color{0xa0, 0, 0, 255}) && doc->sprite.cel(0, 0).at(3, 0) == (raster::Color{0x60, 0, 0, 255}));
+    // darken twice with step=-2, clamped at the ramp's start; off-ramp and empty pixels stay
+    CHECK(s.run("forge.draw", {{"doc", id}, {"tool", std::string("shade")}, {"points", NumberList{0, 0, 7, 0}}, {"step", std::int64_t{-2}}}).ok);
+    CHECK(doc->sprite.cel(0, 0).at(0, 0) == (raster::Color{0x20, 0, 0, 255}) && doc->sprite.cel(0, 0).at(7, 0).a == 0);
+    CHECK(s.run("forge.draw", {{"doc", id}, {"tool", std::string("shade")}, {"points", NumberList{4, 4}}, {"ramp", std::string("#ffffff")}}).ok == false);
+    // palette swap: the reds become blues in every frame
+    CHECK(s.run("forge.draw", {{"doc", id}, {"frame", std::int64_t{2}}, {"points", NumberList{5, 5}}, {"color", std::string("#ff0000")}}).ok);
+    Result sw = s.run("forge.sprite_palette", {{"doc", id}, {"action", std::string("swap")}, {"colors", std::string("#000020,#000060,#0000a0,#0000ff")}});
+    CHECK(sw.ok && intField(sw, "changed") == 5);
+    CHECK(doc->sprite.cel(0, 2).at(5, 5) == (raster::Color{0, 0, 0xff, 255}) && doc->sprite.cel(0, 0).at(0, 0) == (raster::Color{0, 0, 0x20, 255}));
+    CHECK(doc->sprite.palette[4] == (raster::Color{0, 0xff, 0, 255}));  // a shorter list leaves the rest
+    // trade two entries
+    CHECK(s.run("forge.sprite_palette", {{"doc", id}, {"action", std::string("swap")}, {"index", std::int64_t{3}}, {"with", std::int64_t{4}}}).ok);
+    CHECK(doc->sprite.cel(0, 2).at(5, 5) == (raster::Color{0, 0xff, 0, 255}) && doc->sprite.palette[3] == (raster::Color{0, 0xff, 0, 255}));
+    CHECK(s.run("forge.sprite_palette", {{"doc", id}, {"action", std::string("swap")}, {"index", std::int64_t{3}}, {"color", std::string("#ffff00")}}).ok);
+    CHECK(doc->sprite.cel(0, 2).at(5, 5) == (raster::Color{0xff, 0xff, 0, 255}));
+    CHECK(!s.run("forge.sprite_palette", {{"doc", id}, {"action", std::string("swap")}}).ok);
+}
+
 // a flat low-poly square and a high-poly one with a dome in the middle
 void testBake(Session& s, const fs::path& dir) {
     mesh::Mesh low = mesh::plane(2, 2, 1, 1);
@@ -357,6 +396,7 @@ int main() {
     Session s;
     forge::registerCommands(s);
     testBake(s, dir);
+    testSpriteNiceties(s);
     for (const auto& info : s.registry().list()) CHECK(info.id.rfind("forge.", 0) == 0);
 
     // ---- meshes ----

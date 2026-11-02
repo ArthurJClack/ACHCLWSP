@@ -75,7 +75,7 @@ enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal
 enum class SelectShape { Rect, Ellipse, Lasso, Wand };
 
 // Click tools for game levels (levels.*) and pixel-art sprites (forge.sprite_*), game_view.cpp.
-enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket, Select, Translate, Rotate, Scale, Terrain, Stamp, ObjSelect };
+enum class GameTool { Move, Paint, Rect, Erase, Fill, Object, Pick, Pencil, Eraser, Line, Box, Ellipse, Bucket, Select, Translate, Rotate, Scale, Terrain, Stamp, ObjSelect, Shade };
 
 // A Godot-style scene open on the canvas (scene_view.cpp): the tree, the selected node's
 // inspector, and the fixed 2D view (or 3D orbit) the picture was drawn with.
@@ -140,7 +140,8 @@ struct GameCanvas {
     int objFor = -1;
     // sprite
     int frame = 0, frames = 1, spriteLayer = 0, width = 0, height = 0;
-    std::vector<std::string> spriteLayers, palette, tags, tagRanges;
+    std::vector<std::string> spriteLayers, palette, tags, tagRanges, tagDirections, tagRepeats;
+    int playTag = -1, playStep = 0, playLoops = 0;  // a tag playing in its own direction: the step in its frame order
     std::vector<bool> layerShown;
     std::vector<int> durations;
     bool onion = false, playing = false, filled = false;
