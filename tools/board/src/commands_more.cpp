@@ -594,6 +594,70 @@ void registerQuery(CommandRegistry& reg, Session& session) {
                 res.attach({"image/png", raster::encodePng(img), "board.png"});
                 return res;
             }, false));
+
+    reg.add({"board.view", "Board View",
+             "The area of the board the window's picture shows (its own preview): x, y, width and height in board units "
+             "and scale (picture px per unit). The window uses it to turn mouse clicks into board positions.",
+             {docParam()},
+             false, true},
+            boardCommandFactory(session, [](BoardDoc& doc, const Params& p) {
+                RenderOptions o;
+                const Box r = renderRegion(doc.board, o);
+                const double scale = std::clamp(768.0 / std::max({r.w(), r.h(), 1.0}), 0.05, 2.0);  // as BoardDoc::preview
+                Result res = Result::success("shows " + fmtNum(std::round(r.x0)) + "," + fmtNum(std::round(r.y0)) + " " + fmtNum(std::round(r.w())) +
+                                             "x" + fmtNum(std::round(r.h())) + " at " + fmtNum(scale) + " px per unit");
+                res.with("doc", stringParam(p, "doc")).with("x", r.x0).with("y", r.y0).with("width", r.w()).with("height", r.h()).with("scale", scale);
+                return res;
+            }, false));
+
+    reg.add({"board.hit", "Element At",
+             "The element at a point (the top one): shapes by their box, connectors and ink within `tolerance` of the "
+             "line. Returns id (empty when nothing is there), type, x, y, w, h and text. Groups are skipped (their "
+             "members are hit); a frame is hit only where nothing inside it is.",
+             {docParam(), {"x", ParamType::Number, "board x", true}, {"y", ParamType::Number, "board y", true},
+              {"tolerance", ParamType::Number, "how close to a line counts, board units", false, {}, 6.0}},
+             false, true},
+            boardCommandFactory(session, [](BoardDoc& doc, const Params& p) {
+                const Board& b = doc.board;
+                const double x = numberParam(p, "x", 0), y = numberParam(p, "y", 0), tol = std::max(0.5, numberParam(p, "tolerance", 6));
+                auto nearLine = [&](const std::vector<Pt>& pts) {
+                    for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+                        const double ax = pts[i].x, ay = pts[i].y, bx = pts[i + 1].x, by = pts[i + 1].y;
+                        const double dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+                        const double t = len > 0 ? std::clamp(((x - ax) * dx + (y - ay) * dy) / len, 0.0, 1.0) : 0;
+                        if (std::hypot(ax + t * dx - x, ay + t * dy - y) <= tol) return true;
+                    }
+                    return false;
+                };
+                const Element* hit = nullptr;
+                const Element* frame = nullptr;
+                for (auto it = b.elements.rbegin(); it != b.elements.rend() && !hit; ++it) {
+                    const Element& e = *it;
+                    if (e.kind == Kind::Group) continue;
+                    if (const Layer* l = b.layer(e.layer); l && (!l->visible || l->locked)) continue;
+                    if (e.kind == Kind::Connector) {
+                        if (nearLine(connectorPath(b, e))) hit = &e;
+                    } else if (e.kind == Kind::Ink) {
+                        std::vector<Pt> pts;
+                        for (const auto& q : e.ink) pts.push_back({q.x, q.y});
+                        if (nearLine(pts)) hit = &e;
+                    } else if (x >= e.x && x <= e.x + e.w && y >= e.y && y <= e.y + e.h) {
+                        if (e.kind == Kind::Frame) {
+                            if (!frame) frame = &e;
+                        } else {
+                            hit = &e;
+                        }
+                    }
+                }
+                if (!hit) hit = frame;
+                Result res = Result::success(hit ? describeElement(b, *hit) : std::string("nothing there"));
+                res.with("doc", stringParam(p, "doc")).with("id", hit ? hit->id : std::string());
+                if (hit) {
+                    const Box box = elementBox(b, *hit);
+                    res.with("type", std::string(toString(hit->kind))).with("x", box.x0).with("y", box.y0).with("w", box.w()).with("h", box.h()).with("text", hit->text);
+                }
+                return res;
+            }, false));
 }
 
 }  // namespace

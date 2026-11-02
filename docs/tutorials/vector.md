@@ -943,13 +943,17 @@ with `vector.simplify` for fewer anchors.
 
 ## 20. in the window
 
-Open a drawing in `wetwaresuite-draw` (or the suite). The canvas toolbar has
-two drawing tools next to **Move**:
+Open a drawing in `wetwaresuite-draw` (or the suite). The tool rail on the
+left has **Move**, then:
 
 1. **Pick.** Click a shape to pick it (a click inside a group picks the
    group). A box with eight handles appears.
-   - Drag the shape to move it. It snaps to the grid, guides and anchors
-     when `vector.grid` turned snapping on.
+   - Drag the shape to move it. **Smart guides** line it up as you drag:
+     its left, centre or right (top, middle or bottom) snaps to the same
+     line of any other shape or of the canvas, and a pink line shows what
+     it lined up with. Hold Ctrl to drag without snapping. Away from other
+     shapes it snaps to the grid, guides and anchors when `vector.grid`
+     turned snapping on.
    - Drag a corner or edge handle to resize; the opposite side stays put.
      Hold Shift on a corner to keep the proportions.
    - Arrow keys nudge by 1 px (Shift: 10 px); Delete removes it.
@@ -960,8 +964,24 @@ two drawing tools next to **Move**:
    (dots). Drag an anchor to move it, or a handle to bend the curve; hold
    Alt while letting go to break a smooth pair. Alt+click on the path adds
    an anchor. Rectangles and ellipses become paths the first time you do.
+3. **Rectangle, Ellipse, Line.** Drag to draw (Shift: square or circle).
+4. **Pen.** Like Illustrator's: click for a corner, or **click and drag** to
+   pull out curve handles (a smooth point). Hold **Alt** while dragging to
+   move only the outgoing handle, which breaks the pair for a sharp turn.
+   Click the first anchor to close the shape (filled), press Enter or
+   double-click to end an open line, Backspace takes back the last anchor,
+   Esc throws it away.
+5. **Text.** Click where the words go, type, Enter.
+6. **Gradient.** Pick the two colours on the bar, then drag across a shape:
+   the gradient runs from the first colour to the second in the direction
+   you dragged. Alt+drag makes it radial. Fine-tune it later with
+   `vector.gradient` (stops, freeform points).
+7. **Builder.** The shape builder: drag across overlapping shapes and every
+   piece you cross joins into one shape; Alt+drag deletes the pieces you
+   cross instead. Pieces you don't touch stay as separate shapes.
 
-Every drag is one command (`vector.transform` or `vector.move_node`), so
+Every drag is one command (`vector.transform`, `vector.move_node`,
+`vector.add_path`, `vector.gradient`, `vector.shape_builder`), so
 Undo takes it back and the history shows it. Everything else in this
 tutorial is in the command search (Ctrl+K): type "shape builder", "offset",
 "symbol" and fill in the form.
@@ -1096,7 +1116,7 @@ take `doc` and `shape`, adds take `doc`; ✓ = undoable):
 | `vector.group` ✓ / `vector.ungroup` ✓ | groups | `shapes`, `name` |
 | `vector.lock` ✓, `vector.move_to` ✓ | lock, move into a layer | `locked` / `into` |
 | `vector.repeat` ✓ | grid, radial, mirror copies | `mode`, ... |
-| `vector.hit`, `vector.select_area`, `vector.bounds` | picking by position | `x`, `y` / box |
+| `vector.hit`, `vector.select_area`, `vector.bounds`, `vector.boxes` | picking by position; every shape's box (smart guides) | `x`, `y` / box / `except` |
 | `vector.add_artboard` ✓, `vector.remove_artboard` ✓, `vector.artboards` | artboards | `name`, `x`, `y`, `width`, `height` |
 | `vector.guides` ✓, `vector.grid` ✓, `vector.snap` | guides, grid, snapping | |
 | `vector.symbol` ✓, `vector.place_symbol` ✓, `vector.expand_symbol` ✓ | symbols | `name`, `shapes`, `x`, `y` |

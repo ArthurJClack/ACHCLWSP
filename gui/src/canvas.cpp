@@ -78,6 +78,15 @@ bool Shell::toolAvailable(CanvasTool tool) const {
     if (tool == CanvasTool::VecLine) return vectorDoc() && find("vector.add_line");
     if (tool == CanvasTool::VecPen) return vectorDoc() && find("vector.add_path");
     if (tool == CanvasTool::VecText) return vectorDoc() && find("vector.add_text");
+    if (tool == CanvasTool::VecGradient) return vectorDoc() && find("vector.gradient");
+    if (tool == CanvasTool::VecBuilder) return vectorDoc() && find("vector.shape_builder") && find("vector.select_area");
+    if (glyphTool(tool)) return fontDoc();
+    if (boardTool(tool)) {
+        if (!boardDoc()) return false;
+        if (tool == CanvasTool::BoardConnect) return find("board.connect") != nullptr;
+        if (tool == CanvasTool::BoardPen) return find("board.ink") != nullptr;
+        return find("board.add") != nullptr;
+    }
     auto doc = session_.workspace().get(currentDoc_);
     if (!doc || doc->kind() != "image") return false;
     switch (tool) {
@@ -223,6 +232,23 @@ const CanvasToolDef kCanvasTools[] = {
      "Click to put down corners. Click the first one again to close the shape (filled); Enter or double-click ends an "
      "open line; Esc throws it away"},
     {"Text", CanvasTool::VecText, "T", "Click where the words go, type, press Enter"},
+    {"Gradient", CanvasTool::VecGradient, "G",
+     "Drag across a shape to fill it with a gradient from the first colour to the second, in the drag's direction "
+     "(Alt: radial)"},
+    {"Builder", CanvasTool::VecBuilder, "^M",
+     "Shape builder: drag across overlapping shapes to merge the pieces you cross into one shape; Alt+drag deletes them"},
+    {"Select", CanvasTool::BoardSelect, "V",
+     "Click to pick, drag to move, drag the corner dot to resize. Double-click a shape or note to type on it. Delete removes"},
+    {"Note", CanvasTool::BoardNote, "N", "Click to stick a note and type on it straight away (drag to make it a size)"},
+    {"Box", CanvasTool::BoardShape, "R", "Click or drag to draw a box, then type its label"},
+    {"Circle", CanvasTool::BoardEllipse, "O", "Click or drag to draw an ellipse, then type its label"},
+    {"Words", CanvasTool::BoardText, "T", "Click and type: free text on the board"},
+    {"Connect", CanvasTool::BoardConnect, "C",
+     "Drag from one shape to another: the arrow stays attached when they move. Let go on empty board for a loose end"},
+    {"Ink", CanvasTool::BoardPen, "P", "Draw freehand with the mouse or a pen (pressure works)"},
+    {"Edit glyph", CanvasTool::GlyphEdit, "A",
+     "One letter big with its metrics: drag its points to reshape it (handles follow their point). Type another letter on the bar"},
+    {"Draw glyph", CanvasTool::GlyphDraw, "P", "Click corners to draw a new contour into the letter; click the first corner to close it (tick Cut a hole for a counter)"},
     {"Select", CanvasTool::Select, "M",
      "Choose the part of the picture to change: drag a box, oval or lasso, or click with the wand. Shift adds, "
      "Alt takes away. Edits then only change inside it"},
@@ -251,7 +277,7 @@ const CanvasToolDef kCanvasTools[] = {
 }  // namespace
 
 void Shell::canvasTools() {
-    const CanvasTool editing[] = {CanvasTool::Pick, CanvasTool::Anchor, CanvasTool::Select, CanvasTool::Transform, CanvasTool::Type, CanvasTool::Brush, CanvasTool::Eraser, CanvasTool::Fill, CanvasTool::Heal,
+    const CanvasTool editing[] = {CanvasTool::GlyphEdit, CanvasTool::BoardSelect, CanvasTool::Pick, CanvasTool::Anchor, CanvasTool::Select, CanvasTool::Transform, CanvasTool::Type, CanvasTool::Brush, CanvasTool::Eraser, CanvasTool::Fill, CanvasTool::Heal,
                                   CanvasTool::Remove, CanvasTool::Clone, CanvasTool::Dodge, CanvasTool::Smudge, CanvasTool::Blur};
     if (std::none_of(std::begin(editing), std::end(editing), [this](CanvasTool t) { return toolAvailable(t); })) return;
     for (const auto& t : kCanvasTools) {
@@ -267,6 +293,11 @@ void Shell::railTools() {
     if (circuitDoc()) return circuitTools();
     if (mapsDoc()) return mapsTools();
     if (gameActive()) return gameTools();
+    if (board_.doc != currentDoc_ && boardDoc()) {  // a whiteboard opens ready to pick and type, like Miro
+        board_ = BoardView{};
+        board_.doc = currentDoc_;
+        if (canvas_.tool == CanvasTool::Move || !boardTool(canvas_.tool)) canvas_.tool = CanvasTool::BoardSelect;
+    }
     canvasTools();
     // Ctrl+T: free transform, as in Photoshop
     const ImGuiIO& io = ImGui::GetIO();
@@ -319,6 +350,28 @@ void Shell::canvasToolbar() {
     }
     if (canvas_.tool == CanvasTool::Pick || canvas_.tool == CanvasTool::Anchor) {
         vectorSettings();
+        return;
+    }
+    if (boardTool(canvas_.tool)) {
+        boardSettings();
+        return;
+    }
+    if (glyphTool(canvas_.tool)) {
+        glyphSettings();
+        return;
+    }
+    if (canvas_.tool == CanvasTool::VecGradient) {
+        barLabel("From");
+        ImGui::ColorEdit4("##gradfrom", canvas_.color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+        ImGui::SameLine();
+        barLabel("To");
+        ImGui::ColorEdit4("##gradto", canvas_.color2, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+        ImGui::SameLine();
+        ImGui::TextDisabled("drag across a shape (Alt: radial)");
+        return;
+    }
+    if (canvas_.tool == CanvasTool::VecBuilder) {
+        ImGui::TextDisabled("drag across overlapping shapes to merge the pieces; Alt+drag deletes pieces");
         return;
     }
     if (vectorDrawTool(canvas_.tool)) {
@@ -615,6 +668,11 @@ void Shell::canvasArea() {
     dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 255));
     dl->AddImage(t.id(), p0, p1);
     dl->AddRect({p0.x - 1, p0.y - 1}, {p1.x + 1, p1.y + 1}, ImGui::GetColorU32(ImGuiCol_Border));
+    if (glyphTool(canvas_.tool) && toolAvailable(canvas_.tool)) {  // the glyph editor covers the overview
+        glyphCanvas(dl, v0, size, hovered, active);
+        dl->PopClipRect();
+        return;
+    }
     if (game) {
         gameInput(dl, p0, hovered && painting, active);
         dl->PopClipRect();
@@ -644,6 +702,8 @@ void Shell::canvasArea() {
     }
     if (canvas_.tool == CanvasTool::Type && toolAvailable(CanvasTool::Type)) imageTextInput(p0, hovered && painting);
     else if (imgText_.open) imageTextFinish(false);
+    // (while typing on a shape, Space is a space, not the pan key)
+    if (boardTool(canvas_.tool) && toolAvailable(canvas_.tool) && (!ImGui::IsKeyDown(ImGuiKey_Space) || board_.editing)) boardCanvas(dl, p0, hovered, active);
     const bool vectorTool = canvas_.tool == CanvasTool::Pick || canvas_.tool == CanvasTool::Anchor || vectorDrawTool(canvas_.tool);
     if (painting && vectorTool) {
         if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) vectorPress(io.MousePos);

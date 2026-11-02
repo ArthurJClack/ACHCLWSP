@@ -25,6 +25,7 @@ Every example was run against the real binary, in an empty folder holding only t
 11. [File formats](#11-file-formats)
 12. [Command reference](#12-command-reference)
 13. [Limitations](#13-limitations)
+14. [In the window](#14-in-the-window)
 
 ## 1. The ideas you need
 
@@ -621,6 +622,8 @@ A ```` ```mermaid ```` fence and `---` front matter around the text are skipped.
 | `board.find` | search | `text`, `type`, `layer`, `connected`, `inside`, `limit` |
 | `board.info` | describe the board or one element | `id`, `limit` |
 | `board.preview` | PNG without changing anything | `scale` or `max_size`, `region`, `only`, `layers` |
+| `board.view` | the area the window's picture shows, and its scale (read-only) | |
+| `board.hit` | the element at a point (read-only) | `x`, `y`, `tolerance` |
 
 `wetwaresuite help board.<command>` prints every parameter with its type and default. Over MCP the tools are named `board_new`, `board_add`, ... and also `undo`, `redo`, `history` and `documents`; open boards are MCP resources with live previews.
 
@@ -635,3 +638,15 @@ A ```` ```mermaid ```` fence and `---` front matter around the text are skipped.
 - Excalidraw: closed `line` polygons come back as open polylines; arrow labels that Excalidraw stores as separate text become connector labels only when bound. draw.io: only the first page is read; stencils without an equivalent (UML, cloud icons, ...) open as rectangles with their label; freehand ink is written as a curved line; HTML formatting in labels is dropped.
 - PDF export is one page; there is no tiling of very large boards onto paper sizes (use `region=` per page).
 - Very large boards: elbow routing looks at shapes within a few hundred units of each connector, and PNG exports are capped at 12000 px on the longest side (the scale drops to fit).
+
+## 14. In the window
+
+Open a board in `wetwaresuite-draw` (Whiteboard tab) and draw on it directly, like Miro or Excalidraw. The rail on the left:
+
+- **Select** (V): click a shape, note, connector or ink stroke to pick it. Drag to move it (connectors attached to it follow), drag the dot at its bottom-right corner to resize. **Double-click** a shape or note (or press Enter) to type on it: Enter keeps the words, Ctrl+Enter starts a new line, Esc cancels. Arrow keys nudge (Shift: further), Delete removes. The bar has Edit text, Front, Back, Duplicate, a colour (fill for shapes, line colour for connectors and ink) and Delete.
+- **Note** (N), **Box** (R), **Circle** (O): click to drop one at a default size, or drag to make it the size you want. You're typing on it straight away; afterwards the tool goes back to Select.
+- **Words** (T): free text; click and type.
+- **Connect** (C): drag from one shape to another. The arrow is attached, so it follows when either shape moves. Let go on empty board (or start on empty board) for a loose end.
+- **Ink** (P): draw freehand with the mouse or a pen. The bar sets the width.
+
+New things use the board's theme colours until you pick a colour on the bar. Middle or right drag pans, the wheel zooms, Space+drag pans too. Every action is one board command (`board.add`, `board.set`, `board.connect`, `board.ink`, `board.remove`), so Ctrl+Z takes it back and Claude sees the same board.

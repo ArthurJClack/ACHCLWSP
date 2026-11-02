@@ -150,6 +150,9 @@ void Shell::vectorPress(ImVec2 screen) {
             penFinish(false);
         } else {
             pts.push_back(at);
+            canvas_.penIn.push_back(at);
+            canvas_.penOut.push_back(at);
+            canvas_.vecDrag = 5;  // dragging now pulls out curve handles
         }
         return;
     }
@@ -161,6 +164,7 @@ void Shell::vectorPress(ImVec2 screen) {
     }
     if (vectorDrawTool(canvas_.tool)) {  // drawing a new shape: see vectorRelease
         canvas_.vecDrag = 4;
+        canvas_.builderPts = {at.x, at.y};
         return;
     }
     if (canvas_.tool == CanvasTool::Anchor && !canvas_.vecNodes.empty()) {
@@ -207,14 +211,79 @@ void Shell::vectorPress(ImVec2 screen) {
             else fillPicked(true);
         }
     }
-    if (!picked.empty() && canvas_.tool == CanvasTool::Pick) canvas_.vecDrag = 1;
+    if (!picked.empty() && canvas_.tool == CanvasTool::Pick) {
+        canvas_.vecDrag = 1;
+        // smart guides: the other shapes' boxes to line up with
+        canvas_.guideBoxes.clear();
+        Result boxes = query("vector.boxes", {{"doc", currentDoc_}, {"except", picked}});
+        const std::string text = fieldText(boxes, "boxes");
+        std::size_t at0 = 0;
+        while (at0 < text.size()) {
+            std::size_t end = text.find('\n', at0);
+            if (end == std::string::npos) end = text.size();
+            char id[64];
+            float v[4];
+            if (std::sscanf(text.substr(at0, end - at0).c_str(), "%63s %f %f %f %f", id, &v[0], &v[1], &v[2], &v[3]) == 5)
+                canvas_.guideBoxes.insert(canvas_.guideBoxes.end(), v, v + 4);
+            at0 = end + 1;
+        }
+        int cw = 0, ch = 0;  // the canvas edges and middle count too
+        if (std::sscanf(canvas_.summary.c_str(), "%dx%d", &cw, &ch) == 2) {
+            const float c[4] = {0, 0, static_cast<float>(cw), static_cast<float>(ch)};
+            canvas_.guideBoxes.insert(canvas_.guideBoxes.end(), c, c + 4);
+        }
+    }
+}
+
+// Figma-style smart guides: the dragged box's left/centre/right (top/middle/bottom) snap to the
+// same lines of the other shapes within 6 screen px; the lines it snapped to are drawn pink.
+void Shell::vectorGuides(float& dx, float& dy) {
+    canvas_.guideX = canvas_.guideY = NAN;
+    if (!canvas_.vecHasBox || ImGui::GetIO().KeyCtrl) return;  // Ctrl: no snapping
+    const float u = unitsPerPx(canvas_.summary, canvas_.texture);
+    const float reach = 6 * u / std::max(canvas_.zoom, 0.01f);
+    const float* b = canvas_.vecBox;
+    const float mine[2][3] = {{b[0] + dx, b[0] + dx + b[2] / 2, b[0] + dx + b[2]}, {b[1] + dy, b[1] + dy + b[3] / 2, b[1] + dy + b[3]}};
+    float best[2] = {reach, reach}, shift[2] = {0, 0}, line[2] = {NAN, NAN};
+    const auto& g = canvas_.guideBoxes;
+    for (std::size_t i = 0; i + 3 < g.size(); i += 4) {
+        const float theirs[2][3] = {{g[i], g[i] + g[i + 2] / 2, g[i] + g[i + 2]}, {g[i + 1], g[i + 1] + g[i + 3] / 2, g[i + 1] + g[i + 3]}};
+        for (int axis = 0; axis < 2; ++axis)
+            for (float m : mine[axis])
+                for (float t : theirs[axis])
+                    if (std::abs(t - m) < best[axis]) best[axis] = std::abs(t - m), shift[axis] = t - m, line[axis] = t;
+    }
+    dx += shift[0], dy += shift[1];
+    canvas_.guideX = line[0], canvas_.guideY = line[1];
 }
 
 void Shell::vectorDrag(ImVec2 screen) {
     const float u = unitsPerPx(canvas_.summary, canvas_.texture);
     const ImVec2 img = toImage(screen);
     canvas_.vecNow = {img.x * u, img.y * u};
-    if (canvas_.vecDrag == 1 && canvas_.vecHasBox) {  // snap the box's corner to the grid, guides or anchors
+    if (canvas_.vecDrag == 5 && !canvas_.penPoints.empty()) {  // Illustrator's pen: drag pulls a smooth pair, Alt just this side
+        const ImVec2 a = canvas_.penPoints.back();
+        canvas_.penOut.back() = canvas_.vecNow;
+        if (!ImGui::GetIO().KeyAlt) canvas_.penIn.back() = {2 * a.x - canvas_.vecNow.x, 2 * a.y - canvas_.vecNow.y};
+        return;
+    }
+    if (canvas_.vecDrag == 4 && canvas_.tool == CanvasTool::VecBuilder) {  // the regions the drag crosses
+        auto& b = canvas_.builderPts;
+        if (b.size() < 2 || std::hypot(b[b.size() - 2] - canvas_.vecNow.x, b.back() - canvas_.vecNow.y) > 4 * u / std::max(canvas_.zoom, 0.01f)) {
+            b.push_back(canvas_.vecNow.x);
+            b.push_back(canvas_.vecNow.y);
+        }
+        return;
+    }
+    if (canvas_.vecDrag == 1 && canvas_.vecHasBox) {
+        float sdx = canvas_.vecNow.x - canvas_.vecStart.x, sdy = canvas_.vecNow.y - canvas_.vecStart.y;
+        vectorGuides(sdx, sdy);
+        if (!std::isnan(canvas_.guideX) || !std::isnan(canvas_.guideY)) {
+            canvas_.vecNow = {canvas_.vecStart.x + sdx, canvas_.vecStart.y + sdy};
+            return;
+        }
+    }
+    if (canvas_.vecDrag == 1 && canvas_.vecHasBox) {  // no shape to line up with: snap the corner to the grid, guides or anchors
         const float dx = canvas_.vecNow.x - canvas_.vecStart.x, dy = canvas_.vecNow.y - canvas_.vecStart.y;
         Result s = query("vector.snap", {{"doc", currentDoc_}, {"x", static_cast<double>(canvas_.vecBox[0] + dx)},
                                          {"y", static_cast<double>(canvas_.vecBox[1] + dy)}, {"radius", static_cast<double>(8 * u / canvas_.zoom)}});
@@ -231,12 +300,38 @@ void Shell::drawVectorDraft(ImDrawList* dl, ImVec2 p0) const {
     auto screen = [&](ImVec2 at) { return ImVec2{p0.x + at.x / u * canvas_.zoom, p0.y + at.y / u * canvas_.zoom}; };
     if (canvas_.tool == CanvasTool::VecPen && !canvas_.penPoints.empty()) {
         const ImU32 col = ImGui::ColorConvertFloat4ToU32(accent_);
+        const auto& a = canvas_.penPoints;
+        for (std::size_t i = 0; i + 1 < a.size(); ++i)
+            dl->AddBezierCubic(screen(a[i]), screen(canvas_.penOut[i]), screen(canvas_.penIn[i + 1]), screen(a[i + 1]), col, 2);
+        if (canvas_.vecDrag != 5) dl->AddLine(screen(a.back()), ImGui::GetIO().MousePos, col, 1);
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const ImVec2 q = screen(a[i]);
+            dl->AddRectFilled({q.x - 3, q.y - 3}, {q.x + 3, q.y + 3}, col);
+            if (i + 1 == a.size() || i + 2 == a.size()) {  // the handles of the newest anchors
+                for (const ImVec2& h : {canvas_.penIn[i], canvas_.penOut[i]}) {
+                    if (std::abs(h.x - a[i].x) < 1e-4f && std::abs(h.y - a[i].y) < 1e-4f) continue;
+                    dl->AddLine(q, screen(h), col, 1);
+                    dl->AddCircleFilled(screen(h), 3.5f, col);
+                }
+            }
+        }
+        if (a.size() >= 3) dl->AddCircle(screen(a[0]), 7, col, 0, 1.5f);  // click here to close
+        return;
+    }
+    if (canvas_.vecDrag == 4 && canvas_.tool == CanvasTool::VecGradient) {
+        const ImVec2 a = screen(canvas_.vecStart), b = screen(canvas_.vecNow);
+        dl->AddLine(a, b, IM_COL32(255, 255, 255, 255), 3);
+        dl->AddLine(a, b, ImGui::ColorConvertFloat4ToU32(accent_), 1.5f);
+        dl->AddCircleFilled(a, 5, ImGui::ColorConvertFloat4ToU32({canvas_.color[0], canvas_.color[1], canvas_.color[2], 1}));
+        dl->AddCircleFilled(b, 5, ImGui::ColorConvertFloat4ToU32({canvas_.color2[0], canvas_.color2[1], canvas_.color2[2], 1}));
+        return;
+    }
+    if (canvas_.vecDrag == 4 && canvas_.tool == CanvasTool::VecBuilder) {
         std::vector<ImVec2> pts;
-        for (const auto& q : canvas_.penPoints) pts.push_back(screen(q));
-        dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), col, ImDrawFlags_None, 2);
-        dl->AddLine(pts.back(), ImGui::GetIO().MousePos, col, 1);
-        for (const auto& q : pts) dl->AddRectFilled({q.x - 3, q.y - 3}, {q.x + 3, q.y + 3}, col);
-        if (pts.size() >= 3) dl->AddCircle(pts[0], 7, col, 0, 1.5f);  // click here to close
+        for (std::size_t i = 0; i + 1 < canvas_.builderPts.size(); i += 2)
+            pts.push_back(screen({static_cast<float>(canvas_.builderPts[i]), static_cast<float>(canvas_.builderPts[i + 1])}));
+        const ImU32 col = ImGui::GetIO().KeyAlt ? IM_COL32(220, 60, 60, 220) : ImGui::ColorConvertFloat4ToU32(accent_);
+        if (pts.size() >= 2) dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), col, ImDrawFlags_None, 3);
         return;
     }
     if (canvas_.vecDrag != 4) return;
@@ -262,6 +357,53 @@ ImVec2 Shell::vectorDrawEnd() const {
 }
 
 void Shell::vectorDrawRelease() {
+    if (canvas_.tool == CanvasTool::VecGradient) {  // the drag is the gradient's direction, on the shape under its start
+        const ImVec2 a = canvas_.vecStart, b = canvas_.vecNow;
+        if (std::hypot(b.x - a.x, b.y - a.y) < 1) return;
+        std::string shape = canvas_.vecSel;
+        Result hit = query("vector.hit", {{"doc", currentDoc_}, {"x", static_cast<double>(a.x)}, {"y", static_cast<double>(a.y)}, {"tolerance", 2.0}});
+        if (const std::string under = fieldText(hit, "select"); !under.empty()) shape = under;
+        if (shape.empty()) {
+            resultFor_ = "Gradient";
+            result_ = Result::failure("Start the drag on a shape to fill it with the gradient.");
+            return;
+        }
+        const double angle = std::atan2(b.y - a.y, b.x - a.x) * 180.0 / 3.14159265358979;
+        const std::string c1 = toHex({canvas_.color[0], canvas_.color[1], canvas_.color[2], canvas_.color[3]});
+        const std::string c2 = toHex({canvas_.color2[0], canvas_.color2[1], canvas_.color2[2], canvas_.color2[3]});
+        Params p{{"doc", currentDoc_}, {"shape", shape}, {"colors", c1 + "," + c2}};
+        if (ImGui::GetIO().KeyAlt) {  // Alt: radial, centred where the drag started
+            p["type"] = std::string("radial");
+        } else {
+            p["angle"] = angle;
+        }
+        Result r = run("vector.gradient", p);
+        resultFor_ = "Gradient";
+        canvas_.vecSel = shape;
+        canvas_.vecLoaded = ~0ull;
+        r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+        result_ = std::move(r);
+        return;
+    }
+    if (canvas_.tool == CanvasTool::VecBuilder) {  // drag across overlapping shapes: merge the regions crossed (Alt deletes them)
+        auto pts = std::move(canvas_.builderPts);
+        canvas_.builderPts.clear();
+        if (pts.size() < 2) return;
+        double x0 = pts[0], y0 = pts[1], x1 = pts[0], y1 = pts[1];
+        for (std::size_t i = 0; i + 1 < pts.size(); i += 2) x0 = std::min(x0, pts[i]), x1 = std::max(x1, pts[i]), y0 = std::min(y0, pts[i + 1]), y1 = std::max(y1, pts[i + 1]);
+        Result area = query("vector.select_area", {{"doc", currentDoc_}, {"x", x0}, {"y", y0}, {"width", std::max(1.0, x1 - x0)}, {"height", std::max(1.0, y1 - y0)}, {"touch", true}});
+        const std::string shapes = fieldText(area, "shapes");
+        if (shapes.empty()) return;
+        Params p{{"doc", currentDoc_}, {"shapes", shapes}};
+        p[ImGui::GetIO().KeyAlt ? "erase" : "merge"] = NumberList(pts.begin(), pts.end());
+        Result r = run("vector.shape_builder", p);
+        resultFor_ = "Shape builder";
+        canvas_.vecSel.clear();
+        canvas_.vecLoaded = ~0ull;
+        r.message = r.ok ? sentence(r.message) : friendlyError(r.message);
+        result_ = std::move(r);
+        return;
+    }
     const ImVec2 a = canvas_.vecStart, b = vectorDrawEnd();
     const double x0 = std::min(a.x, b.x), y0 = std::min(a.y, b.y), w = std::abs(b.x - a.x), h = std::abs(b.y - a.y);
     if (w < 1 && h < 1) return;  // a click, not a drag
@@ -295,6 +437,8 @@ void Shell::vectorDrawRelease() {
 void Shell::vectorRelease() {
     const int drag = canvas_.vecDrag;
     canvas_.vecDrag = 0;
+    canvas_.guideX = canvas_.guideY = NAN;
+    if (drag == 5) return;  // a pen anchor (and its handles) is down; the path is made at the end
     if (drag == 4) {
         vectorDrawRelease();
         return;
@@ -340,15 +484,26 @@ void Shell::vectorRelease() {
 
 void Shell::penFinish(bool closed) {
     auto pts = std::move(canvas_.penPoints);
+    auto in = std::move(canvas_.penIn), out = std::move(canvas_.penOut);
     canvas_.penPoints.clear();
-    if (pts.size() < 2) return;
+    canvas_.penIn.clear();
+    canvas_.penOut.clear();
+    if (pts.size() < 2 || in.size() != pts.size() || out.size() != pts.size()) return;
     std::string d;
-    char buf[64];
-    for (std::size_t i = 0; i < pts.size(); ++i) {
-        std::snprintf(buf, sizeof buf, "%s%.2f %.2f ", i ? "L" : "M", pts[i].x, pts[i].y);
+    char buf[160];
+    auto same = [](ImVec2 a, ImVec2 b) { return std::abs(a.x - b.x) < 1e-4f && std::abs(a.y - b.y) < 1e-4f; };
+    auto segment = [&](std::size_t i, std::size_t j) {  // straight when neither end has a handle, else a cubic
+        if (same(out[i], pts[i]) && same(in[j], pts[j])) std::snprintf(buf, sizeof buf, "L%.2f %.2f ", pts[j].x, pts[j].y);
+        else std::snprintf(buf, sizeof buf, "C%.2f %.2f %.2f %.2f %.2f %.2f ", out[i].x, out[i].y, in[j].x, in[j].y, pts[j].x, pts[j].y);
         d += buf;
+    };
+    std::snprintf(buf, sizeof buf, "M%.2f %.2f ", pts[0].x, pts[0].y);
+    d += buf;
+    for (std::size_t i = 0; i + 1 < pts.size(); ++i) segment(i, i + 1);
+    if (closed) {
+        segment(pts.size() - 1, 0);
+        d += "Z";
     }
-    if (closed) d += "Z";
     const std::string colour = toHex({canvas_.color[0], canvas_.color[1], canvas_.color[2], canvas_.color[3]});
     Params p{{"doc", currentDoc_}, {"d", d}};
     if (closed) {
@@ -369,8 +524,9 @@ void Shell::penFinish(bool closed) {
 void Shell::vectorPenKeys() {
     if (canvas_.tool != CanvasTool::VecPen || canvas_.penPoints.empty() || ImGui::GetIO().WantTextInput) return;
     if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) penFinish(false);
-    else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) canvas_.penPoints.clear();
-    else if (ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_Delete)) canvas_.penPoints.pop_back();
+    else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) canvas_.penPoints.clear(), canvas_.penIn.clear(), canvas_.penOut.clear();
+    else if (ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_Delete))
+        canvas_.penPoints.pop_back(), canvas_.penIn.pop_back(), canvas_.penOut.pop_back();
 }
 
 // Text tool: a small box where you clicked; Enter puts the words on the drawing
@@ -451,6 +607,12 @@ void Shell::drawVector(ImDrawList* dl, ImVec2 origin) {
         if (hy == 1) b[3] += dy;
     }
     dl->AddRect(screen(b[0], b[1]), screen(b[0] + b[2], b[1] + b[3]), accent, 0, 0, 1.5f);
+    if (canvas_.vecDrag == 1) {  // smart guides: pink lines across the canvas where it lined up
+        const ImU32 pink = IM_COL32(255, 60, 170, 255);
+        const ImVec2 lo = canvas_.viewMin, hi{canvas_.viewMin.x + canvas_.viewSize.x, canvas_.viewMin.y + canvas_.viewSize.y};
+        if (!std::isnan(canvas_.guideX)) dl->AddLine({screen(canvas_.guideX, 0).x, lo.y}, {screen(canvas_.guideX, 0).x, hi.y}, pink, 1);
+        if (!std::isnan(canvas_.guideY)) dl->AddLine({lo.x, screen(0, canvas_.guideY).y}, {hi.x, screen(0, canvas_.guideY).y}, pink, 1);
+    }
     if (canvas_.tool == CanvasTool::Pick) {
         for (const auto& h : kHandle) {
             const ImVec2 c = screen(b[0] + b[2] * h[0], b[1] + b[3] * h[1]);

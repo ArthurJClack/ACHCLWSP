@@ -336,6 +336,29 @@ void registerRepeatAndSelectCommands(Session& session) {
                     .with("count", static_cast<std::int64_t>(picked.size()));
             }, false));
 
+    reg.add({"vector.boxes", "Shape Boxes",
+             "Every pickable shape's box, top-level groups as one: lines of \"id x y width height\". What the window's "
+             "smart guides snap to; except= leaves one out (the shape being dragged).",
+             {docParam(), {"except", ParamType::String, "shape id to leave out", false}},
+             false, true},
+            vectorCommand(session, [](VectorDoc& doc, const Params& p) {
+                const std::string except = stringParam(p, "except", "");
+                std::vector<int> seen;
+                std::string text;
+                for (int i : paintOrder(doc)) {
+                    if (doc.lockedOrInside(i)) continue;
+                    const int s = selectable(doc, i);
+                    if (std::find(seen.begin(), seen.end(), s) != seen.end()) continue;
+                    seen.push_back(s);
+                    const auto& sh = doc.shapes[static_cast<std::size_t>(s)];
+                    if (sh.id == except || (!sh.name.empty() && sh.name == except)) continue;
+                    const Bounds b = shapeBounds(doc, s);
+                    if (b.empty) continue;
+                    text += (text.empty() ? "" : "\n") + sh.id + " " + num(b.x0) + " " + num(b.y0) + " " + num(b.width()) + " " + num(b.height());
+                }
+                return Result::success(text.empty() ? std::string("no shapes") : text, text).with("boxes", text);
+            }, false));
+
     reg.add({"vector.trace", "Image Trace",
              "Turn a bitmap (png, jpg, ...) into filled vector paths. colors=2 traces black and white by threshold "
              "(darker than threshold is ink); more colours sorts the picture into that many. smooth (0 = pixel "

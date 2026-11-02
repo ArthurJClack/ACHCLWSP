@@ -4,6 +4,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <map>
@@ -60,7 +61,8 @@ struct Texture {
     ImTextureID id() const { return static_cast<ImTextureID>(reinterpret_cast<std::intptr_t>(tex)); }
 };
 
-enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal, Remove, Clone, Dodge, Burn, Sponge, Smudge, Blur, Pick, Anchor, VecRect, VecEllipse, VecLine, VecPen, VecText };
+enum class CanvasTool { Move, Select, Transform, Type, Brush, Eraser, Fill, Heal, Remove, Clone, Dodge, Burn, Sponge, Smudge, Blur, Pick, Anchor, VecRect, VecEllipse, VecLine, VecPen, VecText, VecGradient, VecBuilder,
+                        BoardSelect, BoardNote, BoardShape, BoardEllipse, BoardText, BoardConnect, BoardPen, GlyphEdit, GlyphDraw };
 enum class SelectShape { Rect, Ellipse, Lasso, Wand };
 
 // Click tools for game levels (levels.*) and pixel-art sprites (forge.sprite_*), game_view.cpp.
@@ -352,12 +354,57 @@ struct Canvas {
     int vecDrag = 0;                  // 0 none, 1 move, 2 scale handle, 3 anchor part, 4 drawing a new shape
     int vecHandle = 0;                // scale: handle 0..7; anchor: node * 3 + part (0 anchor, 1 in, 2 out)
     ImVec2 vecStart{0, 0}, vecNow{0, 0};
-    std::vector<ImVec2> penPoints;   // Pen: the corners clicked so far, in drawing units
+    std::vector<ImVec2> penPoints;   // Pen: the anchors clicked so far, in drawing units
+    std::vector<ImVec2> penIn, penOut;  // Pen: each anchor's handles (equal to the anchor = a corner)
+    std::vector<float> guideBoxes;    // smart guides: the other shapes' boxes (x, y, w, h), read when a move starts
+    float guideX = NAN, guideY = NAN; // the guide lines shown while dragging (drawing units), NAN = none
+    std::vector<double> builderPts;   // Shape builder: the points the drag crossed
+    float color2[4] = {1, 1, 1, 1};   // Gradient: the end colour
     bool textOpen = false;           // Text: a box is waiting for words at textAt
     ImVec2 textAt{0, 0};
     std::string textDraft;
 
     GameCanvas game;
+};
+
+// A whiteboard on the canvas (board_view.cpp), in board units.
+struct BoardView {
+    std::string doc;
+    std::uint64_t seen = ~0ull;
+    double x = 0, y = 0, w = 1, h = 1, scale = 1;  // what the picture shows (board.view)
+    bool known = false;
+    std::string sel;              // picked element
+    std::string selType;
+    float box[4] = {0, 0, 0, 0};  // its box
+    int drag = 0;                 // 1 move, 2 resize (corner in handle), 3 new shape box, 4 connector, 5 ink
+    int handle = 0;
+    ImVec2 start{0, 0}, now{0, 0};
+    std::string from;             // connector start element
+    std::vector<double> ink;      // ink points
+    bool editing = false;         // typing on sel
+    std::string text;
+    bool focus = false;
+    bool fillChosen = false;      // new shapes take the theme's colours until a colour is picked
+};
+
+// The glyph editor for fonts (glyph_view.cpp), in font units (y up).
+struct GlyphPoint {
+    float x = 0, y = 0;
+    char type = 'o';  // o on-curve, c cubic control, q quadratic control
+};
+struct GlyphView {
+    std::string doc;
+    std::string glyph = "A";
+    std::string input = "A";
+    std::uint64_t seen = ~0ull;
+    bool exists = false;
+    float advance = 600, ascender = 800, descender = -200, xHeight = 500, capHeight = 700;
+    std::vector<std::vector<GlyphPoint>> contours;
+    int dragC = -1, dragP = -1;
+    ImVec2 dragStart{0, 0}, dragNow{0, 0};
+    std::vector<ImVec2> drawing;  // Draw tool: corners clicked so far
+    bool cut = false;
+    float scale = 1, ox = 0, oy = 0;  // screen = (ox + x * scale, oy - y * scale)
 };
 
 // A timeline's moving picture while it plays (video_play.cpp): frames drawn on a worker
@@ -611,8 +658,26 @@ private:
     static bool brushTool(CanvasTool tool);
     static bool vectorDrawTool(CanvasTool tool) {
         return tool == CanvasTool::VecRect || tool == CanvasTool::VecEllipse || tool == CanvasTool::VecLine || tool == CanvasTool::VecPen ||
-               tool == CanvasTool::VecText;
+               tool == CanvasTool::VecText || tool == CanvasTool::VecGradient || tool == CanvasTool::VecBuilder;
     }
+    static bool glyphTool(CanvasTool tool) { return tool == CanvasTool::GlyphEdit || tool == CanvasTool::GlyphDraw; }
+    GlyphView glyph_;
+    bool fontDoc() const;
+    void glyphSync();
+    void glyphSettings();
+    void glyphCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, bool active);
+    static bool boardTool(CanvasTool tool) { return tool >= CanvasTool::BoardSelect && tool <= CanvasTool::BoardPen; }
+    // whiteboards on the canvas (board_view.cpp): pick, move, resize, type on shapes, connect, ink
+    BoardView board_;
+    bool boardDoc() const;
+    void boardSettings();
+    void boardCanvas(ImDrawList* dl, ImVec2 p0, bool hovered, bool active);
+    void boardSync();
+    ImVec2 boardAt(ImVec2 screen) const;
+    ImVec2 boardScreen(ImVec2 p0, float x, float y) const;
+    void boardRun(const std::string& id, Params p, const char* title);
+    void boardEditText(ImVec2 p0);
+    void vectorGuides(float& dx, float& dy);
     void brushToolSettings();
     bool brushToolPress(ImVec2 screen);  // true when the click picked a clone source
     void runBrushTool();

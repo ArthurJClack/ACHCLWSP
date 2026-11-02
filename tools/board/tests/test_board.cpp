@@ -554,6 +554,16 @@ void testCommands(const fs::path& dir) {
     CHECK(r.ok && str(r, "from") == "e1");
     r = run(s, "board.preview doc=board1 max_size=400");
     CHECK(r.ok && r.attachments.size() == 1 && r.attachments[0].mime == "image/png");
+    // what the window uses: the picture's area and what's under the mouse
+    r = run(s, "board.view doc=board1");
+    CHECK(r.ok && std::stod(str(r, "scale")) > 0 && std::stod(str(r, "width")) > 0);
+    {
+        const Element* a = doc->board.get(rects.substr(0, rects.find(',')));
+        r = run(s, "board.hit doc=board1 x=" + std::to_string(a->x + a->w / 2) + " y=" + std::to_string(a->y + a->h / 2));
+        CHECK(r.ok && str(r, "id") == a->id && str(r, "type") == "rect");
+        r = run(s, "board.hit doc=board1 x=-5000 y=-5000");
+        CHECK(r.ok && str(r, "id").empty());
+    }
     r = run(s, "board.layer doc=board1 op=add name=sketch");
     CHECK(r.ok);
     r = run(s, "board.ink doc=board1 points=0,0,100,100 layer=sketch");
