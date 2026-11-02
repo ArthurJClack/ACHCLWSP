@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cmd.hpp"
+#include "wetwaresuite/maps/tiles.hpp"
 
 namespace wetwaresuite::maps::cmd {
 
@@ -300,13 +301,15 @@ struct Hit {
 void registerSearch(Session& session) {
     auto& reg = session.registry();
     reg.add({"maps.search", "Search Places",
-             "Find places by name, offline: searches the text fields of every vector layer (or layer=) and the built-in "
+             "Find places by name, offline: searches the text fields of every vector layer (or layer=), the place and "
+             "point-of-interest names in installed map packs (read once, then kept in the cache folder), and the built-in "
              "countries and about 1,250 cities, ignoring case and accents, allowing a typo or two. Best matches first (exact, then "
              "starting with, then containing); near=lat,lon puts closer ones first among equals. Without doc= it searches the "
              "built-in countries and cities only.",
              {{"doc", ParamType::String, "map id (default: the built-in countries and cities only)", false}, {"query", ParamType::String, "what to look for, e.g. 'cafe flore'", true},
               layerParam("only this layer"), {"near", ParamType::NumberList, "lat,lon: prefer places close to here", false},
               {"countries", ParamType::Bool, "also search the built-in countries and cities", false, {}, true},
+              {"packs", ParamType::Bool, "also search the place names in installed map packs", false, {}, true},
               {"limit", ParamType::Int, "how many to list", false, {}, std::int64_t{10}}},
              false, true},
             [&session](const Params& p) -> std::unique_ptr<Action> {
@@ -364,6 +367,10 @@ void registerSearch(Session& session) {
                                     if (!l.isRaster()) scan(l.name, l.features);
                                 }
                             }
+                        }
+                        if (boolParam(p, "packs", true) && !has(p, "layer")) {
+                            const auto packed = allPackPlaces();
+                            scan("places (map pack)", *packed);
                         }
                         if (boolParam(p, "countries", true) && !has(p, "layer")) {
                             scan("places (built in)", places());

@@ -613,6 +613,8 @@ void Shell::canvasArea() {
         (std::abs(size.x - canvas_.waveSize.x) > 24 || std::abs(size.y - canvas_.waveSize.y) > 24)) {
         canvas_.dirty = true;  // the waveform is redrawn at the new size next frame
     }
+    // maps draw at the window's shape, so a wide window shows a wide map
+    if (auto d = session_.workspace().get(currentDoc_); d && d->setViewShape(static_cast<int>(size.x), static_cast<int>(size.y))) canvas_.dirty = true;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 v0 = canvas_.viewMin, v1{v0.x + size.x, v0.y + size.y};
     dl->PushClipRect(v0, v1, true);

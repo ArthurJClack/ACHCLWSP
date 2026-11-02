@@ -104,10 +104,13 @@ struct Feature {
 // ---- coordinate systems ---------------------------------------------------------------
 
 struct Crs {
-    enum Kind { Geographic, WebMercator, TransverseMercator } kind = Geographic;
+    // EqualEarth: equal-area world map (EPSG:8857); Laea: Lambert azimuthal equal-area around lat0/lon0
+    // (EPSG:3035 for Europe), both on the WGS84 ellipsoid through the authalic latitude
+    enum Kind { Geographic, WebMercator, TransverseMercator, EqualEarth, Laea } kind = Geographic;
     int zone = 0;          // UTM zone 1..60 (0 = a custom transverse Mercator)
     bool south = false;    // UTM southern hemisphere (false northing 10,000 km)
-    double lon0 = 0;       // central meridian (transverse Mercator)
+    double lon0 = 0;       // central meridian (transverse Mercator, Equal Earth, LAEA)
+    double lat0 = 0;       // LAEA: the centre's latitude
     double k0 = 0.9996;    // scale factor on the central meridian
     double falseEasting = 500000, falseNorthing = 0;
 
@@ -116,7 +119,10 @@ struct Crs {
     static Crs utm(int zone, bool south);
     static Crs utmFor(double lon, double lat);         // the UTM zone a point is in
     static Crs localTm(double lon0);                   // k0 = 1, no false origin: for local metric work
+    static Crs equalEarth();                           // EPSG:8857, centred on Greenwich
+    static Crs laea(double lat0, double lon0);         // no false origin; laea(52, 10) + 4321000/3210000 is EPSG:3035
     // "wgs84", "epsg:4326", "lonlat", "webmercator", "epsg:3857", "utm33n", "utm 33s", "epsg:32633",
+    // "equalearth" / "epsg:8857", "laea" / "epsg:3035" (Europe), "laea:lat,lon" (centred anywhere),
     // "auto" (not handled here). Also reads a .prj WKT. Empty when unknown.
     static std::optional<Crs> parse(const std::string& text);
     static const std::vector<std::string>& names();   // examples for help texts
@@ -173,9 +179,10 @@ Geometry simplify(const Geometry& g, double toleranceMetres);
 // Rectangle clip (lon/lat box): Sutherland-Hodgman for polygons, segment clipping for lines.
 Geometry clip(const Geometry& g, const BBox& box);
 
-// Buffer by `distance` metres (negative shrinks polygons). Points become geodesic circles;
-// lines and polygons go through a distance field on a local metric grid of about
-// `resolution` cells along the longer side, then contours, so overlaps merge cleanly.
+// Buffer by `distance` metres (negative shrinks polygons). A single point becomes a geodesic
+// circle; everything else is buffered exactly (exactBuffer) when it fits the edge budget, else
+// through a distance field on a local metric grid of about `resolution` cells along the longer
+// side, then contours. Overlaps merge cleanly either way.
 Geometry buffer(const Geometry& g, double distance, int resolution = 600, int circleSegments = 48);
 // Buffers several geometries into one dissolved geometry.
 Geometry bufferUnion(const std::vector<const Geometry*>& gs, double distance, int resolution = 600);
@@ -308,6 +315,7 @@ struct Map {
     std::vector<Layer> layers;  // bottom first
     std::vector<Bookmark> bookmarks;
     std::optional<BBox> view;   // the area the window and previews show; empty = everything
+    double viewAspect = 0;      // width / height of the window showing it, so previews fill it (not saved; 0 = from the area)
 
     Layer* layer(const std::string& nameOrIndex);
     const Layer* layer(const std::string& nameOrIndex) const;
@@ -446,10 +454,20 @@ bool intersects(const Geometry& a, const Geometry& b);
 // Smallest geodesic distance between two geometries (0 when they intersect), metres.
 double distanceBetween(const Geometry& a, const Geometry& b);
 
-// Polygon overlay on a local metric grid of about `resolution` cells (signed distance fields
-// combined, then traced): edges are good to a small fraction of a cell.
+// Polygon overlay. Exact (on the edges, planar on lon/lat, see exactOverlay) up to about 600,000
+// edges; bigger inputs go through a local metric grid of about `resolution` cells (signed distance
+// fields combined, then traced), good to a small fraction of a cell.
 enum class OverlayOp { Intersection, Union, Difference, SymDifference };
 Geometry overlay(const std::vector<const Geometry*>& a, const std::vector<const Geometry*>& b, OverlayOp op, int resolution = 800);
+// Exact polygon booleans on the edges themselves (split where they cross, kept by nonzero winding
+// on each side, walked back into rings). Overlapping polygons of one side count as one area.
+Geometry exactOverlay(const std::vector<const Geometry*>& a, const std::vector<const Geometry*>& b, OverlayOp op);
+// Exact buffer on a local transverse Mercator grid: the union of the shapes, a box along every edge
+// and a circle (circleSegments sides) on every vertex; negative distances cut those from polygons.
+Geometry exactBuffer(const std::vector<const Geometry*>& gs, double distance, int circleSegments = 48);
+// Whether exactBuffer / exactOverlay stay within their edge budget for these inputs.
+bool exactFits(const std::vector<const Geometry*>& gs, int circleSegments);
+bool exactFits(const std::vector<const Geometry*>& a, const std::vector<const Geometry*>& b);
 // Lines cut by polygons: the parts inside (keepInside) or outside, exactly.
 Geometry clipLinesByPolygons(const Geometry& lines, const std::vector<const Geometry*>& polygons, bool keepInside);
 
@@ -624,6 +642,7 @@ public:
     std::string kind() const override { return "map"; }
     std::string summary() const override;
     std::unique_ptr<Attachment> preview() const override;
+    bool setViewShape(int width, int height) override;
 };
 
 // Undoable edit: snapshots the map before `fn`, restores it on undo or failure.
