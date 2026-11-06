@@ -310,6 +310,7 @@ bool Shell::settling() {
 int Shell::tickMs() const {
     if (transport_.playing && !showHome_) return 15;  // the playhead (and a timeline's picture) moves
     if (canvas_.game.playing && !showHome_) return 20;
+    if (canvas_.game.scene.playing && !showHome_) return 16;  // a scene's play test runs
     if (dope_.playing && !showHome_) return 15;  // a model's animation is playing (dopesheet.cpp)  // a sprite animation is playing (game_view.cpp)
     if (video_ && video_->pending() && !showHome_) return 15;  // a timeline frame is being drawn
     if (!exportJob_.id.empty()) return 100;           // the export's progress bar

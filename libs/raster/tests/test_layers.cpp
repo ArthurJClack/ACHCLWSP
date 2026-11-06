@@ -141,7 +141,7 @@ void testGroups() {
 
 void testAdjustments() {
     const int W = 20, H = 10;
-    CHECK(adjustmentLayerTypes().size() == 23);
+    CHECK(adjustmentLayerTypes().size() == 26);
     std::vector<Layer> layers = {{"red", Image(W, H, {255, 0, 0, 255})}};
     Layer adj("Invert");
     adj.kind = LayerKind::Adjustment;

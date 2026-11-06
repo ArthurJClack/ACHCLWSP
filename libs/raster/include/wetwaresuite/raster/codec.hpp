@@ -33,6 +33,10 @@ std::string encodePng(const Image& image);
 // 16 bits per channel PNG (RGB when fully opaque, else RGBA), tagged sRGB.
 std::string encodePng16(const Image& image);
 std::string encodeJpeg(const Image& image, int quality = 85);
+// An animated GIF that loops: one shared palette of the frames' most-used colours (up to 255,
+// plus transparent for alpha under 128). delayCs is the time per frame in 1/100 s. Frames
+// must all be the size of the first.
+std::string encodeGif(const std::vector<Image>& frames, int delayCs);
 
 // TIFF: the first page of baseline files (see tiff.cpp); written as 8- or 16-bit RGB(A), Deflate.
 Image decodeTiff(const std::string& bytes);

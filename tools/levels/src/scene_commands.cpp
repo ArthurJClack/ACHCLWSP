@@ -3,14 +3,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 
 #include "wetwaresuite/levels/levels.hpp"
 #include "wetwaresuite/levels/scene.hpp"
+#include "wetwaresuite/levels/scene_play.hpp"
 #include "wetwaresuite/raster/codec.hpp"
 
 namespace wetwaresuite::scene {
@@ -656,7 +659,25 @@ void registerTreeCommands(Session& session) {
                 auto it = std::find_if(parent->children.begin(), parent->children.end(), [&](const Node& c) { return &c == orig; });
                 parent->children.insert(it + 1, copy);
                 const std::string now = pp == "." ? copy.name : pp + "/" + copy.name;
-                return Result::success("duplicated " + path + " as " + now).with("node", now);
+                // like Godot's Ctrl+D, the copy keeps the signal connections of the node and its children
+                const std::string from = doc.scene.pathOf(doc.scene.find(path));
+                std::vector<Connection> more;
+                for (const auto& c : doc.scene.connections) {
+                    auto moved = [&](const std::string& q) -> std::optional<std::string> {
+                        if (q == from) return now;
+                        if (q.rfind(from + "/", 0) == 0) return now + q.substr(from.size());
+                        return std::nullopt;
+                    };
+                    const auto f = moved(c.from), t = moved(c.to);
+                    if (!f && !t) continue;
+                    Connection d = c;
+                    if (f) d.from = *f;
+                    if (t) d.to = *t;
+                    more.push_back(d);
+                }
+                for (auto& c : more) doc.scene.connections.push_back(c);
+                return Result::success("duplicated " + path + " as " + now + (more.empty() ? "" : " with its " + std::to_string(more.size()) + " signal connection" + (more.size() == 1 ? "" : "s")))
+                    .with("node", now);
             }));
 }
 
@@ -892,6 +913,159 @@ void registerViewCommands(Session& session) {
                     }
                     r.attach({"image/png", png, "scene.png"});
                     return r.with("width", static_cast<std::int64_t>(img.width())).with("height", static_cast<std::int64_t>(img.height())).with("view", view);
+                },
+                false));
+
+    reg.add({"scene.play", "Play Test",
+             "Run a 2D scene for a few seconds without Godot, like F6: platformer and top-down starter scripts move "
+             "(SPEED and JUMP_VELOCITY are read from the script), rigid bodies fall, static bodies and tile levels are "
+             "solid, areas report bodies entering and go away when the connected method calls queue_free(). Keys are "
+             "held over times, e.g. input=\"right 0-1.5; jump 0.4; left 2-3\" (a single time taps the key). Reports "
+             "where every body ended up and what happened; path= writes a .gif of the run or a .png of the last frame.",
+             {docParam(), {"seconds", ParamType::Number, "how long to run", false, {}, 3.0},
+              {"input", ParamType::String, "keys over time: left, right, up, down, jump, each with a time or from-to range in seconds", false},
+              {"fps", ParamType::Int, "GIF frames per second", false, {}, std::int64_t{20}},
+              {"scale", ParamType::Number, "picture size against the game window", false, {}, 0.5},
+              {"path", ParamType::String, "write a .gif of the run or a .png of the last frame", false}},
+             false, true},
+            sceneCommand(
+                session,
+                [](SceneDoc& doc, const Params& p) {
+                    struct Hold {
+                        std::string key;
+                        double from, to;
+                    };
+                    std::vector<Hold> holds;
+                    {
+                        std::string spec = stringParam(p, "input");
+                        for (char& c : spec) {
+                            if (c == ',') c = ';';
+                        }
+                        std::stringstream ss(spec);
+                        std::string part;
+                        while (std::getline(ss, part, ';')) {
+                            part = trim(part);
+                            if (part.empty()) continue;
+                            const auto sp = part.find_first_of(" \t=");
+                            const std::string key = trim(part.substr(0, sp));
+                            if (key != "left" && key != "right" && key != "up" && key != "down" && key != "jump")
+                                return Result::failure("unknown key '" + key + "' in input (use left, right, up, down, jump)");
+                            const std::string when = sp == std::string::npos ? "0" : trim(part.substr(sp + 1));
+                            const auto dash = when.find('-', 1);
+                            Hold h{key, std::atof(when.c_str()), 0};
+                            h.to = dash == std::string::npos ? h.from + 0.1 : std::atof(when.substr(dash + 1).c_str());
+                            if (h.to < h.from) std::swap(h.from, h.to);
+                            holds.push_back(h);
+                        }
+                    }
+                    const double seconds = std::clamp(numberParam(p, "seconds", 3), 0.0, 120.0);
+                    const int fps = static_cast<int>(std::clamp<std::int64_t>(intParam(p, "fps", 20), 1, 60));
+                    const double scale = std::clamp(numberParam(p, "scale", 0.5), 0.1, 4.0);
+                    const std::string path = stringParam(p, "path");
+                    const bool gif = !path.empty() && fs::path(path).extension() == ".gif";
+                    Play play(doc.scene);
+                    std::vector<raster::Image> frames;
+                    if (gif) frames.push_back(play.frame(scale));
+                    const double dt = 1.0 / fps;
+                    for (double t = 0; t < seconds - 1e-9; t += dt) {
+                        PlayInput in;
+                        for (const auto& h : holds) {
+                            if (t + 1e-9 < h.from || t >= h.to) continue;
+                            if (h.key == "left") in.left = true;
+                            if (h.key == "right") in.right = true;
+                            if (h.key == "up") in.up = true;
+                            if (h.key == "down") in.down = true;
+                            if (h.key == "jump") in.jump = true;
+                        }
+                        play.step(in, std::min(dt, seconds - t));
+                        if (gif && frames.size() < 1200) frames.push_back(play.frame(scale));
+                    }
+                    std::ostringstream msg;
+                    msg << "played " << gdNum(std::round(play.time() * 100) / 100) << " s";
+                    Result r = Result::success("");
+                    for (const auto& b : play.bodies()) {
+                        msg << "\n" << b.path << " (" << b.type << "): " << (b.gone ? "gone, last at " : "at ") << gdNum(std::round(b.x * 10) / 10) << ", "
+                            << gdNum(std::round(b.y * 10) / 10) << (b.onFloor ? ", on the floor" : "");
+                        r.with(b.path + ".x", b.x).with(b.path + ".y", b.y).with(b.path + ".on_floor", b.onFloor);
+                    }
+                    for (const auto& e : play.events()) msg << "\n" << gdNum(std::round(e.time * 100) / 100) << " s: " << e.text;
+                    for (const auto& n : play.notes()) msg << "\nnote: " << n;
+                    const raster::Image last = play.frame(scale);
+                    const std::string png = raster::encodePng(last);
+                    if (!path.empty()) {
+                        writeAll(path, gif ? raster::encodeGif(frames, static_cast<int>(std::lround(100.0 / fps))) : png);
+                        msg << "\nwrote " << path;
+                    }
+                    r.message = msg.str();
+                    r.attach({"image/png", png, "play.png"});
+                    return r.with("events", static_cast<std::int64_t>(play.events().size())).with("freed", static_cast<std::int64_t>(play.freed()));
+                },
+                false));
+
+    reg.add({"scene.play_step", "Play (Live)",
+             "Play a 2D scene step by step, as the editor's Play button does: the first call starts it from the scene as "
+             "it is, each call holds the given keys for `seconds` and returns the game window's picture and what "
+             "happened. restart=true starts over, stop=true ends it. Same rules as scene.play.",
+             {docParam(), {"keys", ParamType::String, "keys held this step, comma-separated: left, right, up, down, jump", false},
+              {"seconds", ParamType::Number, "how long to run this step", false, {}, 1.0 / 30},
+              {"scale", ParamType::Number, "picture size against the game window", false, {}, 1.0},
+              {"restart", ParamType::Bool, "start again from the scene", false, {}, false},
+              {"stop", ParamType::Bool, "end the play test", false, {}, false},
+              {"raw", ParamType::Bool, "attach raw RGBA pixels (image/x-rgba) instead of a PNG, for live views", false, {}, false}},
+             false, true},
+            sceneCommand(
+                session,
+                [](SceneDoc& doc, const Params& p) {
+                    if (boolParam(p, "stop", false)) {
+                        doc.play.reset();
+                        return Result::success("stopped");
+                    }
+                    if (!doc.play || boolParam(p, "restart", false)) {
+                        if (dimsOf(doc.scene) == 3) return Result::failure("the play test runs 2D scenes; press Play in Godot for 3D ones");
+                        doc.play = std::make_shared<Play>(doc.scene);
+                        doc.playEventsSeen = 0;
+                    }
+                    PlayInput in;
+                    const std::string keys = stringParam(p, "keys");
+                    in.left = keys.find("left") != std::string::npos;
+                    in.right = keys.find("right") != std::string::npos;
+                    in.up = keys.find("up") != std::string::npos;
+                    in.down = keys.find("down") != std::string::npos;
+                    in.jump = keys.find("jump") != std::string::npos;
+                    Play& play = *doc.play;
+                    play.step(in, std::clamp(numberParam(p, "seconds", 1.0 / 30), 0.0, 1.0));
+                    const raster::Image img = play.frame(std::clamp(numberParam(p, "scale", 1), 0.1, 4.0));
+                    std::ostringstream msg;
+                    msg << "t=" << gdNum(std::round(play.time() * 100) / 100) << " s";
+                    Result r = Result::success("");
+                    for (const auto& b : play.bodies()) {
+                        msg << "\n" << b.path << ": " << (b.gone ? "gone" : gdNum(std::round(b.x)) + ", " + gdNum(std::round(b.y)));
+                        r.with(b.path + ".x", b.x).with(b.path + ".y", b.y);
+                    }
+                    std::string fresh;
+                    for (std::size_t i = doc.playEventsSeen; i < play.events().size(); ++i) {
+                        msg << "\n" << play.events()[i].text;
+                        fresh += (fresh.empty() ? "" : "\n") + play.events()[i].text;
+                    }
+                    doc.playEventsSeen = play.events().size();
+                    if (doc.playEventsSeen == 0 && play.time() < 0.1) {
+                        for (const auto& n : play.notes()) msg << "\nnote: " << n;
+                    }
+                    std::string notes;
+                    for (const auto& n : play.notes()) notes += (notes.empty() ? "" : "\n") + n;
+                    r.message = msg.str();
+                    if (boolParam(p, "raw", false)) {
+                        std::string bytes(reinterpret_cast<const char*>(img.data()), static_cast<std::size_t>(img.width()) * img.height() * 4);
+                        r.attach({"image/x-rgba", std::move(bytes), "play.rgba"});
+                    } else {
+                        r.attach({"image/png", raster::encodePng(img), "play.png"});
+                    }
+                    return r.with("width", static_cast<std::int64_t>(img.width()))
+                        .with("height", static_cast<std::int64_t>(img.height()))
+                        .with("time", play.time())
+                        .with("events", fresh)
+                        .with("notes", notes)
+                        .with("freed", static_cast<std::int64_t>(play.freed()));
                 },
                 false));
 

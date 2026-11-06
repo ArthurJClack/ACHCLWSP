@@ -45,7 +45,8 @@ const SketchToolDef kSketchTools[] = {
     {"Line", SketchEdit::Tool::Line, ImGuiKey_L, "L", "Click, click, click... to draw joined lines. Click the first point again, right-click or Esc to stop"},
     {"Rectangle", SketchEdit::Tool::Rect, ImGuiKey_R, "R", "Drag from one corner to the other (or click both corners)"},
     {"Circle", SketchEdit::Tool::Circle, ImGuiKey_C, "C", "Drag from the centre out to the size (or click the centre, then the edge)"},
-    {"Dimension", SketchEdit::Tool::Dimension, ImGuiKey_D, "D", "Click a line for its length, a circle for its diameter, or two points for the distance between them, then type the value"}};
+    {"Dimension", SketchEdit::Tool::Dimension, ImGuiKey_D, "D", "Click a line for its length, a circle for its diameter, or two points for the distance between them, then type the value"},
+    {"Trim", SketchEdit::Tool::Trim, ImGuiKey_T, "T", "Click the piece of a line, arc or circle to cut away, up to where other lines cross it (Power Trim)"}};
 
 std::vector<std::string> splitOn(const std::string& s, char sep) {
     std::vector<std::string> out;
@@ -330,6 +331,23 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
         const std::size_t n = static_cast<std::size_t>(k.profiles[i++]);
         std::vector<ImVec2> pts;
         for (std::size_t j = 0; j < n && i + 1 < k.profiles.size(); ++j, i += 2) pts.push_back(toScreen(k.profiles[i], k.profiles[i + 1]));
+        // ImGui's ear clipping trips over repeated and in-line corners (a trimmed arc meeting a line): drop them
+        for (bool again = true; again && pts.size() > 3;) {
+            again = false;
+            for (std::size_t j = 0; j < pts.size() && pts.size() > 3; ++j) {
+                const ImVec2 a = pts[(j + pts.size() - 1) % pts.size()], b = pts[j], d = pts[(j + 1) % pts.size()];
+                const float cross = (b.x - a.x) * (d.y - b.y) - (b.y - a.y) * (d.x - b.x);
+                const float len = std::abs(d.x - a.x) + std::abs(d.y - a.y);
+                if (std::abs(cross) <= 0.01f * len || (std::abs(b.x - a.x) < 0.01f && std::abs(b.y - a.y) < 0.01f)) {
+                    pts.erase(pts.begin() + static_cast<std::ptrdiff_t>(j));
+                    again = true;
+                }
+            }
+        }
+        // and it wants the corners going clockwise on screen
+        float area = 0;
+        for (std::size_t j = 0; j < pts.size(); ++j) area += pts[j].x * pts[(j + 1) % pts.size()].y - pts[(j + 1) % pts.size()].x * pts[j].y;
+        if (area < 0) std::reverse(pts.begin(), pts.end());
         if (pts.size() >= 3) dl->AddConcavePolyFilled(pts.data(), static_cast<int>(pts.size()), ImGui::ColorConvertFloat4ToU32({c.x, c.y, c.z, 0.16f}));
     }
     const ImU32 ink = dark ? IM_COL32(235, 236, 240, 255) : IM_COL32(25, 27, 32, 255);
@@ -483,6 +501,13 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
                 k.dragPoint.clear();
             }
         }
+    } else if (k.tool == SketchEdit::Tool::Trim && click) {
+        double rx, ry;  // the exact spot, not snapped: it picks the piece
+        toSketch(io.MousePos, rx, ry);
+        Params p = base();
+        p["x"] = num(rx);
+        p["y"] = num(ry);
+        report(run("cad.sketch_trim", p), "Trim");
     } else if (k.tool == SketchEdit::Tool::Dimension && click) {
         auto pointAt = [&](int i) { return std::make_pair(k.pointXy[2 * static_cast<std::size_t>(i)], k.pointXy[2 * static_cast<std::size_t>(i) + 1]); };
         if (hotPoint >= 0) {
@@ -639,6 +664,7 @@ void Shell::sketchCanvas(ImDrawList* dl, ImVec2 v0, ImVec2 size, bool hovered, b
                        : k.tool == SketchEdit::Tool::Rect      ? "Rectangle: drag corner to corner"
                        : k.tool == SketchEdit::Tool::Circle    ? "Circle: drag from the centre"
                        : k.tool == SketchEdit::Tool::Select    ? "Select: drag a point to move it; double-click a dimension to change it"
+                       : k.tool == SketchEdit::Tool::Trim      ? "Trim: click the piece to cut away (offset, mirror and extend are in the Sketch commands)"
                                                                : "Dimension: click a line, a circle, or two points, then type the value";
     dl->AddText({v0.x + 10, v0.y + size.y - ImGui::GetFontSize() - 8}, IM_COL32(128, 128, 128, 255), hint);
 }

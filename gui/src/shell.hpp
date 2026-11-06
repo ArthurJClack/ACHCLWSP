@@ -97,6 +97,13 @@ struct SceneCanvas {
     char rename[128] = {};
     int addClass = 0, scriptKind = 0;
     std::vector<std::string> classes2, classes3;
+    // the play test (F5): scene.play_step each frame, drawn over the viewport
+    bool playing = false;
+    bool navKeys = false;  // keyboard navigation was on before playing (arrows and Space are the game's while it runs)
+    Texture playTex;
+    double playLast = 0;
+    std::vector<std::string> playLog;
+    std::string playNotes;
 };
 
 struct GameCanvas {
@@ -156,7 +163,7 @@ struct GameCanvas {
 // A cad sketch open for drawing with the mouse (sketch_view.cpp). Geometry comes from
 // cad.sketch_geometry in sketch units; the view is a centre and pixels per unit.
 struct SketchEdit {
-    enum class Tool { Line, Rect, Circle, Select, Dimension };
+    enum class Tool { Line, Rect, Circle, Select, Dimension, Trim };
     std::string doc, sketch;
     bool active = false;
     std::uint64_t seen = ~0ull;
@@ -859,6 +866,8 @@ private:
     void sceneToolbar();
     void sceneSide();
     void sceneInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active);
+    void scenePlayToggle();
+    void scenePlayFrame(ImDrawList* dl);
     void sceneSelect(const std::string& path);
 
     // actions (shell.cpp)

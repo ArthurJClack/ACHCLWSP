@@ -532,6 +532,123 @@ void registerCommands(Session& session) {
                 return docResult(stringParam(p, "kind") + " applied", doc, p);
             }));
 
+    reg.add({"photo.auto",
+             "Auto tone",
+             "One-click fixes like Photoshop's Image > Auto: tone stretches each channel to the full range (fixes dull "
+             "and tinted shots), contrast stretches brightness only (keeps the colours), color makes the brightest "
+             "parts neutral (removes a colour cast) and then stretches.",
+             {docParam(), {"kind", ParamType::String, "which fix", false, {"tone", "contrast", "color"}, std::string("tone")}, layerParam(), allLayersParam(),
+              previewParam()},
+             true},
+            imageCommand(session, [](ImageDoc& doc, const Params& p) {
+                const std::string kind = stringParam(p, "kind", "tone");
+                Result r = onLayers(doc, p, [&](Image& img) {
+                    const int w = img.width(), h = img.height();
+                    if (w == 0 || h == 0) return;
+                    if (kind == "tone") {
+                        autoContrast(img);
+                        return;
+                    }
+                    if (kind == "color") {
+                        // the brightest 2% should be neutral: scale the channels so their average is grey
+                        std::vector<std::pair<int, int>> bright;
+                        bright.reserve(static_cast<std::size_t>(w) * h);
+                        for (int y = 0; y < h; ++y)
+                            for (int x = 0; x < w; ++x) {
+                                const Color c = img.at(x, y);
+                                if (c.a < 8) continue;
+                                bright.push_back({static_cast<int>(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b), y * w + x});
+                            }
+                        if (bright.empty()) return;
+                        const std::size_t top = std::max<std::size_t>(1, bright.size() / 50);
+                        std::nth_element(bright.begin(), bright.begin() + static_cast<std::ptrdiff_t>(top - 1), bright.end(), [](auto a, auto b) { return a.first > b.first; });
+                        double sum[3] = {0, 0, 0};
+                        for (std::size_t i = 0; i < top; ++i) {
+                            const Color c = img.at(bright[i].second % w, bright[i].second / w);
+                            sum[0] += c.r, sum[1] += c.g, sum[2] += c.b;
+                        }
+                        const double target = std::max({sum[0], sum[1], sum[2]});
+                        double k[3];
+                        for (int i = 0; i < 3; ++i) k[i] = std::clamp(sum[i] > 0 ? target / sum[i] : 1.0, 1.0, 1.6);
+                        for (int y = 0; y < h; ++y)
+                            for (int x = 0; x < w; ++x) {
+                                Color c = img.at(x, y);
+                                auto f = [](double v) { return static_cast<std::uint8_t>(std::clamp(v, 0.0, 255.0) + 0.5); };
+                                c.r = f(c.r * k[0]), c.g = f(c.g * k[1]), c.b = f(c.b * k[2]);
+                                img.set(x, y, c);
+                            }
+                    }
+                    // brightness stretch: one map for all channels, so hues stay
+                    std::vector<std::size_t> hist(256, 0);
+                    std::size_t n = 0;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x) {
+                            const Color c = img.at(x, y);
+                            if (c.a < 8) continue;
+                            ++hist[static_cast<std::size_t>(std::lround(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b))];
+                            ++n;
+                        }
+                    if (n == 0) return;
+                    std::size_t acc = 0;
+                    int lo = 0, hi = 255;
+                    for (int i = 0; i < 256; ++i) {
+                        acc += hist[static_cast<std::size_t>(i)];
+                        if (acc > n / 200) {
+                            lo = i;
+                            break;
+                        }
+                    }
+                    acc = 0;
+                    for (int i = 255; i >= 0; --i) {
+                        acc += hist[static_cast<std::size_t>(i)];
+                        if (acc > n / 200) {
+                            hi = i;
+                            break;
+                        }
+                    }
+                    if (hi - lo < 4) return;
+                    const double scale = 255.0 / (hi - lo);
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x) {
+                            Color c = img.at(x, y);
+                            auto f = [&](int v) { return static_cast<std::uint8_t>(std::clamp((v - lo) * scale, 0.0, 255.0) + 0.5); };
+                            c.r = f(c.r), c.g = f(c.g), c.b = f(c.b);
+                            img.set(x, y, c);
+                        }
+                });
+                if (!r.ok) return r;
+                return docResult("auto " + kind + " applied", doc, p);
+            }));
+
+    reg.add({"photo.crop_perspective",
+             "Perspective crop",
+             "Crop to four corners and straighten them into a rectangle, like Photoshop's Perspective Crop tool: photos "
+             "of documents, signs, screens or paintings taken at an angle come out square-on. corners are x,y of the "
+             "top-left, top-right, bottom-right and bottom-left in image pixels; width and height default to the "
+             "lengths of the edges.",
+             {docParam(), {"corners", ParamType::NumberList, "x,y x4: top-left, top-right, bottom-right, bottom-left", true},
+              {"width", ParamType::Int, "output width (default: from the corners)", false}, {"height", ParamType::Int, "output height", false}, previewParam()},
+             true},
+            imageCommand(session, [](ImageDoc& doc, const Params& p) {
+                const auto c = listParam(p, "corners");
+                if (c.size() != 8) return Result::failure("corners needs 8 numbers: x,y of top-left, top-right, bottom-right, bottom-left");
+                auto len = [&](int a, int b) { return std::hypot(c[2 * b] - c[2 * a], c[2 * b + 1] - c[2 * a + 1]); };
+                auto given = [&](const char* k) {
+                    auto it = p.find(k);
+                    return it != p.end() && !std::holds_alternative<std::monostate>(it->second);
+                };
+                int w = given("width") ? static_cast<int>(intParam(p, "width")) : static_cast<int>(std::lround(std::max(len(0, 1), len(3, 2))));
+                int h = given("height") ? static_cast<int>(intParam(p, "height")) : static_cast<int>(std::lround(std::max(len(0, 3), len(1, 2))));
+                if (w < 1 || h < 1 || w > 30000 || h > 30000) return Result::failure("the result would be " + std::to_string(w) + "x" + std::to_string(h) + "; give width and height 1..30000");
+                const std::array<double, 8> to = {0, 0, static_cast<double>(w), 0, static_cast<double>(w), static_cast<double>(h), 0, static_cast<double>(h)};
+                std::array<double, 8> from;
+                std::copy(c.begin(), c.end(), from.begin());
+                Matrix3 inv;  // output pixel -> source pixel
+                if (!homography(to, from, inv)) return Result::failure("those corners don't make a four-sided shape");
+                transformAll(doc, [&](const Image& img) { return warp(img, inv, w, h, true); });
+                return docResult("straightened to " + std::to_string(w) + "x" + std::to_string(h), doc, p);
+            }));
+
     reg.add({"photo.pick_color",
              "Pick colour",
              "Read the colour of one pixel, from the flattened image or one layer.",

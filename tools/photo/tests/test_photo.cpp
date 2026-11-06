@@ -308,5 +308,27 @@ int main() {
 
     fs::remove_all(dir);
     testSelections(dir);
+    {
+        // auto fixes, local tone and perspective crop
+        Session t;
+        photo::registerCommands(t);
+        raster::Image dull(80, 60, {90, 100, 120, 255});
+        for (int y = 0; y < 60; ++y)
+            for (int x = 0; x < 80; ++x) dull.set(x, y, {static_cast<std::uint8_t>(80 + x / 2), static_cast<std::uint8_t>(90 + y / 2), 130, 255});
+        fs::create_directories(dir / "auto");
+        raster::save(dull, dir / "auto" / "dull.png");
+        Result o = t.run("photo.open", {{"path", (dir / "auto" / "dull.png").string()}});
+        const std::string d = docOf(o);
+        CHECK(t.run("photo.auto", {{"doc", d}, {"kind", std::string("contrast")}}).ok);
+        Result px = t.run("photo.pick_color", {{"doc", d}, {"x", std::int64_t{79}}, {"y", std::int64_t{59}}});
+        CHECK(px.ok);
+        CHECK(t.run("photo.auto", {{"doc", d}, {"kind", std::string("color")}}).ok);
+        CHECK(t.run("photo.auto", {{"doc", d}}).ok);
+        for (const char* type : {"shadows_highlights", "clarity", "dehaze"}) CHECK(t.run("photo.apply_adjustment", {{"doc", d}, {"type", std::string(type)}}).ok);
+        CHECK(t.run("photo.adjustment_layer", {{"doc", d}, {"type", std::string("shadows_highlights")}, {"shadow_amount", 70.0}}).ok);
+        Result pc = t.run("photo.crop_perspective", {{"doc", d}, {"corners", NumberList{10, 5, 70, 10, 75, 55, 5, 50}}});
+        CHECK(pc.ok && intField(pc, "width") > 50 && intField(pc, "height") > 40);
+        CHECK(!t.run("photo.crop_perspective", {{"doc", d}, {"corners", NumberList{1, 2, 3}}}).ok);
+    }
     return check::summary("photo");
 }

@@ -17,7 +17,8 @@ namespace wetwaresuite::model {
 
 const std::vector<std::string>& modifierTypes() {
     static const std::vector<std::string> types{"mirror", "array",  "subsurf", "solidify", "bevel",      "boolean",
-                                                "decimate", "smooth", "displace", "weld",   "triangulate", "armature"};
+                                                "decimate", "smooth", "displace", "weld",   "triangulate", "armature",
+                                                "wireframe", "screw"};
     return types;
 }
 
@@ -64,6 +65,11 @@ Modifier makeModifier(const std::string& type) {
         m.num = {{"distance", 0.001}};
     } else if (type == "armature") {
         m.text = {{"object", ""}};
+    } else if (type == "wireframe") {
+        m.num = {{"thickness", 0.02}};
+    } else if (type == "screw") {
+        m.num = {{"angle", 360}, {"segments", 16}, {"offset", 0}, {"count", 1}};
+        m.text["axis"] = "z";
     }
     return m;
 }
@@ -77,6 +83,84 @@ void checkSize(const PolyMesh& m) {
 }
 
 int axisIndex(char c) { return c == 'x' ? 0 : c == 'y' ? 1 : c == 'z' ? 2 : -1; }
+
+// Every edge as a thin square beam, like Blender's Wireframe modifier (quick: beams overlap at
+// the corners instead of being joined).
+PolyMesh wireframe(const PolyMesh& in, double thickness) {
+    if (thickness <= 0) throw std::runtime_error("thickness must be positive");
+    const Topology t(in);
+    if (t.edges.size() * 4 > kMaxFaces) throw std::runtime_error("more than 1000000 faces");
+    PolyMesh m;
+    const double h = thickness / 2;
+    for (std::size_t e = 0; e < t.edges.size(); ++e) {
+        const std::uint32_t ia = keyA(t.edges[e]), ib = static_cast<std::uint32_t>(t.edges[e] & 0xffffffffu);
+        const Vec3 a = in.verts[ia].p, b = in.verts[ib].p;
+        const Vec3 d = b - a;
+        const double len = mesh::length(d);
+        if (len < 1e-12) continue;
+        const Vec3 dir = d * (1 / len);
+        const Vec3 helper = std::fabs(dir.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+        const Vec3 u = mesh::normalize(mesh::cross(dir, helper)) * h, v = mesh::normalize(mesh::cross(dir, u)) * h;
+        // reach a little past each end so the beams meet at the corners
+        const Vec3 a0 = a - dir * h, b0 = b + dir * h;
+        int material = 0;
+        if (!t.edgeFaces[e].empty()) material = in.faces[t.edgeFaces[e][0].face].material;
+        std::uint32_t ra[4], rb[4];
+        const Vec3 off[4] = {u + v, v - u, (u + v) * -1, u - v};
+        for (int k = 0; k < 4; ++k) {
+            ra[k] = m.addVertex(a0 + off[k]);
+            rb[k] = m.addVertex(b0 + off[k]);
+        }
+        for (int k = 0; k < 4; ++k) m.addFace({ra[k], ra[(k + 1) % 4], rb[(k + 1) % 4], rb[k]}, material);
+        m.addFace({ra[3], ra[2], ra[1], ra[0]}, material);
+        m.addFace({rb[0], rb[1], rb[2], rb[3]}, material);
+    }
+    return m;
+}
+
+// Spins the edges round an axis through the origin, like Blender's Screw modifier: a lathe for
+// profiles (a vase from its outline), and with offset a spring or a thread.
+PolyMesh screw(const PolyMesh& in, const Modifier& mod) {
+    const std::string ax = mod.str("axis", "z");
+    const int axis = ax.empty() ? 2 : axisIndex(ax[0]);
+    if (axis < 0) throw std::runtime_error("axis is x, y or z");
+    const double angle = mod.get("angle", 360) * 3.14159265358979323846 / 180;
+    const int steps = static_cast<int>(mod.get("segments", 16));
+    const int turns = static_cast<int>(mod.get("count", 1));
+    const double rise = mod.get("offset", 0);
+    if (steps < 3 || steps > 512) throw std::runtime_error("segments (steps per turn) is 3 to 512");
+    if (turns < 1 || turns > 100) throw std::runtime_error("count (turns) is 1 to 100");
+    if (std::fabs(angle) < 1e-9) throw std::runtime_error("angle can't be 0");
+    const Topology t(in);
+    const int total = steps * turns;
+    const bool closed = std::fabs(std::fabs(angle) - 2 * 3.14159265358979323846) < 1e-6 && std::fabs(rise) < 1e-12 && turns == 1;
+    const int rings = closed ? total : total + 1;
+    if (static_cast<std::size_t>(rings) * t.edges.size() > kMaxFaces) throw std::runtime_error("more than 1000000 faces");
+    PolyMesh m;
+    const auto n = static_cast<std::uint32_t>(in.verts.size());
+    for (int r = 0; r < rings; ++r) {
+        const double a = angle * r / steps, up = rise * r / steps;
+        const double c = std::cos(a), sn = std::sin(a);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            Vec3 p = in.verts[i].p;
+            Vec3 q = p;
+            if (axis == 2) q = {p.x * c - p.y * sn, p.x * sn + p.y * c, p.z + up};
+            else if (axis == 1) q = {p.x * c + p.z * sn, p.y + up, -p.x * sn + p.z * c};
+            else q = {p.x + up, p.y * c - p.z * sn, p.y * sn + p.z * c};
+            m.addVertex(q);
+        }
+    }
+    for (int r = 0; r < total; ++r) {
+        const std::uint32_t r0 = static_cast<std::uint32_t>(r) * n, r1 = static_cast<std::uint32_t>((r + 1) % rings) * n;
+        for (const EdgeKey k : t.edges) {
+            const std::uint32_t a = keyA(k), b = static_cast<std::uint32_t>(k & 0xffffffffu);
+            m.addFace({r0 + a, r0 + b, r1 + b, r1 + a}, 0, true);
+        }
+    }
+    // a cleaner result where the profile touches the axis
+    merge(m, MergeMode::Distance, 1e-6, {}, true);
+    return m;
+}
 
 PolyMesh solidify(const PolyMesh& in, double thickness, double offset, bool rim) {
     const auto normals = vertexNormals(in);
@@ -356,6 +440,10 @@ PolyMesh applyModifier(const ModelDoc& doc, const Object& o, const PolyMesh& bas
         triangulateFaces(m, false);
     } else if (type == "armature") {
         m = applyArmature(doc, o, m, mod);
+    } else if (type == "wireframe") {
+        m = wireframe(m, mod.get("thickness", 0.02));
+    } else if (type == "screw") {
+        m = screw(m, mod);
     } else {
         throw std::runtime_error("unknown modifier type '" + type + "'");
     }

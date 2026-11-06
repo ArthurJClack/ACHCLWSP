@@ -268,6 +268,64 @@ void testLevelInScene(const fs::path& dir) {
     CHECK(readAll(dir / "main.tscn").find("path=\"res://levels/one.tscn\"") != std::string::npos);
 }
 
+
+void testPlay(const fs::path& dir) {
+    Session s;
+    levels::registerCommands(s);
+    scene::registerCommands(s);
+    CHECK(run(s, "scene.project dir=" + q(dir) + " name=Play width=640 height=360").ok);
+    // the ground: a level with collision, 40 cells wide, the floor at y = 160
+    CHECK(run(s, "levels.new width=40 height=12 tile_width=16").ok);
+    CHECK(run(s, "levels.tileset_placeholder doc=lvl1 path=" + q(dir / "art" / "tiles.png") + " style=autotile").ok);
+    CHECK(run(s, "levels.fill_rect doc=lvl1 x=0 y=10 width=40 height=2 tile=15").ok);
+    CHECK(run(s, "levels.collision doc=lvl1").ok);
+    Result r = run(s, "scene.new root=Node2D name=Main path=" + q(dir / "main.tscn"));
+    const std::string doc = text(r, "doc");
+    CHECK(run(s, "scene.add_level doc=" + doc + " level=lvl1 path=" + q(dir / "levels" / "one.tscn")).ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=CharacterBody2D name=Player props=\"position=64,100\"").ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=CollisionShape2D parent=Player props=\"shape=rect:16x24\"").ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=Camera2D parent=Player").ok);
+    CHECK(run(s, "scene.script doc=" + doc + " node=Player path=" + q(dir / "player.gd") + " template=character2d").ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=Area2D name=Coin props=\"position=200,148\"").ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=CollisionShape2D parent=Coin props=\"shape=circle:5\"").ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=RigidBody2D name=Crate props=\"position=400,40\"").ok);
+    CHECK(run(s, "scene.add doc=" + doc + " type=CollisionShape2D parent=Crate props=\"shape=rect:16x16\"").ok);
+    CHECK(run(s, "scene.script doc=" + doc + " node=. path=" + q(dir / "main.gd")).ok);
+    CHECK(run(s, "scene.connect doc=" + doc + " signal=body_entered from=Coin to=.").ok);
+    {
+        std::string code = readAll(dir / "main.gd");
+        const auto at = code.find("func _on_coin_body_entered");
+        CHECK(at != std::string::npos);
+        const auto pass = code.find("\tpass", at);
+        if (pass != std::string::npos) code.replace(pass, 5, "\t$Coin.queue_free()");
+        std::ofstream(dir / "main.gd", std::ios::binary) << code;
+    }
+    // standing still: the player lands on the floor and the crate falls onto it
+    r = run(s, "scene.play doc=" + doc + " seconds=2");
+    CHECK(r.ok);
+    CHECK(std::abs(number(r, "Player.y") - 148) < 1.5);  // floor at 160, half the box is 12
+    CHECK(std::abs(number(r, "Crate.y") - 152) < 1.5);
+    CHECK(number(r, "freed") == 0);
+    // running right picks the coin up; a GIF of the run is written
+    r = run(s, "scene.play doc=" + doc + " seconds=1.5 input=\"right 0.5-1.5; jump 1.2\" fps=10 path=" + q(dir / "run.gif"));
+    CHECK(r.ok);
+    CHECK(number(r, "Player.x") > 300);
+    CHECK(number(r, "freed") == 1);
+    CHECK(r.message.find("Coin freed") != std::string::npos);
+    CHECK(readAll(dir / "run.gif").rfind("GIF89a", 0) == 0);
+    CHECK(raster::decode(readAll(dir / "run.gif")).width() == 320);
+    // live stepping, like the Play button
+    r = run(s, "scene.play_step doc=" + doc + " restart=true seconds=0.5 raw=true scale=0.25");
+    CHECK(r.ok && number(r, "width") == 160 && !r.attachments.empty() && r.attachments[0].bytes.size() == 160u * 90 * 4);
+    r = run(s, "scene.play_step doc=" + doc + " keys=right seconds=0.5");
+    CHECK(r.ok && number(r, "Player.x") > 100);
+    CHECK(run(s, "scene.play_step doc=" + doc + " stop=true").ok);
+    // without the collision layer the play test says so
+    CHECK(run(s, "scene.new root=Node2D name=Bare path=" + q(dir / "bare.tscn")).ok);
+    r = run(s, "scene.play doc=scn2 seconds=0.2");
+    CHECK(r.ok);
+}
+
 }  // namespace
 
 int main() {
@@ -276,10 +334,12 @@ int main() {
     fs::create_directories(dir / "b");
     fs::create_directories(dir / "c");
     fs::create_directories(dir / "d");
+    fs::create_directories(dir / "e");
     test2D(dir / "a");
     testGodotFile(dir / "b");
     test3D(dir / "c");
     testLevelInScene(dir / "d");
+    testPlay(dir / "e");
     std::error_code ec;
     fs::remove_all(dir, ec);
     return check::summary("scene");

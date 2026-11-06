@@ -78,7 +78,12 @@ bool sceneTool(GameTool t) { return t == GameTool::Select || t == GameTool::Tran
 void Shell::sceneSync(bool newDoc) {
     GameCanvas& g = canvas_.game;
     SceneCanvas& s = g.scene;
-    if (newDoc) g.tool = GameTool::Select;
+    if (newDoc) {
+        g.tool = GameTool::Select;
+        if (s.playing && s.navKeys) ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        s.playing = false;  // a play test belongs to the scene it started on
+        s.playTex.reset();
+    }
     Result r = query("scene.tree", {{"doc", currentDoc_}});
     if (!r.ok) return;
     s.paths = split(tp::text(r, "nodes"), ',');
@@ -196,6 +201,14 @@ void Shell::sceneToolbar() {
         ImGui::SetItemTooltip("Look through the scene's Camera3D (Godot's Preview)");
         return;
     }
+    if (ImGui::Button(s.playing ? "Stop" : "Play")) scenePlayToggle();
+    ImGui::SetItemTooltip(s.playing ? "Stop the play test (F5 or Esc)" : "Play the scene here (F5): arrows move, Space jumps. Starter scripts, physics bodies, tiles and pickups work; for anything else press Play in Godot");
+    if (s.playing) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("arrows move, Space jumps, Esc stops");
+        return;
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Frame all")) {
         s.viewSet = false;
         canvas_.dirty = true;
@@ -206,10 +219,109 @@ void Shell::sceneToolbar() {
     ImGui::SetItemTooltip("Collision shapes, cameras and markers");
 }
 
+void Shell::scenePlayToggle() {
+    SceneCanvas& s = canvas_.game.scene;
+    ImGuiIO& io = ImGui::GetIO();
+    if (s.playing) {
+        query("scene.play_step", {{"doc", currentDoc_}, {"stop", true}});
+        s.playing = false;
+        if (s.navKeys) io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        s.playTex.reset();
+        canvas_.dirty = true;
+        return;
+    }
+    s.playLog.clear();
+    s.playNotes.clear();
+    Result r = query("scene.play_step", {{"doc", currentDoc_}, {"restart", true}, {"seconds", 0.0}, {"raw", true}});
+    if (!r.ok) {
+        result_ = r;
+        resultFor_ = "Play";
+        return;
+    }
+    s.playNotes = tp::text(r, "notes");
+    s.playing = true;
+    s.navKeys = (io.ConfigFlags & ImGuiConfigFlags_NavEnableKeyboard) != 0;
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;  // arrows and Space drive the game, not the buttons
+    s.playLast = ImGui::GetTime();
+}
+
+// One frame of the play test: keys in, the game window's picture out, fitted into the viewport.
+void Shell::scenePlayFrame(ImDrawList* dl) {
+    SceneCanvas& s = canvas_.game.scene;
+    ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
+        scenePlayToggle();
+        return;
+    }
+    const double now = ImGui::GetTime();
+    const double dt = std::clamp(now - s.playLast, 0.0, 0.1);
+    s.playLast = now;
+    std::string keys;
+    if (!io.WantTextInput) {
+        if (ImGui::IsKeyDown(ImGuiKey_LeftArrow)) keys += "left,";
+        if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) keys += "right,";
+        if (ImGui::IsKeyDown(ImGuiKey_UpArrow)) keys += "up,";
+        if (ImGui::IsKeyDown(ImGuiKey_DownArrow)) keys += "down,";
+        if (ImGui::IsKeyDown(ImGuiKey_Space) || ImGui::IsKeyDown(ImGuiKey_Enter)) keys += "jump,";
+    }
+    const ImVec2 v0 = canvas_.viewMin, size = canvas_.viewSize;
+    const double fit = std::min(size.x / 1152.0, size.y / 648.0);
+    Result r = query("scene.play_step", {{"doc", currentDoc_}, {"keys", keys}, {"seconds", dt}, {"raw", true}, {"scale", std::clamp(fit, 0.25, 2.0)}});
+    animating_ = true;
+    if (!r.ok) {
+        s.playing = false;
+        if (s.navKeys) io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        result_ = r;
+        resultFor_ = "Play";
+        return;
+    }
+    const int w = static_cast<int>(tp::number(r, "width")), h = static_cast<int>(tp::number(r, "height"));
+    for (const auto& a : r.attachments) {
+        if (a.mime == "image/x-rgba" && w > 0 && h > 0 && a.bytes.size() == static_cast<std::size_t>(w) * h * 4)
+            s.playTex.upload(renderer_, reinterpret_cast<const std::uint8_t*>(a.bytes.data()), w, h);
+    }
+    const std::string ev = tp::text(r, "events");
+    for (const auto& line : split(ev, '\n')) {
+        if (line.empty()) continue;
+        s.playLog.push_back(line);
+        if (s.playLog.size() > 6) s.playLog.erase(s.playLog.begin());
+    }
+    dl->AddRectFilled(v0, {v0.x + size.x, v0.y + size.y}, IM_COL32(20, 20, 22, 255));
+    if (s.playTex.tex && s.playTex.srcWidth > 0) {
+        const float k = std::min(size.x / static_cast<float>(s.playTex.srcWidth), size.y / static_cast<float>(s.playTex.srcHeight));
+        const ImVec2 dims{s.playTex.srcWidth * k, s.playTex.srcHeight * k};
+        const ImVec2 p0{v0.x + (size.x - dims.x) / 2, v0.y + (size.y - dims.y) / 2};
+        dl->AddImage(s.playTex.id(), p0, {p0.x + dims.x, p0.y + dims.y});
+    }
+    float y = v0.y + 8;
+    const ImU32 ink = IM_COL32(240, 240, 240, 230), shade = IM_COL32(0, 0, 0, 170);
+    auto line = [&](const std::string& text, ImU32 col) {
+        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+        dl->AddRectFilled({v0.x + 6, y - 2}, {v0.x + 14 + ts.x, y + ts.y + 2}, shade, 3);
+        dl->AddText({v0.x + 10, y}, col, text.c_str());
+        y += ts.y + 6;
+    };
+    char head[64];
+    std::snprintf(head, sizeof head, "playing  %.1f s   (Esc stops)", tp::number(r, "time"));
+    line(head, ink);
+    for (const auto& n : split(s.playNotes, '\n')) {
+        if (!n.empty()) line("note: " + n, IM_COL32(255, 200, 120, 230));
+    }
+    for (const auto& e : s.playLog) line(e, IM_COL32(170, 220, 255, 230));
+}
+
 void Shell::sceneInput(ImDrawList* dl, ImVec2 origin, bool hovered, bool active) {
     GameCanvas& g = canvas_.game;
     SceneCanvas& s = g.scene;
     ImGuiIO& io = ImGui::GetIO();
+    if (s.playing) {
+        scenePlayFrame(dl);
+        return;
+    }
+    if (s.dims != 3 && !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
+        scenePlayToggle();
+        return;
+    }
     const float z = canvas_.zoom;
     const ImU32 accent = ImGui::ColorConvertFloat4ToU32(accent_);
     const ImVec2 mouse = io.MousePos;

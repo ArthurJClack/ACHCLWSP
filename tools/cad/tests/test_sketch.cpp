@@ -36,6 +36,13 @@ NumberList list(const Result& r, const std::string& key) {
     return {};
 }
 
+std::string text(const Result& r, const std::string& key) {
+    const Value* v = r.field(key);
+    if (!v) return {};
+    if (auto t = std::get_if<std::string>(v)) return *t;
+    return {};
+}
+
 bool flag(const Result& r, const std::string& key) {
     const Value* v = r.field(key);
     return v && std::holds_alternative<bool>(*v) && std::get<bool>(*v);
@@ -501,6 +508,59 @@ void testPickAndPushPull() {
     CHECK(!run(s, "cad.push_pull doc=cad1 face=33,0,2 distance=1").ok);
 }
 
+
+void testTrimExtendOffsetMirror() {
+    Session s;
+    registerCommands(s);
+    run(s, "cad.new");
+    // a plus sign: trimming the right arm of the cross bar leaves a T
+    run(s, "cad.sketch doc=cad1 name=t");
+    run(s, "cad.sketch_line doc=cad1 sketch=t x1=-10 y1=0 x2=10 y2=0");
+    run(s, "cad.sketch_line doc=cad1 sketch=t x1=0 y1=-10 x2=0 y2=10");
+    Result r = run(s, "cad.sketch_trim doc=cad1 sketch=t x=6 y=0.2");
+    CHECK(r.ok && text(r, "entity") == "l1");
+    Result g = run(s, "cad.sketch_info doc=cad1 sketch=t");
+    CHECK(g.ok);
+    // the middle of a line crossed twice splits it in two
+    run(s, "cad.sketch doc=cad1 name=split");
+    run(s, "cad.sketch_line doc=cad1 sketch=split x1=0 y1=0 x2=30 y2=0");
+    run(s, "cad.sketch_line doc=cad1 sketch=split x1=10 y1=-5 x2=10 y2=5");
+    run(s, "cad.sketch_line doc=cad1 sketch=split x1=20 y1=-5 x2=20 y2=5");
+    r = run(s, "cad.sketch_trim doc=cad1 sketch=split x=15 y=0");
+    CHECK(r.ok && !text(r, "new_entity").empty());
+    // a circle cut by a line becomes an arc; a lone line is deleted
+    run(s, "cad.sketch doc=cad1 name=c");
+    run(s, "cad.sketch_circle doc=cad1 sketch=c radius=10");
+    run(s, "cad.sketch_line doc=cad1 sketch=c x1=-20 y1=0 x2=20 y2=0");
+    r = run(s, "cad.sketch_trim doc=cad1 sketch=c x=0 y=-10");
+    CHECK(r.ok && r.message.find("arc") != std::string::npos);
+    r = run(s, "cad.sketch_trim doc=cad1 sketch=c entity=l1 x=15 y=0");
+    CHECK(r.ok);  // trimmed back to the arc's end on the right
+    // extend a short line up to a wall
+    run(s, "cad.sketch doc=cad1 name=e");
+    run(s, "cad.sketch_line doc=cad1 sketch=e x1=0 y1=0 x2=5 y2=0");
+    run(s, "cad.sketch_line doc=cad1 sketch=e x1=12 y1=-5 x2=12 y2=5");
+    r = run(s, "cad.sketch_extend doc=cad1 sketch=e entity=l1 x=5 y=0");
+    CHECK(r.ok && text(r, "to") == "l2");
+    // offset a rectangle outward by 2: a 24 x 14 loop around the 20 x 10 one
+    run(s, "cad.sketch doc=cad1 name=o");
+    run(s, "cad.sketch_rect doc=cad1 sketch=o width=20 height=10");
+    r = run(s, "cad.sketch_offset doc=cad1 sketch=o entities=l1,l2,l3,l4 distance=2");
+    CHECK(r.ok);
+    Result info = run(s, "cad.sketch_info doc=cad1 sketch=o");
+    CHECK(num(info, "regions") == 1 && near(num(info, "area"), 24 * 14 - 20 * 10, 1e-6));  // a ring
+    // mirror a circle about a vertical centreline
+    run(s, "cad.sketch doc=cad1 name=m");
+    run(s, "cad.sketch_line doc=cad1 sketch=m x1=0 y1=-10 x2=0 y2=10 construction=true");
+    run(s, "cad.sketch_circle doc=cad1 sketch=m cx=5 cy=2 radius=2");
+    r = run(s, "cad.sketch_mirror doc=cad1 sketch=m entities=c1 about=l1");
+    CHECK(r.ok && text(r, "entities") == "c2");
+    r = run(s, "cad.sketch_move doc=cad1 sketch=m point=c1.center x=7 y=2");
+    CHECK(r.ok);
+    g = run(s, "cad.sketch_geometry doc=cad1 sketch=m");
+    CHECK(g.ok);
+}
+
 int main() {
     testPickAndPushPull();
     testSketchesShowInTheView();
@@ -510,5 +570,6 @@ int main() {
     testRevolveLoftSweep();
     testDraftRibThread();
     testFilesUndoMcp();
+    testTrimExtendOffsetMirror();
     return check::summary("cad_sketch");
 }
