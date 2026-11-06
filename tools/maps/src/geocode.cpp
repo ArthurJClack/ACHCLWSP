@@ -42,7 +42,7 @@ fs::path indexFile(const fs::path& pack) {
     const auto size = fs::file_size(pack, ec);
     const auto when = fs::last_write_time(pack, ec).time_since_epoch().count();
     std::uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : fs::absolute(pack, ec).string() + "|" + std::to_string(size) + "|" + std::to_string(when)) h = (h ^ c) * 1099511628211ull;
+    for (unsigned char c : fs::absolute(pack, ec).string() + "|" + std::to_string(static_cast<unsigned long long>(size)) + "|" + std::to_string(static_cast<long long>(when))) h = (h ^ c) * 1099511628211ull;
     char hex[17];
     std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
     return defaultTileCache().parent_path() / "places" / (pack.stem().string() + "-" + hex + ".tsv");
