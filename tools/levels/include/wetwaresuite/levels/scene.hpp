@@ -162,6 +162,8 @@ struct RenderOptions2D {
     std::optional<View2D> view;  // fixed view; otherwise fitted to the content
     bool helpers = true;         // collision shapes, cameras, markers
     std::string selected;        // node path drawn with a highlight
+    bool axes = true;            // the red and green lines through the origin
+    std::optional<raster::Color> background;  // default: the editor's grey; alpha 0 for a see-through layer
 };
 // Draws a 2D scene (instanced scenes included). `view` and `hits` say where things landed.
 raster::Image render2D(const Scene& s, const RenderOptions2D& options, View2D* view = nullptr, std::vector<Hit>* hits = nullptr);
@@ -173,9 +175,13 @@ int dimsOf(const Scene& s);
 // A starter GDScript for a class: kinds "empty", "character2d", "character3d", "area".
 std::string scriptTemplate(const std::string& base, const std::string& kind);
 
+class Play;  // scene_play.hpp
+
 class SceneDoc : public Document {
 public:
     Scene scene;
+    std::shared_ptr<Play> play;  // a running play test (scene.play_step), not saved or undone
+    std::size_t playEventsSeen = 0;
     fs::path file;  // the .tscn (Document::path holds the same, for titles)
     void setFile(const fs::path& f) {
         file = f;

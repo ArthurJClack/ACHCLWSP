@@ -15,7 +15,8 @@ Each task below is shown as a batch script (run with `wetwaresuite batch file.tx
 5. [Editing in the window](#5-editing-in-the-window)
 6. [Values you can type](#6-values-you-can-type)
 7. [Command reference](#7-command-reference)
-8. [Limitations](#8-limitations)
+8. [Play test without Godot](#8-play-test-without-godot)
+9. [Limitations](#9-limitations)
 
 ## 1. The ideas you need
 
@@ -200,6 +201,7 @@ Open a `.tscn` in the game app (File > Open), or start one with Start something 
 - **The Inspector** under it shows the selected node's properties grouped by the class they come from, greyed when they are still Godot's default. Tick boxes, colour swatches, drop-downs for choices and drag fields for numbers and vectors apply as soon as you let go; text fields (files, shapes, meshes, text) apply when you press Enter or click away. The name field at the top renames the node. At the bottom, **Attach script** writes a starter GDScript (empty, character2d, topdown2d, character3d or area) next to the scene, and **Groups** sets the node's groups.
 - **3D scenes** draw from an orbiting view: drag with Select to orbit, or use the turn and tilt sliders. Pick nodes in the Scene dock, then Move drags them across the ground (Shift: up and down), Rotate turns them about the vertical axis and Scale resizes them. **Camera view** looks through the Camera3D.
 - **Helpers** hides collision shapes, cameras and markers in 2D.
+- **Play** (F5) runs a 2D scene in the viewport; see [Play test without Godot](#8-play-test-without-godot).
 
 The buttons along the top (Add node, Instance scene, Add level, Attach script, Connect signal, Godot project, Save) open the full forms for those commands.
 
@@ -239,10 +241,44 @@ Several at once: `props="position=10,20; rotation=15; modulate=#ffd0d0"`. `scrip
 | `scene.connect` | Connect a signal to a method (`remove=true` disconnects); adds the method to the target's script when it's missing. |
 | `scene.preview` | The viewport picture: 2D fitted or a fixed view (`origin_x`, `origin_y`, `scale`, `width`, `height`), 3D orbit (`angle`, `tilt`) or `camera=true`; reports the selected node's box. |
 | `scene.hit` | Which 2D node is drawn at a world point. |
+| `scene.play` | Run a 2D scene for `seconds` with keys over time (`input=`); reports bodies and events, writes a `.gif` or `.png`. |
+| `scene.play_step` | Advance a live play test by one step with the `keys` held (`restart`, `stop`). |
 
-## 8. Limitations
+## 8. Play test without Godot
+
+A 2D scene can be run right here for a quick check, like pressing F6 in Godot. GDScript isn't run; instead the suite recognises the starter scripts it writes (and the ones Godot writes for a CharacterBody2D):
+
+- a script with `is_on_floor()` or gravity is a **platformer**: left and right move, Space or Up jumps. `SPEED` and `JUMP_VELOCITY` are read from the script.
+- a script with `Input.get_vector` is a **top-down** mover.
+- **RigidBody2D** falls (with `gravity_scale`) and lands; **StaticBody2D**, **AnimatableBody2D** and levels added with `scene.add_level` are solid (one-way platforms too).
+- **Area2D** reports bodies going in. When the method its `body_entered` signal is connected to calls `queue_free()`, the area goes away (coins and pickups); `body.queue_free()` frees the body and `$Name.queue_free()` that node.
+- the first enabled **Camera2D** frames the view (zoom, offset, limits) and **CanvasLayer** children (the HUD) stay put on screen.
+
+**In the window:** press **Play** on the scene toolbar (or **F5**). Arrow keys move, Space or Enter jumps, **Esc** (or Stop) ends it. Notes about what the test leaves out and the latest events show over the game.
+
+**As a batch script or for Claude:** `scene.play` runs for some seconds with keys held over times and reports where every body ended up:
+
+```text
+scene.open path=main.tscn -> scn
+scene.play doc=$scn seconds=6 input="right 0.3-2.2; jump 0.9; jump 1.6; right 2.6-4.5; jump 3.3" fps=15 scale=1 path=run.gif
+```
+
+```text
+played 6 s
+Player (CharacterBody2D): gone, last at 1074, 2224
+Crate (RigidBody2D): at 420, 152, on the floor
+1.07 s: Player entered Coin3 -> _on_body_entered(), Coin3 freed
+5.15 s: Player fell out of the level
+wrote run.gif
+```
+
+`path=` writes an animated `.gif` of the run (or a `.png` of the last frame), and the fields (`Player.x`, `Player.on_floor`, `events`, `freed`) make it easy to check a level in a script: "can the player reach the flag?". `scene.play_step keys=right,jump seconds=0.033` advances a live run one frame at a time (what the window does); `restart=true` starts over and `stop=true` ends it.
+
+> Play-test main.tscn: hold right for 3 seconds and jump at 1 second. Did the player pick up any coins? Show me the GIF.
+
+## 9. Limitations
 
 - The viewport draws with the suite's software renderer: no shaders, lighting or particles; 3D views are orthographic and only primitive meshes, `.obj`/`.glb` files and collision shapes draw.
-- There is no game running here: press Play in Godot. Scripts are written as starting points; editing them happens in the code app or Godot.
+- The play test is a quick check, not Godot: scripts other than the starter ones don't run (bodies with other scripts stand still and a note says so), shapes collide as their axis-aligned boxes, tiles are solid only when they come from a [levels](levels.md) map (a Godot TileSet's own physics isn't read), and 3D scenes don't play. Press Play in Godot for the real game. Scripts are written as starting points; editing them happens in the code app or Godot.
 - AnimationPlayer tracks, TileSet editing, theme resources and materials beyond a plain colour are kept when a file goes through, but not edited here (use [levels](levels.md) for tiles and [forge](forge.md) for sprite sheets).
 - 3D nodes can't be clicked in the viewport yet; pick them in the Scene dock.

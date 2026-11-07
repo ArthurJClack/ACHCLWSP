@@ -75,6 +75,8 @@ Other useful tools for this job:
 - `photo.levels doc=$pic black=10 white=240 gamma=1.2` for manual control: pixels at or below `black` become black, at or above `white` become white, and `gamma` above 1 lifts the midtones without touching the extremes.
 - `photo.adjust kind=gamma amount=1.3` brightens shadows and midtones only.
 - `photo.adjust kind=temperature amount=15` warms a cold indoor shot (negative values cool it down).
+- `photo.auto doc=$pic` is the one-click fix (Image > Auto in Photoshop): `kind=tone` (default) stretches each channel, `kind=contrast` stretches brightness only and keeps the colours, `kind=color` makes the brightest parts neutral to remove a colour cast, then stretches.
+- `photo.apply_adjustment doc=$pic type=shadows_highlights shadow_amount=40` lifts the shadows without touching the sky (`highlight_amount` pulls down bright areas, `radius` sets how local it is). `type=clarity amount=30` adds local contrast to midtones, and `type=dehaze amount=40` cuts haze and fog. All three also work as adjustment layers.
 - `photo.pick_color doc=$pic x=600 y=400` prints a pixel's colour, handy to check a highlight is not blown (`#ffffffff`).
 
 **CLI.** For a whole folder of dark photos, `photo.batch` has auto contrast built in:
@@ -115,6 +117,7 @@ Notes:
 - `photo.rotate` turns by any angle. Quarter turns (90, 180, 270, negative for counter-clockwise) are exact. To straighten a crooked horizon use a small angle with `fit=crop`, which cuts away the empty corners: `photo.rotate doc=$p angle=-2.5 fit=crop`. `fit=expand` (the default) grows the canvas instead and `fit=keep` keeps its size; `background=` colours the new corners.
 - `photo.canvas_size` keeps the pixels where `anchor` says (default `center`; also `top-left`, `bottom`, and so on) and fills the new area with transparency. Formats without transparency, such as JPEG, show it as white; the two `paint.layer_*` lines give it a colour instead. Photo and paint work on the same documents, so mixing them is normal.
 - Crop, resize, rotate, flip and canvas size apply to every layer, so layers stay aligned.
+- A document, sign or painting shot at an angle: `photo.crop_perspective doc=$p corners=212,140,1830,260,1760,1390,180,1240` takes the four corners (top-left, top-right, bottom-right, bottom-left) and straightens them into a rectangle, like Photoshop's Perspective Crop. `width=` and `height=` set the size, otherwise it comes from the edges.
 
 **Claude.**
 
@@ -406,6 +409,9 @@ An **adjustment layer** changes the look of every layer below it without touchin
 | `posterize` | `levels` 2..255 |
 | `threshold` | `level` 1..255 |
 | `gradient_map` | `colors` from shadows to highlights, `reverse` |
+| `shadows_highlights` | `shadow_amount` 0..100 (lift dark areas), `highlight_amount` 0..100 (recover bright areas), `radius` (px) |
+| `clarity` | `amount` -100..100 (local midtone contrast), `radius` (px) |
+| `dehaze` | `amount` -100..100 (negative adds haze) |
 | `selective_color` | `range` (the colours above plus `whites`, `neutrals`, `blacks`), `cyan`, `magenta`, `yellow`, `black` -100..100, `method` (`relative`, `absolute`) |
 
 **Batch.**
@@ -851,6 +857,12 @@ Clip `layer` to the layer below it (`on=false` unclips).
 
 ### photo.transform_box
 The box free transform starts from: the selection's bounds, or the layer's non-transparent pixels when nothing is selected. Read-only; returns `x0`, `y0`, `x1`, `y1`, `layer` and `selection` (true when it came from the selection). The window's transform handles use it; use it to work out `from=` for `photo.transform`.
+
+### photo.auto
+One-click fix. `kind` is `tone` (default: stretch each channel), `contrast` (stretch brightness, keep colours) or `color` (neutralise the brightest 2%, then stretch). Takes `layer`, `all_layers`, `preview`. Undoable.
+
+### photo.crop_perspective
+Crop to four corners and straighten them into a rectangle. `corners` (required) is x,y of top-left, top-right, bottom-right, bottom-left; `width` and `height` default to the edge lengths. Applies to every layer. Undoable.
 
 ### photo.adjustment_layer
 Add an adjustment layer above `layer` (default the active one). Takes `type` (required), `name`, `clip`, `opacity` and the settings for that type (see Task 9). With a selection, the layer is masked to it. Undoable.

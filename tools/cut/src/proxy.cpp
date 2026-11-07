@@ -62,7 +62,7 @@ fs::path proxyFileFor(const std::string& source) {
     std::error_code ec;
     const auto size = fs::file_size(source, ec);
     const auto when = fs::last_write_time(source, ec).time_since_epoch().count();
-    const std::string key = fs::absolute(source, ec).string() + "|" + std::to_string(size) + "|" + std::to_string(when);
+    const std::string key = fs::absolute(source, ec).string() + "|" + std::to_string(static_cast<unsigned long long>(size)) + "|" + std::to_string(static_cast<long long>(when));
     char hex[17];
     std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(fnv(key)));
     std::string stem = fs::path(source).stem().string().substr(0, 40);

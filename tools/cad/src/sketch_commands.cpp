@@ -3,6 +3,8 @@
 // writes the solved positions back, and reports how defined it is.
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <optional>
 
 #include "wetwaresuite/blueprint/blueprint.hpp"
 #include "wetwaresuite/raster/codec.hpp"
@@ -556,6 +558,7 @@ void registerSketchCommands(Session& session) {
 }
 
 void registerSketchEditCommands(Session& session);
+void registerSketchTrimCommands(Session& session);
 
 void registerSketchConstraintCommands(Session& session) {
     auto& reg = session.registry();
@@ -603,6 +606,7 @@ void registerSketchConstraintCommands(Session& session) {
                 return Result::success(id + " = " + c->value, id).with("constraint", id);
             }));
     registerSketchEditCommands(session);
+    registerSketchTrimCommands(session);
 }
 
 void registerSketchEditCommands(Session& session) {
@@ -870,6 +874,579 @@ void registerSketchEditCommands(Session& session) {
                     .with("n", NumberList{s.frame.n.x, s.frame.n.y, s.frame.n.z});
                 return r;
             }, false));
+}
+
+
+// ---- trim, extend, offset, mirror ------------------------------------------------------------
+
+namespace {
+
+// An entity's shape, read from its solved points.
+struct Curve {
+    std::string id, kind;  // line, circle, arc
+    Vec2 a, b;             // line ends
+    Vec2 c;                // circle / arc centre
+    double r = 0, a0 = 0, sweep = 2 * kPi;  // arcs: start angle and ccw sweep
+};
+
+double wrap2pi(double a) {
+    a = std::fmod(a, 2 * kPi);
+    return a < 0 ? a + 2 * kPi : a;
+}
+
+std::optional<Curve> curveOf(const Sketch& sk, const SketchEntity& e) {
+    auto P = [&](std::size_t i) {
+        const SketchPoint* q = sk.point(e.points[i]);
+        return q ? Vec2{q->x, q->y} : Vec2{};
+    };
+    Curve c;
+    c.id = e.id;
+    c.kind = e.kind;
+    if (e.kind == "line" && e.points.size() == 2) {
+        c.a = P(0), c.b = P(1);
+    } else if (e.kind == "circle" && !e.points.empty()) {
+        c.c = P(0), c.r = e.radius;
+    } else if (e.kind == "arc" && e.points.size() == 3) {
+        c.c = P(0);
+        const Vec2 s = P(1), t = P(2);
+        c.r = mesh::length(s - c.c);
+        c.a0 = std::atan2(s.y - c.c.y, s.x - c.c.x);
+        c.sweep = wrap2pi(std::atan2(t.y - c.c.y, t.x - c.c.x) - c.a0);
+        if (c.sweep < 1e-12) c.sweep = 2 * kPi;
+    } else {
+        return std::nullopt;
+    }
+    return c;
+}
+
+// Where a point sits along a curve: 0..1 on lines, radians from the start on arcs and circles.
+double paramOf(const Curve& c, Vec2 p) {
+    if (c.kind == "line") {
+        const Vec2 d = c.b - c.a;
+        return mesh::dot(p - c.a, d) / std::max(1e-300, mesh::dot(d, d));
+    }
+    return wrap2pi(std::atan2(p.y - c.c.y, p.x - c.c.x) - c.a0);
+}
+Vec2 pointOf(const Curve& c, double t) {
+    if (c.kind == "line") return c.a + (c.b - c.a) * t;
+    return c.c + Vec2{std::cos(c.a0 + t), std::sin(c.a0 + t)} * c.r;
+}
+// Whether a parameter is on the drawn part of the curve.
+bool onCurve(const Curve& c, double t, double tol = 1e-9) {
+    if (c.kind == "line") return t >= -tol && t <= 1 + tol;
+    if (c.kind == "circle") return true;
+    return t <= c.sweep + tol || t >= 2 * kPi - tol;
+}
+
+// Crossings of two curves as infinite lines / full circles.
+std::vector<Vec2> crossings(const Curve& p, const Curve& q) {
+    std::vector<Vec2> out;
+    auto lineCircle = [&](Vec2 a, Vec2 b, Vec2 c, double r) {
+        const Vec2 d = b - a, f = a - c;
+        const double A = mesh::dot(d, d), B = 2 * mesh::dot(f, d), C = mesh::dot(f, f) - r * r;
+        const double disc = B * B - 4 * A * C;
+        if (A < 1e-300 || disc < -1e-12 * std::max(1.0, B * B)) return;
+        const double s = std::sqrt(std::max(0.0, disc));
+        out.push_back(a + d * ((-B - s) / (2 * A)));
+        if (s > 1e-12) out.push_back(a + d * ((-B + s) / (2 * A)));
+    };
+    if (p.kind == "line" && q.kind == "line") {
+        const Vec2 d1 = p.b - p.a, d2 = q.b - q.a;
+        const double den = mesh::cross(d1, d2);
+        if (std::fabs(den) < 1e-12 * mesh::length(d1) * mesh::length(d2)) return out;
+        const double t = mesh::cross(q.a - p.a, d2) / den;
+        out.push_back(p.a + d1 * t);
+    } else if (p.kind == "line") {
+        lineCircle(p.a, p.b, q.c, q.r);
+    } else if (q.kind == "line") {
+        lineCircle(q.a, q.b, p.c, p.r);
+    } else {
+        const Vec2 d = q.c - p.c;
+        const double dist = mesh::length(d);
+        if (dist < 1e-12 || dist > p.r + q.r + 1e-9 || dist < std::fabs(p.r - q.r) - 1e-9) return out;
+        const double a = (p.r * p.r - q.r * q.r + dist * dist) / (2 * dist);
+        const double h = std::sqrt(std::max(0.0, p.r * p.r - a * a));
+        const Vec2 m = p.c + d * (a / dist), n{-d.y / dist, d.x / dist};
+        out.push_back(m + n * h);
+        if (h > 1e-12) out.push_back(m - n * h);
+    }
+    return out;
+}
+
+double distTo(const Curve& c, Vec2 p) {
+    if (c.kind == "line") {
+        const double t = std::clamp(paramOf(c, p), 0.0, 1.0);
+        return mesh::length(p - pointOf(c, t));
+    }
+    const double radial = std::fabs(mesh::length(p - c.c) - c.r);
+    if (c.kind == "circle" || onCurve(c, paramOf(c, p))) return radial;
+    return std::min(mesh::length(p - pointOf(c, 0)), mesh::length(p - pointOf(c, c.sweep)));
+}
+
+// The entity nearest to x,y (or the one named in entity=).
+SketchEntity* pickEntity(Sketch& sk, const Params& p, Vec2 at, bool needPoint) {
+    if (has(p, "entity")) {
+        SketchEntity* e = sk.entity(stringParam(p, "entity"));
+        if (!e) throw std::invalid_argument("the sketch has no entity '" + stringParam(p, "entity") + "'");
+        return e;
+    }
+    if (!needPoint) throw std::invalid_argument("give entity= or x,y near it");
+    SketchEntity* best = nullptr;
+    double bestD = 1e300;
+    for (auto& e : sk.entities) {
+        auto c = curveOf(sk, e);
+        if (!c) continue;
+        const double d = distTo(*c, at);
+        if (d < bestD) bestD = d, best = &e;
+    }
+    if (!best) throw std::invalid_argument("there's nothing to pick in the sketch");
+    return best;
+}
+
+bool pointUsed(const Sketch& sk, const std::string& pid, const std::string& except = {}) {
+    for (const auto& e : sk.entities) {
+        if (e.id == except) continue;
+        if (std::find(e.points.begin(), e.points.end(), pid) != e.points.end()) return true;
+    }
+    return false;
+}
+
+bool refers(const SketchConstraint& c, const std::string& what) {
+    for (const auto& r : c.refs) {
+        if (r == what || r.rfind(what + ".", 0) == 0) return true;
+    }
+    return false;
+}
+
+// Drops constraints on `what` of the given types (all when empty); returns their ids.
+std::string dropOn(Sketch& sk, const std::string& what, const std::vector<std::string>& types = {}) {
+    std::string gone;
+    sk.constraints.erase(std::remove_if(sk.constraints.begin(), sk.constraints.end(),
+                                        [&](const SketchConstraint& c) {
+                                            if (!refers(c, what)) return false;
+                                            if (!types.empty() && std::find(types.begin(), types.end(), c.type) == types.end()) return false;
+                                            gone += (gone.empty() ? "" : ",") + c.id;
+                                            return true;
+                                        }),
+                         sk.constraints.end());
+    return gone;
+}
+
+void dropPointIfLoose(Sketch& sk, const std::string& pid) {
+    if (pointUsed(sk, pid)) return;
+    dropOn(sk, pid);
+    sk.points.erase(std::remove_if(sk.points.begin(), sk.points.end(), [&](const SketchPoint& q) { return q.id == pid; }), sk.points.end());
+}
+
+void removeEntity(Sketch& sk, const std::string& id) {
+    const SketchEntity* e = sk.entity(id);
+    if (!e) return;
+    const auto pts = e->points;
+    sk.entities.erase(std::remove_if(sk.entities.begin(), sk.entities.end(), [&](const SketchEntity& x) { return x.id == id; }), sk.entities.end());
+    dropOn(sk, id);
+    for (const auto& pid : pts) dropPointIfLoose(sk, pid);
+}
+
+// A point at a crossing, held on the curve it was cut against.
+std::string cutPoint(const CadDoc& doc, Sketch& sk, Vec2 at, const std::string& against) {
+    const std::size_t before = sk.points.size();
+    const std::string id = pointAt(doc, sk, at.x, at.y);
+    if (sk.points.size() > before && !against.empty()) {
+        const SketchEntity* o = sk.entity(against);
+        if (o && std::find(o->points.begin(), o->points.end(), id) == o->points.end()) addConstraint(doc, sk, "coincident", {id, against});
+    }
+    return id;
+}
+
+// "point on curve" relations that became "point is the curve's end" say the same thing twice.
+void dropEndOnCurve(Sketch& sk) {
+    sk.constraints.erase(std::remove_if(sk.constraints.begin(), sk.constraints.end(),
+                                        [&](const SketchConstraint& c) {
+                                            if (c.type != "coincident" || c.refs.size() != 2) return false;
+                                            for (int k = 0; k < 2; ++k) {
+                                                const SketchEntity* e = sk.entity(c.refs[static_cast<std::size_t>(k)]);
+                                                const std::string& pid = c.refs[static_cast<std::size_t>(1 - k)];
+                                                if (!e || !sk.point(pid)) continue;
+                                                const auto first = e->kind == "arc" ? e->points.begin() + 1 : e->points.begin();
+                                                if (e->kind != "circle" && std::find(first, e->points.end(), pid) != e->points.end()) return true;
+                                            }
+                                            return false;
+                                        }),
+                         sk.constraints.end());
+}
+
+Vec2 reflect(Vec2 p, Vec2 a, Vec2 b) {
+    const Vec2 d = b - a;
+    const double t = mesh::dot(p - a, d) / std::max(1e-300, mesh::dot(d, d));
+    const Vec2 foot = a + d * t;
+    return foot * 2 - p;
+}
+
+}  // namespace
+
+void registerSketchTrimCommands(Session& session) {
+    auto& reg = session.registry();
+
+    reg.add({"cad.sketch_trim", "Trim Sketch",
+             "Cut away the piece of a line, arc or circle between the nearest places where other sketch geometry crosses "
+             "it, on the side you click (x,y), like Power Trim in SolidWorks. A piece with no crossings is deleted; a "
+             "circle cut twice becomes an arc. Cut ends stay on the geometry that cut them.",
+             with({str("x", "a point on the piece to remove", true), str("y", "y of that point", true),
+                   str("entity", "the entity to trim (default: the one nearest to x,y)")}),
+             true},
+            sketchCommand(session, [](CadDoc& doc, Feature&, Sketch& sk, const Params& p) {
+                const Vec2 at{evalRequired(doc, p, "x"), evalRequired(doc, p, "y")};
+                SketchEntity* e = pickEntity(sk, p, at, true);
+                const auto curve = curveOf(sk, *e);
+                if (!curve) return Result::failure(e->id + " is a " + e->kind + "; trim lines, arcs and circles");
+                const Curve c = *curve;
+                const std::string id = e->id;
+                const double tc = paramOf(c, at);
+                // every crossing with the rest of the sketch, as (parameter, the entity it crosses)
+                std::vector<std::pair<double, std::string>> cuts;
+                const double span = c.kind == "line" ? 1.0 : c.kind == "arc" ? c.sweep : 2 * kPi;
+                const double eps = 1e-9;
+                for (const auto& o : sk.entities) {
+                    if (o.id == id) continue;
+                    auto oc = curveOf(sk, o);
+                    if (!oc) continue;
+                    for (const Vec2& x : crossings(c, *oc)) {
+                        if (!onCurve(*oc, paramOf(*oc, x))) continue;
+                        double t = paramOf(c, x);
+                        if (c.kind == "arc" && t > c.sweep + 1e-9) continue;
+                        if (c.kind == "line" && (t < -1e-9 || t > 1 + 1e-9)) continue;
+                        if (c.kind != "circle" && (t <= eps || t >= span - eps)) continue;  // its own ends
+                        cuts.push_back({t, o.id});
+                    }
+                }
+                std::sort(cuts.begin(), cuts.end());
+                if (c.kind == "circle") {
+                    if (cuts.size() < 2) {
+                        removeEntity(sk, id);
+                        return Result::success("deleted " + id + " (fewer than two crossings)", id).with("deleted", true);
+                    }
+                    // the gap holding the click, going round: from `lo` (before it) to `hi` (after it)
+                    std::size_t hiI = 0;
+                    while (hiI < cuts.size() && cuts[hiI].first <= tc) ++hiI;
+                    const auto hi = cuts[hiI % cuts.size()], lo = cuts[(hiI + cuts.size() - 1) % cuts.size()];
+                    const std::string ps = cutPoint(doc, sk, pointOf(c, hi.first), hi.second);
+                    const std::string pe = cutPoint(doc, sk, pointOf(c, lo.first), lo.second);
+                    e = sk.entity(id);
+                    e->kind = "arc";
+                    e->points = {e->points[0], ps, pe};
+                    dropEndOnCurve(sk);
+                    return Result::success("trimmed " + id + " to an arc", id).with("entity", id);
+                }
+                const std::pair<double, std::string>* lo = nullptr;
+                const std::pair<double, std::string>* hi = nullptr;
+                for (const auto& k : cuts) {
+                    if (k.first < tc) lo = &k;
+                    else if (!hi) hi = &k;
+                }
+                if (!lo && !hi) {
+                    removeEntity(sk, id);
+                    return Result::success("deleted " + id + " (nothing crosses it)", id).with("deleted", true);
+                }
+                const std::string dropped = dropOn(sk, id, {"length", "distance", "radius", "diameter", "midpoint"});
+                const std::size_t first = c.kind == "line" ? 0 : 1, last = c.kind == "line" ? 1 : 2;
+                std::string made;
+                if (lo && hi) {
+                    // keep both ends: this entity ends at lo, a new one starts at hi
+                    const std::string pLo = cutPoint(doc, sk, pointOf(c, lo->first), lo->second);
+                    const std::string pHi = cutPoint(doc, sk, pointOf(c, hi->first), hi->second);
+                    e = sk.entity(id);
+                    const std::string oldEnd = e->points[last];
+                    SketchEntity piece = *e;
+                    piece.id = sk.newId(c.kind == "line" ? "l" : "a");
+                    piece.points[first] = pHi;
+                    piece.points[last] = oldEnd;
+                    e->points[last] = pLo;
+                    sk.entities.push_back(piece);
+                    made = piece.id;
+                    // relations that still hold for both halves
+                    std::vector<SketchConstraint> copies;
+                    for (const auto& k : sk.constraints) {
+                        if (k.refs.size() == 1 && k.refs[0] == id && (k.type == "horizontal" || k.type == "vertical")) copies.push_back(k);
+                    }
+                    for (auto k : copies) addConstraint(doc, sk, k.type, {made});
+                    if (c.kind == "arc") addConstraint(doc, sk, "concentric", {id, made}), addConstraint(doc, sk, "equal", {id, made});
+                    else addConstraint(doc, sk, "collinear", {id, made});
+                } else if (hi) {
+                    const std::string pHi = cutPoint(doc, sk, pointOf(c, hi->first), hi->second);
+                    e = sk.entity(id);
+                    const std::string old = e->points[first];
+                    e->points[first] = pHi;
+                    dropPointIfLoose(sk, old);
+                } else {
+                    const std::string pLo = cutPoint(doc, sk, pointOf(c, lo->first), lo->second);
+                    e = sk.entity(id);
+                    const std::string old = e->points[last];
+                    e->points[last] = pLo;
+                    dropPointIfLoose(sk, old);
+                }
+                dropEndOnCurve(sk);
+                Result r = Result::success("trimmed " + id + (made.empty() ? "" : ", split off " + made) + (dropped.empty() ? "" : " (dropped " + dropped + ")"), id);
+                return r.with("entity", id).with("new_entity", made).with("dropped", dropped);
+            }));
+
+    reg.add({"cad.sketch_extend", "Extend Sketch Line",
+             "Lengthen a line from one end until it meets the next sketch line, arc or circle in its way. The end nearest "
+             "x,y is extended (or end=start/end); a joined end can't be extended.",
+             with({str("entity", "the line (default: the one nearest to x,y)"), str("x", "near the end to extend"), str("y", "y of that point"),
+                   {"end", ParamType::String, "which end", false, {"nearest", "start", "end"}, std::string("nearest")}}),
+             true},
+            sketchCommand(session, [](CadDoc& doc, Feature&, Sketch& sk, const Params& p) {
+                const bool click = has(p, "x") && has(p, "y");
+                const Vec2 at = click ? Vec2{evalRequired(doc, p, "x"), evalRequired(doc, p, "y")} : Vec2{};
+                SketchEntity* e = pickEntity(sk, p, at, click);
+                if (e->kind != "line") return Result::failure(e->id + " is a " + e->kind + "; extend works on lines");
+                const Curve c = *curveOf(sk, *e);
+                std::string which = stringParam(p, "end", "nearest");
+                if (which == "nearest") which = click && mesh::length(at - c.a) < mesh::length(at - c.b) ? "start" : "end";
+                const std::size_t idx = which == "start" ? 0 : 1;
+                const std::string pid = e->points[idx];
+                if (pointUsed(sk, pid, e->id)) return Result::failure("that end of " + e->id + " is joined to other geometry");
+                double best = 1e300;
+                Vec2 hit;
+                std::string against;
+                for (const auto& o : sk.entities) {
+                    if (o.id == e->id) continue;
+                    auto oc = curveOf(sk, o);
+                    if (!oc) continue;
+                    for (const Vec2& x : crossings(c, *oc)) {
+                        if (!onCurve(*oc, paramOf(*oc, x), 1e-7)) continue;
+                        const double t = paramOf(c, x);
+                        const double beyond = idx == 1 ? t - 1 : -t;  // how far past the end, in line lengths
+                        if (beyond <= 1e-9 || beyond >= best) continue;
+                        best = beyond, hit = x, against = o.id;
+                    }
+                }
+                if (against.empty()) return Result::failure("nothing in the sketch is in the way of " + e->id + "'s " + which);
+                const std::string dropped = dropOn(sk, e->id, {"length"});
+                SketchPoint* q = sk.point(pid);
+                q->x = hit.x;
+                q->y = hit.y;
+                const std::string id = e->id;
+                addConstraint(doc, sk, "coincident", {pid, against});
+                return Result::success("extended " + id + " to " + against + (dropped.empty() ? "" : " (dropped " + dropped + ")"), id).with("entity", id).with("to", against);
+            }));
+
+    reg.add({"cad.sketch_offset", "Offset Sketch",
+             "Copy lines, arcs and circles at a distance, like Offset Entities: joined lines stay joined at the corners, "
+             "arcs and circles become concentric copies. On a closed loop a positive distance goes outward; otherwise "
+             "it goes to the left of the chain (negative flips it).",
+             with({str("entities", "entity ids, comma-separated (a chain or loop)", true), str("distance", "how far (expression)", true),
+                   boolean("construction", "make the copies construction geometry", false)}),
+             true},
+            sketchCommand(session, [](CadDoc& doc, Feature&, Sketch& sk, const Params& p) {
+                const double dist = evalRequired(doc, p, "distance");
+                if (std::fabs(dist) < 1e-12) return Result::failure("distance can't be 0");
+                std::vector<std::string> ids = splitList(stringParam(p, "entities"));
+                std::vector<SketchEntity> sel;
+                for (const auto& id : ids) {
+                    const SketchEntity* e = sk.entity(id);
+                    if (!e) return Result::failure("the sketch has no entity '" + id + "'");
+                    if (e->kind != "line" && e->kind != "arc" && e->kind != "circle") return Result::failure(id + " is a " + e->kind + "; offset lines, arcs and circles");
+                    sel.push_back(*e);
+                }
+                if (sel.empty()) return Result::failure("give entities to offset");
+                // order the open curves into a chain: (index, forwards)
+                auto ends = [](const SketchEntity& e) {
+                    return e.kind == "line" ? std::pair{e.points[0], e.points[1]} : std::pair{e.points[1], e.points[2]};
+                };
+                std::vector<std::pair<std::size_t, bool>> chain;
+                std::vector<bool> used(sel.size(), false);
+                std::vector<std::size_t> circles;
+                std::size_t open = 0;
+                for (std::size_t i = 0; i < sel.size(); ++i) {
+                    if (sel[i].kind == "circle") {
+                        circles.push_back(i);
+                        used[i] = true;
+                    } else {
+                        ++open;
+                    }
+                }
+                auto degree = [&](const std::string& pid) {
+                    int n = 0;
+                    for (std::size_t i = 0; i < sel.size(); ++i) {
+                        if (sel[i].kind == "circle") continue;
+                        const auto [a, b] = ends(sel[i]);
+                        n += (a == pid) + (b == pid);
+                    }
+                    return n;
+                };
+                if (open > 0) {
+                    // start at a free end when there is one
+                    std::size_t start = sel.size();
+                    bool fwd = true;
+                    for (std::size_t i = 0; i < sel.size() && start == sel.size(); ++i) {
+                        if (sel[i].kind == "circle") continue;
+                        const auto [a, b] = ends(sel[i]);
+                        if (degree(a) == 1) start = i, fwd = true;
+                        else if (degree(b) == 1) start = i, fwd = false;
+                    }
+                    if (start == sel.size()) {
+                        for (std::size_t i = 0; i < sel.size(); ++i) {
+                            if (sel[i].kind != "circle") {
+                                start = i;
+                                break;
+                            }
+                        }
+                    }
+                    chain.push_back({start, fwd});
+                    used[start] = true;
+                    for (;;) {
+                        const auto [i, f] = chain.back();
+                        const auto [a, b] = ends(sel[i]);
+                        const std::string tip = f ? b : a;
+                        bool found = false;
+                        for (std::size_t j = 0; j < sel.size() && !found; ++j) {
+                            if (used[j]) continue;
+                            const auto [c0, c1] = ends(sel[j]);
+                            if (c0 == tip) chain.push_back({j, true}), used[j] = found = true;
+                            else if (c1 == tip) chain.push_back({j, false}), used[j] = found = true;
+                        }
+                        if (!found) break;
+                    }
+                    if (chain.size() != open) return Result::failure("the lines and arcs must make one connected chain or loop");
+                }
+                auto P = [&](const std::string& id) {
+                    const SketchPoint* q = sk.point(id);
+                    return Vec2{q->x, q->y};
+                };
+                bool closed = false;
+                double side = 1;  // +1: offset to the right of the chain's direction
+                if (!chain.empty()) {
+                    const auto [ia, fa] = chain.front();
+                    const auto [ib, fb] = chain.back();
+                    const auto ea = ends(sel[ia]), eb = ends(sel[ib]);
+                    closed = chain.size() > 1 && (fa ? ea.first : ea.second) == (fb ? eb.second : eb.first);
+                    if (closed) {
+                        // signed area of the loop (arcs as their chords is enough to tell the turn)
+                        double area = 0;
+                        for (const auto& [i, f] : chain) {
+                            const auto [a, b] = ends(sel[i]);
+                            const Vec2 s = P(f ? a : b), t = P(f ? b : a);
+                            area += mesh::cross(s, t);
+                        }
+                        side = area > 0 ? 1 : -1;  // counter-clockwise: the right is outside
+                    } else {
+                        side = -1;  // open chains: positive goes left
+                    }
+                }
+                const double D = dist * side;  // to the right of the chain direction
+                const bool cons = boolParam(p, "construction", false);
+                // offset copies of each piece, as (start, end) positions along the chain
+                struct Piece {
+                    Vec2 s, e, c;
+                    double r = 0;
+                    bool line = true, fwd = true;
+                };
+                std::vector<Piece> pieces;
+                for (const auto& [i, f] : chain) {
+                    const SketchEntity& en = sel[i];
+                    Piece pc;
+                    pc.fwd = f;
+                    if (en.kind == "line") {
+                        const Vec2 a = P(f ? en.points[0] : en.points[1]), b = P(f ? en.points[1] : en.points[0]);
+                        const Vec2 d = (b - a) / std::max(1e-300, mesh::length(b - a));
+                        const Vec2 right{d.y, -d.x};
+                        pc.s = a + right * D;
+                        pc.e = b + right * D;
+                    } else {
+                        pc.line = false;
+                        pc.c = P(en.points[0]);
+                        const double r0 = mesh::length(P(en.points[1]) - pc.c);
+                        pc.r = r0 + (f ? D : -D);  // walking an arc forwards (ccw), its right is away from the centre
+                        if (pc.r <= 1e-9) return Result::failure("the offset is bigger than the radius of " + en.id);
+                        const Vec2 s = P(f ? en.points[1] : en.points[2]), t = P(f ? en.points[2] : en.points[1]);
+                        pc.s = pc.c + (s - pc.c) * (pc.r / r0);
+                        pc.e = pc.c + (t - pc.c) * (pc.r / r0);
+                    }
+                    pieces.push_back(pc);
+                }
+                // corners between two lines meet where their offsets cross
+                auto meet = [&](std::size_t k, std::size_t m) {
+                    Piece &A = pieces[k], &B = pieces[m];
+                    if (!A.line || !B.line) return;
+                    const Vec2 d1 = A.e - A.s, d2 = B.e - B.s;
+                    const double den = mesh::cross(d1, d2);
+                    if (std::fabs(den) < 1e-12 * mesh::length(d1) * mesh::length(d2)) return;
+                    const Vec2 x = A.s + d1 * (mesh::cross(B.s - A.s, d2) / den);
+                    A.e = x;
+                    B.s = x;
+                };
+                for (std::size_t k = 0; k + 1 < pieces.size(); ++k) meet(k, k + 1);
+                if (closed && pieces.size() > 1) meet(pieces.size() - 1, 0);
+                std::string made;
+                for (std::size_t k = 0; k < pieces.size(); ++k) {
+                    const Piece& pc = pieces[k];
+                    const SketchEntity& src = sel[chain[k].first];
+                    const std::string a = pointAt(doc, sk, pc.s.x, pc.s.y), b = pointAt(doc, sk, pc.e.x, pc.e.y);
+                    std::string id;
+                    if (pc.line) {
+                        id = addLine(doc, sk, pc.fwd ? a : b, pc.fwd ? b : a, cons, false);
+                        addConstraint(doc, sk, "parallel", {src.id, id});
+                    } else {
+                        const std::string c = pointAt(doc, sk, pc.c.x, pc.c.y);
+                        SketchEntity arc{sk.newId("a"), "arc", {c, pc.fwd ? a : b, pc.fwd ? b : a}, 0, cons, false};
+                        sk.entities.push_back(arc);
+                        id = arc.id;
+                    }
+                    made += (made.empty() ? "" : ",") + id;
+                }
+                for (std::size_t i : circles) {
+                    const SketchEntity& src = sel[i];
+                    const double r = src.radius + dist;
+                    if (r <= 1e-9) return Result::failure("the offset is bigger than the radius of " + src.id);
+                    SketchEntity circle{sk.newId("c"), "circle", {src.points[0]}, r, cons, false};
+                    sk.entities.push_back(circle);
+                    made += (made.empty() ? "" : ",") + circle.id;
+                }
+                return Result::success("offset " + std::to_string(sel.size()) + " item" + (sel.size() == 1 ? "" : "s") + " by " + text(p, "distance") + ": " + made, made)
+                    .with("entities", made);
+            }));
+
+    reg.add({"cad.sketch_mirror", "Mirror Sketch",
+             "Mirror lines, arcs, circles, splines and points about a line (often a construction centreline): the copies "
+             "are tied to the originals with symmetric relations, so editing one side moves the other.",
+             with({str("entities", "entity or point ids, comma-separated", true), str("about", "the line to mirror about", true)}), true},
+            sketchCommand(session, [](CadDoc& doc, Feature&, Sketch& sk, const Params& p) {
+                const SketchEntity* axis = sk.entity(stringParam(p, "about"));
+                if (!axis || axis->kind != "line") return Result::failure("about= must be a line of the sketch");
+                const std::string axisId = axis->id;
+                const Vec2 a{sk.point(axis->points[0])->x, sk.point(axis->points[0])->y}, b{sk.point(axis->points[1])->x, sk.point(axis->points[1])->y};
+                std::map<std::string, std::string> twin;  // point -> its mirror
+                auto mirrorPoint = [&](const std::string& pid) {
+                    if (auto it = twin.find(pid); it != twin.end()) return it->second;
+                    const SketchPoint* q = sk.point(pid);
+                    const Vec2 m = reflect({q->x, q->y}, a, b);
+                    const std::string id = pointAt(doc, sk, m.x, m.y);
+                    twin[pid] = id;
+                    if (id != pid) addConstraint(doc, sk, "symmetric", {pid, id, axisId});
+                    return id;
+                };
+                std::string made;
+                for (const auto& id : splitList(stringParam(p, "entities"))) {
+                    if (id == axisId) continue;
+                    if (sk.point(id)) {
+                        made += (made.empty() ? "" : ",") + mirrorPoint(id);
+                        continue;
+                    }
+                    const SketchEntity* e = sk.entity(id);
+                    if (!e) return Result::failure("the sketch has no entity or point '" + id + "'");
+                    SketchEntity copy = *e;
+                    copy.id = sk.newId(e->kind == "line" ? "l" : e->kind == "circle" ? "c" : e->kind == "arc" ? "a" : "s");
+                    for (auto& pid : copy.points) pid = mirrorPoint(pid);
+                    if (copy.kind == "arc") std::swap(copy.points[1], copy.points[2]);  // a mirror turns counter-clockwise into clockwise
+                    if (copy.kind == "line" && copy.points[0] == copy.points[1]) continue;
+                    sk.entities.push_back(copy);
+                    if (copy.kind == "circle" || copy.kind == "arc") addConstraint(doc, sk, "equal", {id, copy.id});
+                    made += (made.empty() ? "" : ",") + copy.id;
+                }
+                if (made.empty()) return Result::failure("nothing to mirror");
+                return Result::success("mirrored about " + axisId + ": " + made, made).with("entities", made);
+            }));
 }
 
 }  // namespace wetwaresuite::cad

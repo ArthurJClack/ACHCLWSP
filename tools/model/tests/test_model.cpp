@@ -328,6 +328,25 @@ int main() {
         }
         CHECK(run(s, "model.modifier_apply", with(d3, "all", true)).ok);
         CHECK(docIn(s, "model3")->object("Sphere")->modifiers.empty() && stats(meshNamed(s, "Sphere", "model3")).quads == 0);
+        // wireframe: every edge of a cube becomes a beam; screw: a ring of edges spun into a closed tube
+        CHECK(run(s, "model.add", with(with(d3, "type", std::string("cube")), "location", NumberList{0, 0, 8})).ok);
+        CHECK(run(s, "model.modifier_add", with(with(d3, "type", std::string("wireframe")), "thickness", 0.05)).ok);
+        {
+            auto d = docIn(s, "model3");
+            const PolyMesh m = evaluate(*d, *d->activeObject());
+            CHECK(m.faces.size() == 12 * 6 && d->evaluated(d->scene.active).errors.empty());
+        }
+        CHECK(run(s, "model.add", with(with(with(with(d3, "type", std::string("circle")), "fill", std::string("none")), "vertices", std::int64_t{8}),
+                                       "location", NumberList{0, 0, 12})).ok);
+        CHECK(run(s, "model.modifier_add", with(with(with(with(d3, "type", std::string("screw")), "axis", std::string("y")), "segments", std::int64_t{12}),
+                                       "angle", 180.0)).ok);
+        {
+            auto d = docIn(s, "model3");
+            const PolyMesh m = evaluate(*d, *d->activeObject());
+            // half a turn about the circle's own diameter sweeps a sphere once: 8 edges x 12 steps
+            CHECK(m.faces.size() == 8 * 12 && d->evaluated(d->scene.active).errors.empty());
+        }
+        CHECK(!run(s, "model.modifier_set", with(d3, "axis", std::string("w"))).ok);
     }
 
     // ---- objects: linked duplicates, join, parent, apply transform, origin, collections ----

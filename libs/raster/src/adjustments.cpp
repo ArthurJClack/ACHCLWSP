@@ -108,6 +108,12 @@ const std::map<std::string, std::vector<AdjustmentField>>& fieldTable() {
           flag("monochrome", "false", "same noise on every channel"), num("seed", 0, 1e9, "1", "random seed")}},
         {"oil_paint", {num("radius", 1, 20, "3", "brush size 1..20")}},
         {"find_edges", {}},
+        // local tone
+        {"shadows_highlights",
+         {num("shadow_amount", 0, 100, "35", "lift dark areas 0..100"), num("highlight_amount", 0, 100, "0", "bring down bright areas 0..100"),
+          num("radius", 1, 250, "30", "how big an area counts as dark or bright, px")}},
+        {"clarity", {num("amount", -100, 100, "30", "midtone contrast -100..100 (negative softens)"), num("radius", 1, 250, "40", "detail size, px")}},
+        {"dehaze", {num("amount", -100, 100, "40", "remove haze -100..100 (negative adds it)")}},
     };
     return t;
 }
@@ -419,6 +425,120 @@ void selectiveColor(Image& img, const Settings& s) {
 float toLinear(float v) { return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f); }
 float toSrgb(float v) { return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1 / 2.4f) - 0.055f; }
 
+// Brightness 0..1 of every pixel, and the same blurred over `radius` (the area around it).
+void lumaPair(const Image& img, double radius, std::vector<float>& L, std::vector<float>& B) {
+    const int w = img.width(), h = img.height();
+    const std::size_t n = static_cast<std::size_t>(w) * h;
+    L.resize(n);
+    Image g(w, h, Color{0, 0, 0, 255});
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const Color c = img.at(x, y);
+            const float l = (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) / 255.0f;
+            L[static_cast<std::size_t>(y) * w + x] = l;
+            const auto v = static_cast<std::uint8_t>(std::lround(l * 255));
+            g.set(x, y, Color{v, v, v, 255});
+        }
+    }
+    gaussianBlur(g, radius);
+    B.resize(n);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) B[static_cast<std::size_t>(y) * w + x] = g.at(x, y).r / 255.0f;
+}
+
+void shadowsHighlights(Image& img, double shadows, double highlights, double radius) {
+    std::vector<float> L, B;
+    lumaPair(img, radius, L, B);
+    const float s = static_cast<float>(shadows / 100), hl = static_cast<float>(highlights / 100);
+    const int w = img.width();
+    parallelRows(img.height(), static_cast<std::size_t>(w) * 8, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                const float l = L[i], b = B[i];
+                const float ws = (1 - b) * (1 - b), wh = b * b;
+                // dark surroundings: brighten towards a gamma lift; bright ones: pull down
+                float target = l + s * ws * (std::sqrt(l) - l) * 1.6f - hl * wh * (l - l * l) * 1.6f;
+                target = std::clamp(target, 0.0f, 1.0f);
+                const float k = l > 1e-3f ? std::min(4.0f, target / l) : 1.0f + s * 3;
+                Color c = img.at(x, y);
+                auto mix = [&](std::uint8_t v) {
+                    const float add = l <= 1e-3f ? target * 255 : 0;
+                    return clamp8(v * k + add);
+                };
+                c.r = mix(c.r), c.g = mix(c.g), c.b = mix(c.b);
+                img.set(x, y, c);
+            }
+        }
+    });
+}
+
+void clarity(Image& img, double amount, double radius) {
+    std::vector<float> L, B;
+    lumaPair(img, radius, L, B);
+    const float a = static_cast<float>(amount / 100) * 1.5f;
+    const int w = img.width();
+    parallelRows(img.height(), static_cast<std::size_t>(w) * 8, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                const float l = L[i];
+                const float mid = 1 - (2 * l - 1) * (2 * l - 1);  // midtones most, black and white not at all
+                const float d = a * (l - B[i]) * mid * 255;
+                Color c = img.at(x, y);
+                c.r = clamp8(c.r + d), c.g = clamp8(c.g + d), c.b = clamp8(c.b + d);
+                img.set(x, y, c);
+            }
+        }
+    });
+}
+
+// Dark channel prior, simplified: haze is the light that fills in the darkest channel.
+void dehaze(Image& img, double amount) {
+    const int w = img.width(), h = img.height();
+    if (w == 0 || h == 0) return;
+    const float a = static_cast<float>(std::clamp(amount, -100.0, 100.0) / 100);
+    // the haze colour: the average of the brightest 0.1% of the dark channel
+    std::vector<std::pair<int, int>> dark;
+    dark.reserve(static_cast<std::size_t>(w) * h);
+    Image dc(w, h, Color{0, 0, 0, 255});
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const Color c = img.at(x, y);
+            const std::uint8_t m = std::min({c.r, c.g, c.b});
+            dc.set(x, y, Color{m, m, m, 255});
+            dark.push_back({m, y * w + x});
+        }
+    }
+    const std::size_t top = std::max<std::size_t>(1, dark.size() / 1000);
+    std::nth_element(dark.begin(), dark.begin() + static_cast<std::ptrdiff_t>(top), dark.end(), [](auto p, auto q) { return p.first > q.first; });
+    double ar = 0, ag = 0, ab = 0;
+    for (std::size_t i = 0; i < top; ++i) {
+        const Color c = img.at(dark[i].second % w, dark[i].second / w);
+        ar += c.r, ag += c.g, ab += c.b;
+    }
+    const float A[3] = {static_cast<float>(std::max(1.0, ar / top)), static_cast<float>(std::max(1.0, ag / top)), static_cast<float>(std::max(1.0, ab / top))};
+    gaussianBlur(dc, std::max(3.0, std::min(w, h) / 60.0));
+    parallelRows(h, static_cast<std::size_t>(w) * 8, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                Color c = img.at(x, y);
+                const float amin = std::min({A[0], A[1], A[2]});
+                const float d = dc.at(x, y).r / amin;
+                float v[3] = {static_cast<float>(c.r), static_cast<float>(c.g), static_cast<float>(c.b)};
+                if (a >= 0) {
+                    const float t = std::max(0.15f, 1 - 0.95f * a * d);
+                    for (int k = 0; k < 3; ++k) v[k] = (v[k] - A[k]) / t + A[k];
+                } else {
+                    for (int k = 0; k < 3; ++k) v[k] = v[k] * (1 + a * 0.6f) - a * 0.6f * A[k];
+                }
+                c.r = clamp8(v[0]), c.g = clamp8(v[1]), c.b = clamp8(v[2]);
+                img.set(x, y, c);
+            }
+        }
+    });
+}
+
 }  // namespace
 
 const std::vector<std::string>& selectiveColorRanges() {
@@ -431,7 +551,8 @@ const std::vector<std::string>& adjustmentLayerTypes() {
                                                "hue_saturation",      "color_balance", "black_white", "photo_filter",  "channel_mixer",
                                                "invert",              "posterize",  "threshold",     "gradient_map",   "selective_color",
                                                "gaussian_blur",       "motion_blur", "sharpen",      "high_pass",      "median",
-                                               "noise",               "oil_paint",  "find_edges"};
+                                               "noise",               "oil_paint",  "find_edges",    "shadows_highlights", "clarity",
+                                               "dehaze"};
     return t;
 }
 
@@ -646,6 +767,12 @@ void applyAdjustment(Image& img, const std::string& type, const Settings& s) {
         oilPaint(img, static_cast<int>(numberOf(type, s, "radius")));
     } else if (type == "find_edges") {
         findEdges(img);
+    } else if (type == "shadows_highlights") {
+        shadowsHighlights(img, numberOf(type, s, "shadow_amount"), numberOf(type, s, "highlight_amount"), numberOf(type, s, "radius"));
+    } else if (type == "clarity") {
+        clarity(img, numberOf(type, s, "amount"), numberOf(type, s, "radius"));
+    } else if (type == "dehaze") {
+        dehaze(img, numberOf(type, s, "amount"));
     }
 }
 

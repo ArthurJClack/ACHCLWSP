@@ -1,4 +1,4 @@
-add_library(wetwaresuite_levels src/model.cpp src/io.cpp src/commands.cpp src/scene_model.cpp src/scene_render.cpp src/scene_commands.cpp)
+add_library(wetwaresuite_levels src/model.cpp src/io.cpp src/commands.cpp src/scene_model.cpp src/scene_render.cpp src/scene_commands.cpp src/scene_play.cpp)
 add_library(wetwaresuite::levels ALIAS wetwaresuite_levels)
 target_include_directories(wetwaresuite_levels PUBLIC include PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 target_link_libraries(wetwaresuite_levels PUBLIC wetwaresuite::core wetwaresuite::raster PRIVATE wetwaresuite::mesh wetwaresuite::pdf nlohmann_json::nlohmann_json)

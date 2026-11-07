@@ -366,7 +366,20 @@ void testBake(Session& s, const fs::path& dir) {
     CHECK(px(b.normalMap, 32, 20)[1] > 160);
     // the floor next to the dome sees less sky than the open corner
     CHECK(px(b.aoMap, 4, 4)[0] > 230);
-    CHECK(px(b.aoMap, 32 + 17, 32)[0] < px(b.aoMap, 4, 4)[0] - 20);
+    {
+        // averaged over a ring of texels around the dome: one texel with 32 rays is too noisy to test
+        double ring = 0;
+        int count = 0;
+        for (int k = 0; k < 4; ++k)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int cx = 32 + (k == 0 ? 17 : k == 1 ? -17 : 0), cy = 32 + (k == 2 ? 17 : k == 3 ? -17 : 0);
+                    ring += px(b.aoMap, cx + dx, cy + dy)[0];
+                    ++count;
+                }
+        ring /= count;
+        CHECK(ring < px(b.aoMap, 4, 4)[0] - 20);
+    }
     CHECK(px(b.aoMap, 32, 32)[0] > 230);  // the dome's top is open
     // no UVs: a clear message
     mesh::Mesh bare = mesh::plane(2, 2, 1, 1);

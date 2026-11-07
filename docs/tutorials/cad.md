@@ -997,6 +997,17 @@ it later, and patterns and mirrors of a sketch cut repeat the cut.
 - `cad.sketch_polygon`, `cad.sketch_slot`, `cad.sketch_spline` and
   `cad.sketch_arc mode=three_point` cover the other common shapes.
 - `cad.sketch_arc tangent=l2` makes an arc tangent to a line where it starts.
+- `cad.sketch_trim sketch=base x=12 y=0` cuts away the piece of a line, arc or
+  circle between the nearest crossings, on the side you click (Power Trim). A
+  piece with no crossings is deleted, a circle cut twice becomes an arc, and the
+  cut ends stay coincident with what cut them.
+- `cad.sketch_extend sketch=base entity=l3 end=end` lengthens a line to the next
+  geometry in its way.
+- `cad.sketch_offset sketch=base entities=l1,l2,l3,l4 distance=2` copies a chain
+  or loop at a distance (outward on a closed loop), corners still joined, with
+  parallel relations to the originals; `construction=true` for guide lines.
+- `cad.sketch_mirror sketch=base entities=l1,a2 about=l9` mirrors geometry about
+  a line with symmetric relations, so editing one side moves the other.
 
 ### from the shell
 
@@ -1042,6 +1053,9 @@ While a sketch is open in the view:
 - **Select** (S): drag any point and the sketch follows its relations and
   dimensions as you drag (each step is a `cad.sketch_move`; letting go keeps it,
   one Ctrl+Z puts it back). Points that are fully defined don't move.
+- **Trim** (T): click the piece of a line, arc or circle to cut away, up to
+  where other lines cross it. Offset, mirror and extend are in the Sketch
+  group of the ribbon.
 - **Dimension** (D): click a line for its length, a circle for its diameter (an
   arc for its radius), or two points for the distance between them, then type
   the value. A formula like `width/2` works too.
@@ -2115,6 +2129,51 @@ Round the corner where two lines meet at a point with an arc of radius: the line
 | `sketch` | yes |  | name of a sketch feature, e.g. sketch1 (cad.sketch makes one) |
 | `point` | yes |  | the corner point (e.g. p3 or l1.end) |
 | `radius` | yes |  | fillet radius |
+
+#### `cad.sketch_trim`: Trim Sketch
+
+Cut away the piece of a line, arc or circle between the nearest places where other sketch geometry crosses it, on the side you click (x,y), like Power Trim in SolidWorks. A piece with no crossings is deleted; a circle cut twice becomes an arc. Cut ends stay on the geometry that cut them.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `sketch` | yes |  | name of a sketch feature, e.g. sketch1 (cad.sketch makes one) |
+| `x` | yes |  | a point on the piece to remove |
+| `y` | yes |  | y of that point |
+| `entity` |  |  | the entity to trim (default: the one nearest to x,y) |
+
+#### `cad.sketch_extend`: Extend Sketch Line
+
+Lengthen a line from one end until it meets the next sketch line, arc or circle in its way. The end nearest x,y is extended (or end=start/end); a joined end can't be extended.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `sketch` | yes |  | name of a sketch feature, e.g. sketch1 (cad.sketch makes one) |
+| `entity` |  |  | the line (default: the one nearest to x,y) |
+| `x` |  |  | near the end to extend |
+| `y` |  |  | y of that point |
+| `end` |  | `nearest` | which end [nearest\|start\|end] |
+
+#### `cad.sketch_offset`: Offset Sketch
+
+Copy lines, arcs and circles at a distance, like Offset Entities: joined lines stay joined at the corners, arcs and circles become concentric copies. On a closed loop a positive distance goes outward; otherwise it goes to the left of the chain (negative flips it).
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `sketch` | yes |  | name of a sketch feature, e.g. sketch1 (cad.sketch makes one) |
+| `entities` | yes |  | entity ids, comma-separated (a chain or loop) |
+| `distance` | yes |  | how far (expression) |
+| `construction` |  | `false` | make the copies construction geometry |
+
+#### `cad.sketch_mirror`: Mirror Sketch
+
+Mirror lines, arcs, circles, splines and points about a line (often a construction centreline): the copies are tied to the originals with symmetric relations, so editing one side moves the other.
+
+| param | required | default | meaning |
+|---|---|---|---|
+| `sketch` | yes |  | name of a sketch feature, e.g. sketch1 (cad.sketch makes one) |
+| `entities` | yes |  | entity or point ids, comma-separated |
+| `about` | yes |  | the line to mirror about |
+
 
 #### `cad.sketch_move`: Move Sketch Point
 

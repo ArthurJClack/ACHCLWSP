@@ -14,19 +14,19 @@ namespace {
 
 std::vector<ParamSpec> settingParams() {
     return {{"levels", ParamType::Int, "subsurf: subdivision levels", false},
-            {"count", ParamType::Int, "array: copies", false},
+            {"count", ParamType::Int, "array: copies; screw: turns", false},
             {"relative", ParamType::NumberList, "array: offset as a factor of the size, x,y,z", false},
             {"constant", ParamType::NumberList, "array: offset in units, x,y,z", false},
             {"merge", ParamType::Bool, "mirror/array: weld touching vertices", false},
             {"distance", ParamType::Number, "mirror/array/weld: merge distance", false},
-            {"axis", ParamType::String, "mirror: axes, e.g. x, xy, xyz", false},
+            {"axis", ParamType::String, "mirror: axes, e.g. x, xy, xyz; screw: the axis to spin round", false},
             {"bisect", ParamType::Bool, "mirror: cut away what's past the mirror plane first", false},
-            {"thickness", ParamType::Number, "solidify: thickness", false},
-            {"offset", ParamType::Number, "solidify: -1 grows inward, 1 outward, 0 both", false},
+            {"thickness", ParamType::Number, "solidify/wireframe: thickness", false},
+            {"offset", ParamType::Number, "solidify: -1 grows inward, 1 outward, 0 both; screw: rise per turn", false},
             {"rim", ParamType::Bool, "solidify: close the rim", false},
             {"width", ParamType::Number, "bevel: width", false},
-            {"segments", ParamType::Int, "bevel: segments", false},
-            {"angle", ParamType::Number, "bevel: only edges sharper than this; decimate planar: angle", false},
+            {"segments", ParamType::Int, "bevel: segments; screw: steps per turn", false},
+            {"angle", ParamType::Number, "bevel: only edges sharper than this; decimate planar: angle; screw: degrees per turn", false},
             {"limit", ParamType::String, "bevel: which edges", false, {"angle", "none"}},
             {"cutter", ParamType::String, "boolean: the other object", false},
             {"operation", ParamType::String, "boolean: operation", false, {"difference", "union", "intersect"}},
@@ -75,6 +75,8 @@ void applySettings(Modifier& m, const Params& p) {
     if (has(p, "decimate")) setText("decimate", "mode", stringParam(p, "decimate"));
     if (has(p, "enabled")) m.enabled = boolParam(p, "enabled");
     if (has(p, "name")) m.name = stringParam(p, "name");
+    if (m.type == "screw" && (m.str("axis", "z").size() != 1 || std::string("xyz").find(m.str("axis", "z")) == std::string::npos))
+        throw std::runtime_error("screw axis is x, y or z");
     if (m.type == "mirror")
         for (char c : m.str("axis", "x"))
             if (c != 'x' && c != 'y' && c != 'z') throw std::runtime_error("axis is made of x, y and z");
@@ -142,7 +144,8 @@ void registerModifierCommands(Session& session) {
                  "mirror axis/merge/distance/bisect; array count/relative/constant/merge; subsurf levels (Catmull-Clark); "
                  "solidify thickness/offset/rim; bevel width/segments/angle/limit; boolean cutter/operation (the cutter is "
                  "hidden unless hide=false); decimate ratio or decimate=planar angle; smooth factor/repeat; displace "
-                 "strength/midlevel/scale/seed or texture=; weld distance.",
+                 "strength/midlevel/scale/seed or texture=; weld distance; wireframe thickness (every edge a beam); screw axis/angle/"
+                 "segments (steps)/offset (rise per turn)/count (turns), a lathe for profiles and springs.",
              withDoc(join({objectParam(), {"type", ParamType::String, "modifier type", true, modifierTypes()}}, settingParams())),
              true},
             edit(session, [](ModelDoc& d, const Params& p) {

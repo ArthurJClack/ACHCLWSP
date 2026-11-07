@@ -1,6 +1,6 @@
 find_package(Threads REQUIRED)
 include(${PROJECT_SOURCE_DIR}/cmake/webp.cmake)
-add_library(wetwaresuite_raster src/image.cpp src/codec.cpp src/ops.cpp src/paint.cpp src/ora.cpp src/document.cpp src/parallel.cpp
+add_library(wetwaresuite_raster src/image.cpp src/codec.cpp src/gif.cpp src/ops.cpp src/paint.cpp src/ora.cpp src/document.cpp src/parallel.cpp
             src/pyramid.cpp src/selection.cpp src/tiff.cpp src/webp.cpp src/composite.cpp src/adjustments.cpp src/styles.cpp src/psd.cpp
             src/retouch.cpp src/filters.cpp src/color_profile.cpp src/raw.cpp)
 add_library(wetwaresuite::raster ALIAS wetwaresuite_raster)

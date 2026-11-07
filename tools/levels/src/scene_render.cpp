@@ -372,10 +372,10 @@ Image render2D(const Scene& s, const RenderOptions2D& options, View2D* viewOut, 
         v.height = std::max(16, static_cast<int>(std::ceil((y1 - y0) * v.scale)));
         v.originX = x0, v.originY = y0;
     }
-    Image img(v.width, v.height, Color{77, 77, 82, 255});
+    Image img(v.width, v.height, options.background.value_or(Color{77, 77, 82, 255}));
     auto toScreen = [&](double x, double y) { return std::array<double, 2>{(x - v.originX) * v.scale, (y - v.originY) * v.scale}; };
     // world axes, like Godot's red and green lines through the origin
-    {
+    if (options.axes) {
         const auto o = toScreen(0, 0);
         if (o[1] >= 0 && o[1] < v.height) raster::drawLine(img, 0, o[1], v.width, o[1], Color{200, 70, 70, 140}, 1);
         if (o[0] >= 0 && o[0] < v.width) raster::drawLine(img, o[0], 0, o[0], v.height, Color{70, 180, 70, 140}, 1);

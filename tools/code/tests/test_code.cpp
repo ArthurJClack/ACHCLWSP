@@ -327,7 +327,13 @@ int main() {
         CHECK(!refused.ok && refused.message.find("git_pull first") != std::string::npos);
         Result conflict = s.run("code.git_pull", {{"folder", folder}});
         CHECK(conflict.ok && field(conflict, "conflicts") == "1" && field(conflict, "rows") == "a.txt\n");
-        CHECK(s.run("code.git_merge", {{"folder", folder}, {"abort", true}}).ok && sysutil::readFile(repo / "a.txt") == "ours\n");
+        CHECK(s.run("code.git_merge", {{"folder", folder}, {"abort", true}}).ok);
+        {
+            // git puts the file back itself here, so on windows (core.autocrlf) it comes back with \r\n
+            std::string back = sysutil::readFile(repo / "a.txt");
+            std::erase(back, '\r');
+            CHECK(back == "ours\n");
+        }
         // merge a local branch in (fast-forward), then resolve a real conflict by hand
         CHECK(s.run("code.git_switch", {{"folder", folder}, {"branch", std::string("side")}, {"create", true}}).ok);
         sysutil::writeFile(repo / "d.txt", "d\n");
