@@ -229,9 +229,11 @@ BakeResult bakeMaps(const Mesh& low, const Mesh& high, const BakeOptions& o) {
 
     std::atomic<std::size_t> missed{0}, texels{0};
     auto work = [&](int row0, int step) {
-        std::mt19937 rng(static_cast<unsigned>(row0 * 7919 + 17));
+        std::mt19937 rng;
         std::uniform_real_distribution<double> uni(0.0, 1.0);
         for (int y = row0; y < size; y += step) {
+            // seeded per row, so the bake is the same whatever the number of cores
+            rng.seed(static_cast<unsigned>(y * 7919 + 17));
             for (int x = 0; x < size; ++x) {
                 const std::size_t i = static_cast<std::size_t>(y) * size + x;
                 if (owner[i] < 0) continue;
